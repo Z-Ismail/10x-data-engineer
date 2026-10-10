@@ -1,0 +1,8 @@
+{
+  "name": "tenx",
+  "version": "0.0.1",
+  "description": "An AI data engineering team that builds tested dbt projects on DuckDB from raw data.",
+  "author": { "name": "Zak Ismail" },
+  "license": "MIT",
+  "keywords": ["dbt", "duckdb", "data-engineering", "multi-agent"]
+}

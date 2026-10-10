@@ -1,0 +1,27 @@
+[project]
+name = "tenx"
+version = "0.0.1"
+description = "A multi-agent data engineering crew for dbt and DuckDB"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Zak Ismail" }]
+dependencies = []
+
+[project.optional-dependencies]
+# Used from the profiler onwards. dbt is held on the 1.x line on purpose: a
+# bare `pip install dbt` now installs dbt 2, whose built-in DuckDB adapter
+# does not yet read local CSV, JSON and Parquet files the way dbt-duckdb does.
+pipeline = [
+    "dbt-core~=1.12",
+    "dbt-duckdb~=1.11",
+    "duckdb>=1.1",
+]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
