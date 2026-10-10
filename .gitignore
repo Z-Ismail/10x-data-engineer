@@ -19,6 +19,7 @@ logs/
 demo/data/
 demo/answers/
 runs/
+profiles/
 
 # Local
 .DS_Store
