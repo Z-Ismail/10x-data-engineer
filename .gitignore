@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# dbt and DuckDB
+target/
+dbt_packages/
+logs/
+*.duckdb
+*.duckdb.wal
+
+# Generated demo data and run workspaces
+demo/data/
+demo/answers/
+runs/
+
+# Local
+.DS_Store
+.env
