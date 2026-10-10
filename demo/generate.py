@@ -179,9 +179,7 @@ def build(seed: int, companies: int) -> dict:
 
         if i in uses_product:
             for _ in range(rng.randrange(3, 12)):
-                when = signup + timedelta(
-                    days=rng.randrange(1, 150), seconds=rng.randrange(86400)
-                )
+                when = signup + timedelta(days=rng.randrange(1, 150), seconds=rng.randrange(86400))
                 stamp = when.strftime("%Y-%m-%dT%H:%M:%S")
                 events.append(
                     {

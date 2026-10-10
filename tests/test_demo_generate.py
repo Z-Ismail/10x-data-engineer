@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from demo.generate import MIN_COMPANIES, generate  # noqa: E402
+from demo.generate import MIN_COMPANIES, generate
 
 JUNK = {"", "null", "anonymous", "-1"}
 
