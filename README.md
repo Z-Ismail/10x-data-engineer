@@ -13,9 +13,9 @@ use.
 
 | Component | Status |
 | --- | --- |
-| Demo data generator and tests | Available |
-| Source profiler | Next |
-| Automated checks (the gate) | Planned |
+| Demo data generator | Available |
+| Source profiler | Available |
+| Automated checks (the gate) | Next |
 | Agents | Planned |
 
 ## Why
@@ -37,9 +37,13 @@ green build and checks the output against the raw data.
 ## What works today
 
 ```
+make install     # installs the package and DuckDB
 make demo-data   # writes three source systems to demo/data
+make profile     # writes one profile per source table to profiles/
 make test
 ```
+
+### Demo data
 
 `demo/generate.py` writes a billing system, a CRM and a product event log for
 the same set of companies. The three only agree on the customer's email
@@ -49,6 +53,50 @@ user IDs and others), and an answer key is written to a separate folder.
 Output is deterministic for a given seed, and every defect is present
 whatever the seed. Details are in
 [demo/README.md](demo/README.md).
+
+### Source profiler
+
+`python -m tenx.profile <folder> --out <folder>` reads every CSV, JSON and
+Parquet file under a folder and writes two files per table: a short text
+profile and the same facts as JSON. The text profile is what an agent reads
+instead of the data. For the demo data it is under 5% of the size of the
+files it describes.
+
+Every figure is exact and computed in DuckDB. Nothing is sampled. A profile
+gives the row count, checked against a separate count of the records in the
+file, and for each column the nulls, blanks, distinct values, most common
+values and the type it safely converts to. It also reports:
+
+- key candidates: columns with no nulls and no repeated values
+- exact duplicate rows
+- identifiers that would lose leading zeros if read as numbers
+- dates that are not ISO formatted, and whether the day and month are
+  ambiguous
+- integers that look like Unix timestamps
+- values that differ only by case or surrounding spaces
+- placeholder values such as `null`, `anonymous` and `-1`
+
+CSV files are read as text, so nothing is changed by type inference before
+it is counted. A column that is unique in a small file can be unique by
+coincidence, so key candidates are a starting point and not a decision.
+
+```
+table: crm.accounts
+file: crm/accounts.csv (csv)
+rows: 180
+records in file: 180
+key candidates: account_id, company_name, billing_email
+
+columns:
+  account_id     text  nulls 0  distinct 180  unique  length 18 to 18
+  ...
+  created_date   date  nulls 0  distinct 102  top: 04/04/2026 (5), 19/04/2026 (5), 10/04/2026 (4)
+
+notes:
+  - account_id: every value is digits, 180 with leading zeros; kept as text so the zeros are not lost
+  - billing_email: 13 values with leading or trailing spaces
+  - created_date: dates are written day/month/year
+```
 
 ## Design
 
@@ -88,9 +136,10 @@ subscription, so there is no separate API key and no hosted service.
 
 ## Requirements
 
-Python 3.10 or later. The demo generator and tests use the standard library
-only. dbt-core 1.12 and dbt-duckdb 1.11 are listed as an optional dependency
-group in `pyproject.toml` for the stages that follow.
+Python 3.10 or later. The demo generator uses the standard library only. The
+profiler needs DuckDB 1.1 or later, which `make install` installs. dbt-core
+1.12 and dbt-duckdb 1.11 are listed as an optional dependency group in
+`pyproject.toml` for the stages that follow.
 
 ## Repository layout
 
@@ -98,6 +147,7 @@ group in `pyproject.toml` for the stages that follow.
 | --- | --- |
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `demo/` | Demo data generator |
+| `tenx/` | Python package: the source profiler |
 | `tests/` | Tests |
 
 ## Licence

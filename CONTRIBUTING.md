@@ -3,11 +3,14 @@
 ## Getting started
 
 ```
+make install
 make test
 make demo-data
+make profile
 ```
 
-The demo generator and tests need Python 3.10 or later and nothing else.
+Python 3.10 or later. `make install` installs the package in editable mode
+together with DuckDB.
 
 ## Guidelines
 
@@ -22,4 +25,5 @@ The demo generator and tests need Python 3.10 or later and nothing else.
 | --- | --- |
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `demo/` | Generator for the three demo source systems |
+| `tenx/` | Python package: the source profiler |
 | `tests/` | Tests |
