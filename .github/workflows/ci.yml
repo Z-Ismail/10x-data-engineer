@@ -13,7 +13,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install
+        run: make install
       - name: Run tests
         run: make test
       - name: Generate demo data
         run: make demo-data
+      - name: Profile demo data
+        run: make profile

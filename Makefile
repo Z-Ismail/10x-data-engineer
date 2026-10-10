@@ -1,6 +1,9 @@
 PYTHON ?= python3
 
-.PHONY: test demo-data clean
+.PHONY: install test demo-data profile clean
+
+install:
+	$(PYTHON) -m pip install -e .
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v
@@ -8,5 +11,8 @@ test:
 demo-data:
 	$(PYTHON) demo/generate.py --seed 42 --companies 200
 
+profile:
+	$(PYTHON) -m tenx.profile demo/data --out profiles
+
 clean:
-	rm -rf demo/data demo/answers
+	rm -rf demo/data demo/answers profiles
