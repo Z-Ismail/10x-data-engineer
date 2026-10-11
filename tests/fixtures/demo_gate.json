@@ -1,0 +1,27 @@
+{
+  "models": [
+    {
+      "name": "stg_billing__customers",
+      "key": ["customer_id"],
+      "source": "billing.customers",
+      "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}]
+    },
+    {
+      "name": "stg_billing__invoices",
+      "key": ["invoice_id"],
+      "source": "billing.invoices",
+      "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}]
+    },
+    {
+      "name": "stg_crm__accounts",
+      "key": ["account_id"],
+      "source": "crm.accounts"
+    },
+    {
+      "name": "stg_events__events",
+      "key": ["event_id"],
+      "source": "events.events",
+      "exclusions": [{"name": "repeat_deliveries", "duplicate_rows": true}]
+    }
+  ]
+}

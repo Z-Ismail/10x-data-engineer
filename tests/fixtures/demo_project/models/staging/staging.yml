@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: stg_billing__customers
+    description: One row per live billing customer record.
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+  - name: stg_billing__invoices
+    description: One row per live invoice, with the amount in the currency's smallest unit.
+    columns:
+      - name: invoice_id
+        data_tests: [unique, not_null]
+  - name: stg_crm__accounts
+    description: One row per CRM account.
+    columns:
+      - name: account_id
+        data_tests: [unique, not_null]
+  - name: stg_events__events
+    description: One row per product event, with repeat deliveries removed.
+    columns:
+      - name: event_id
+        data_tests: [unique, not_null]

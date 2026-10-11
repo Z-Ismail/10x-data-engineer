@@ -1,0 +1,21 @@
+version: 2
+
+sources:
+  - name: billing
+    tables:
+      - name: customers
+        config:
+          external_location: "read_csv('{{ var('raw_dir') }}/billing/customers.csv', all_varchar=true, header=true)"
+      - name: invoices
+        config:
+          external_location: "read_csv('{{ var('raw_dir') }}/billing/invoices.csv', all_varchar=true, header=true)"
+  - name: crm
+    tables:
+      - name: accounts
+        config:
+          external_location: "read_csv('{{ var('raw_dir') }}/crm/accounts.csv', all_varchar=true, header=true)"
+  - name: events
+    tables:
+      - name: events
+        config:
+          external_location: "read_json_auto('{{ var('raw_dir') }}/events/events.jsonl')"
