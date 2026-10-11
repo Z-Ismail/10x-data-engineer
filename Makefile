@@ -3,7 +3,7 @@ PYTHON ?= python3
 .PHONY: install test demo-data profile clean
 
 install:
-	$(PYTHON) -m pip install -e .
+	$(PYTHON) -m pip install -e ".[pipeline]"
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v

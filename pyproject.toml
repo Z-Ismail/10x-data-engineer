@@ -13,9 +13,10 @@ authors = [{ name = "Zak Ismail" }]
 dependencies = ["duckdb>=1.1"]
 
 [project.optional-dependencies]
-# Not used yet. dbt is held on the 1.x line on purpose: a bare
-# `pip install dbt` now installs dbt 2, whose built-in DuckDB adapter does not
-# yet read local CSV, JSON and Parquet files the way dbt-duckdb does.
+# Needed by the gate, which builds the project with dbt. dbt is held on the
+# 1.x line on purpose: a bare `pip install dbt` now installs dbt 2, whose
+# built-in DuckDB adapter does not yet read local CSV, JSON and Parquet files
+# the way dbt-duckdb does.
 pipeline = [
     "dbt-core~=1.12",
     "dbt-duckdb~=1.11",
