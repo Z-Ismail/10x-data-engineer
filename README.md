@@ -15,7 +15,8 @@ use.
 | --- | --- |
 | Demo data generator | Available |
 | Source profiler | Available |
-| Automated checks (the gate) | Next |
+| Gate: build, row count and key checks | Available |
+| Gate: money totals and repeat build | Next |
 | Agents | Planned |
 
 ## Why
@@ -37,7 +38,7 @@ green build and checks the output against the raw data.
 ## What works today
 
 ```
-make install     # installs the package and DuckDB
+make install     # installs the package, DuckDB and dbt
 make demo-data   # writes three source systems to demo/data
 make profile     # writes one profile per source table to profiles/
 make test
@@ -98,6 +99,74 @@ notes:
   - created_date: dates are written day/month/year
 ```
 
+### Gate
+
+`python -m tenx.gate <project> --raw <folder> --checks <file>` builds a dbt
+project into an empty DuckDB database and checks the result against the raw
+files. A successful build is only the first check. Three checks exist
+today:
+
+| Check | Fails when |
+| --- | --- |
+| `build` | `dbt build` does not succeed, or an expected model is missing from the build |
+| `rows` | a model does not hold exactly the rows of its source, less the rows declared as excluded |
+| `key` | a column of a model's declared key is missing, or the key is null or repeated in any row |
+
+What to expect is declared in a JSON file that is kept outside the dbt
+project, so the checks cannot be edited by whoever writes the models:
+
+```json
+{
+  "models": [
+    {
+      "name": "stg_billing__invoices",
+      "key": ["invoice_id"],
+      "source": "billing.invoices",
+      "exclusions": [
+        {"name": "test_mode", "where": "livemode = 'false'"}
+      ]
+    },
+    {
+      "name": "stg_events__events",
+      "key": ["event_id"],
+      "source": "events.events",
+      "exclusions": [
+        {"name": "repeat_deliveries", "duplicate_rows": true}
+      ]
+    }
+  ]
+}
+```
+
+Rows may only be left out on purpose. An exclusion is either a SQL condition
+on the raw file or the removal of exact repeats of a row, and the report
+counts what each one removed. A model that filters out anything else comes up
+short and fails, and so does a model that keeps rows it was told to exclude.
+
+```
+gate: FAIL (12 passed, 1 failed, 0 not run)
+
+PASS  build  project                 dbt build exited 0 after running 12 nodes
+PASS  build  stg_billing__invoices   built as "build"."main"."stg_billing__invoices"
+...
+FAIL  rows   stg_billing__invoices   496 rows in billing.invoices, 20 excluded (test_mode 20), 476 expected, 458 in the model: 18 fewer than expected
+PASS  key    stg_billing__invoices   invoice_id: unique and not null over 458 rows
+...
+```
+
+That report is from a model that quietly drops void invoices.
+
+The gate runs dbt as a separate process with a connection profile of its own,
+so the project does not choose the database it is built into, and nothing is
+written to the project folder. The project reads the raw files from the folder
+it is given in the dbt variable `raw_dir`. Exit status is 0 when every check
+passes, 1 when any check fails and 2 when the gate could not run. Pass
+`--workdir` to keep the built database, dbt's artifacts and its log.
+
+The row check compares counts, so it does not notice one row swapped for
+another. The check of money totals against the raw data covers that and is
+the next one to be built, followed by the repeat build.
+
 ## Design
 
 This section describes the target design. The status table above shows which
@@ -137,9 +206,9 @@ subscription, so there is no separate API key and no hosted service.
 ## Requirements
 
 Python 3.10 or later. The demo generator uses the standard library only. The
-profiler needs DuckDB 1.1 or later, which `make install` installs. dbt-core
-1.12 and dbt-duckdb 1.11 are listed as an optional dependency group in
-`pyproject.toml` for the stages that follow.
+profiler needs DuckDB 1.1 or later. The gate also needs dbt-core 1.12 and
+dbt-duckdb 1.11, which are the `pipeline` dependency group in
+`pyproject.toml`. `make install` installs all of them.
 
 ## Repository layout
 
@@ -147,8 +216,8 @@ profiler needs DuckDB 1.1 or later, which `make install` installs. dbt-core
 | --- | --- |
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `demo/` | Demo data generator |
-| `tenx/` | Python package: the source profiler |
-| `tests/` | Tests |
+| `tenx/` | Python package: the source profiler and the gate |
+| `tests/` | Tests, and the dbt project the gate is tested against |
 
 ## Licence
 
