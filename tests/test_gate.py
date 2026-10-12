@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -32,6 +33,7 @@ from tenx.gate import (
     check_key,
     check_rows,
     expected_rows,
+    expected_totals,
     load_declaration,
     main,
     passed,
@@ -53,6 +55,28 @@ ORDERS = """id,mode,status,amount
 5,live,paid,3
 5,live,paid,3
 6,,paid,1
+"""
+
+# Eleven rows of money. Rows 3 and 4 are test mode, rows 2 and 4 are void,
+# row 5 is written twice, row 6 has no mode, row 7 has no currency, row 8 has
+# no amount, row 9's amount is not a number and row 10 has three decimal
+# places. By currency the raw totals are:
+#   usd  10.50 + 5 + 9 - 1.005 = 23.495
+#   eur  7.25 + 3.10 + 3.10    = 13.45
+#   jpy  1000
+#   (no currency)  2
+PAYMENTS = """id,mode,status,currency,amount
+1,live,paid,usd,10.50
+2,live,void,usd,5
+3,test,paid,eur,7.25
+4,test,void,usd,9
+5,live,paid,eur,3.10
+5,live,paid,eur,3.10
+6,,paid,jpy,1000
+7,live,paid,,2
+8,live,paid,usd,
+9,live,paid,usd,n/a
+10,live,refund,usd,-1.005
 """
 
 
@@ -475,6 +499,101 @@ class RowsCheck(unittest.TestCase):
         model, expectation = self.expectation()
         result = check_rows(self.con, model, "no_such_table", expectation)
         self.assertEqual(result.status, FAIL)
+
+
+def amounts(**values):
+    """A mapping of group to exact amount; the key `none` stands for a null group."""
+    return {(None if key == "none" else key): Decimal(value) for key, value in values.items()}
+
+
+class TotalsExpectation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.path = write(Path(cls.tmp.name) / "shop" / "payments.csv", PAYMENTS)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.con = duckdb.connect()
+        self.addCleanup(self.con.close)
+
+    def expectation(self, total, *exclusions):
+        model = ModelSpec("stg_payments", ("id",), "shop.payments", tuple(exclusions), (total,))
+        return expected_totals(self.con, model, total, self.path)
+
+    def test_an_ungrouped_total_adds_every_readable_amount(self):
+        expectation = self.expectation(Total("amount", "amount"))
+        self.assertEqual(expectation.source_totals, {"all": Decimal("1038.945")})
+        self.assertEqual(expectation.expected, {"all": Decimal("1038.945")})
+        self.assertEqual(expectation.excluded, ())
+
+    def test_amounts_are_added_by_group_without_rounding(self):
+        expectation = self.expectation(Total("amount", "amount", "currency", "currency"))
+        raw = amounts(usd="23.495", eur="13.45", jpy="1000", none="2")
+        self.assertEqual(expectation.source_totals, raw)
+        self.assertEqual(expectation.expected, raw)
+        # The three decimal places of row 10 survive the addition.
+        self.assertEqual(str(expectation.source_totals["usd"]), "23.495")
+
+    def test_each_exclusion_is_charged_to_the_first_filter_that_matches(self):
+        expectation = self.expectation(
+            Total("amount", "amount", "currency", "currency"),
+            Exclusion("test_mode", where="mode = 'test'"),
+            Exclusion("void", where="status = 'void'"),
+            Exclusion("repeats", duplicate_rows=True),
+        )
+        self.assertEqual(
+            expectation.excluded,
+            (
+                ("test_mode", amounts(usd="9", eur="7.25")),
+                ("void", amounts(usd="5")),
+                ("repeats", amounts(usd="0", eur="3.10", jpy="0", none="0")),
+            ),
+        )
+        self.assertEqual(
+            expectation.expected, amounts(usd="9.495", eur="3.10", jpy="1000", none="2")
+        )
+
+    def test_the_source_columns_can_have_other_names(self):
+        expectation = self.expectation(Total("amount_minor", "amount", "cur", "currency"))
+        self.assertEqual(
+            expectation.expected, amounts(usd="23.495", eur="13.45", jpy="1000", none="2")
+        )
+
+    def test_text_that_is_not_a_number_is_counted_and_shown(self):
+        expectation = self.expectation(Total("amount", "amount"))
+        self.assertEqual(expectation.unreadable, 1)
+        self.assertEqual(expectation.unreadable_examples, ("n/a",))
+
+    def test_excluded_text_is_not_counted(self):
+        expectation = self.expectation(
+            Total("amount", "amount"), Exclusion("unreadable", where="amount = 'n/a'")
+        )
+        self.assertEqual(expectation.unreadable, 0)
+        self.assertEqual(expectation.excluded, (("unreadable", {"all": Decimal(0)}),))
+        self.assertEqual(expectation.expected, {"all": Decimal("1038.945")})
+
+    def test_numbers_typed_by_a_json_file_are_added_exactly(self):
+        # Read as numbers, 0.1 and 0.2 would add up to 0.30000000000000004.
+        path = write(
+            Path(self.tmp.name) / "shop" / "refunds.jsonl",
+            '{"amount": 0.1, "currency": "usd"}\n'
+            '{"amount": 0.2, "currency": "usd"}\n'
+            '{"amount": -0.5, "currency": "eur"}\n'
+            '{"amount": 1e2, "currency": "eur"}\n',
+        )
+        total = Total("amount", "amount", "currency", "currency")
+        model = ModelSpec("stg_refunds", ("id",), "shop.refunds", (), (total,))
+        expectation = expected_totals(self.con, model, total, path)
+        self.assertEqual(expectation.expected, amounts(usd="0.3", eur="99.5"))
+        self.assertEqual(expectation.unreadable, 0)
+
+    def test_a_missing_source_column_stops_the_gate(self):
+        with self.assertRaises(GateError):
+            self.expectation(Total("amount", "no_such_column"))
 
 
 class KeyCheck(unittest.TestCase):

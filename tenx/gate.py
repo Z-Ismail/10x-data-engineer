@@ -51,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 
 import duckdb
@@ -68,6 +69,13 @@ EXAMPLES = 3
 MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals"}
 EXCLUSION_FIELDS = {"name", "where", "duplicate_rows"}
 TOTAL_FIELDS = {"column", "source_column", "by", "source_by"}
+# Raw amounts are read from text, and only plain decimal numbers are accepted:
+# an optional sign, digits and an optional decimal point. Anything else, such
+# as `1e3`, `12,50` or `n/a`, is not taken as an amount.
+PLAIN_NUMBER = r"^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$"
+DECIMAL_DIGITS = 38
+# The group of a total that is not split by any column.
+ALL = "all"
 
 
 class GateError(Exception):
@@ -115,6 +123,22 @@ class RowExpectation:
     source_rows: int
     excluded: tuple[tuple[str, int], ...]
     expected_rows: int
+
+
+@dataclass(frozen=True)
+class TotalExpectation:
+    """What a money column must add up to, worked out from the raw file alone.
+
+    Each mapping goes from a value of the grouping column, as text, to an
+    amount. ``expected`` is the raw total less every exclusion, group by group.
+    """
+
+    total: Total
+    source_totals: dict[str | None, Decimal]
+    excluded: tuple[tuple[str, dict[str | None, Decimal]], ...]
+    expected: dict[str | None, Decimal]
+    unreadable: int = 0
+    unreadable_examples: tuple[str, ...] = ()
 
 
 @dataclass
@@ -326,6 +350,93 @@ def expected_rows(con: duckdb.DuckDBPyConnection, model: ModelSpec, path: Path) 
             (exclusion.name, excluded[exclusion.name]) for exclusion in model.exclusions
         ),
         expected_rows=expected,
+    )
+
+
+def _sums(con: duckdb.DuckDBPyConnection, query: str) -> dict[str | None, Decimal]:
+    """Run a query of (group, amount) rows into a mapping of exact amounts."""
+    return {
+        group: Decimal(0) if amount is None else Decimal(amount)
+        for group, amount in con.execute(query).fetchall()
+    }
+
+
+def expected_totals(
+    con: duckdb.DuckDBPyConnection, model: ModelSpec, total: Total, path: Path
+) -> TotalExpectation:
+    """Add up a raw money column, and what each declared exclusion removes from it.
+
+    Raw values are read as text and converted to a DECIMAL with as many
+    decimal places as the longest value has, so nothing is rounded. Empty and
+    missing values add nothing. Rows are charged to exclusions exactly as the
+    rows check charges them.
+    """
+    source = relation(path)
+    text = f"trim(CAST({quote_identifier(total.source_column)} AS VARCHAR))"
+    is_number = f"regexp_full_match({text}, '{PLAIN_NUMBER}')"
+    group = f"CAST({quote_identifier(total.source_by)} AS VARCHAR)" if total.by else f"'{ALL}'"
+    claimed, kept_condition = claimed_by_filters(model)
+    distinct = any(exclusion.duplicate_rows for exclusion in model.exclusions)
+    kept = f"SELECT * FROM {source} WHERE {kept_condition}"
+    kept_once = f"SELECT DISTINCT * FROM ({kept})" if distinct else kept
+    try:
+        (scale,) = con.execute(
+            f"SELECT coalesce(max(length(split_part({text}, '.', 2))), 0) "
+            f"FROM {source} WHERE {is_number}"
+        ).fetchone()
+        if scale > DECIMAL_DIGITS:
+            raise GateError(
+                f"{model.name}: {model.source}.{total.source_column} has a value with "
+                f"{scale} decimal places, more than the {DECIMAL_DIGITS} that can be added exactly"
+            )
+        amount = (
+            f"CASE WHEN {is_number} THEN CAST({text} AS DECIMAL({DECIMAL_DIGITS}, {scale})) END"
+        )
+
+        def sums(rows: str) -> dict[str | None, Decimal]:
+            return _sums(con, f"SELECT {group}, sum({amount}) FROM ({rows}) GROUP BY ALL")
+
+        source_totals = sums(f"SELECT * FROM {source}")
+        excluded = [
+            (name, sums(f"SELECT * FROM {source} WHERE {where}")) for name, where in claimed
+        ]
+        if distinct:
+            kept_totals, once_totals = sums(kept), sums(kept_once)
+            removed = {
+                key: kept_totals[key] - once_totals.get(key, Decimal(0)) for key in kept_totals
+            }
+            excluded += [
+                (exclusion.name, removed)
+                for exclusion in model.exclusions
+                if exclusion.duplicate_rows
+            ]
+        unreadable_rows = (
+            f"SELECT {text} AS value FROM ({kept_once}) WHERE {text} <> '' AND NOT {is_number}"
+        )
+        (unreadable,) = con.execute(f"SELECT count(*) FROM ({unreadable_rows})").fetchone()
+        examples = tuple(
+            value
+            for (value,) in con.execute(
+                f"SELECT DISTINCT value FROM ({unreadable_rows}) ORDER BY value LIMIT {EXAMPLES}"
+            ).fetchall()
+        )
+    except duckdb.Error as error:
+        raise GateError(
+            f"{model.name}: could not add up {model.source}.{total.source_column}: {error}"
+        ) from error
+    by_name = dict(excluded)
+    ordered = tuple((exclusion.name, by_name[exclusion.name]) for exclusion in model.exclusions)
+    expected = dict(source_totals)
+    for _, amounts in ordered:
+        for key, value in amounts.items():
+            expected[key] = expected.get(key, Decimal(0)) - value
+    return TotalExpectation(
+        total=total,
+        source_totals=source_totals,
+        excluded=ordered,
+        expected=expected,
+        unreadable=unreadable,
+        unreadable_examples=examples,
     )
 
 
