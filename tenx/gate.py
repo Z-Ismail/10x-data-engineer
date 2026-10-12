@@ -214,30 +214,44 @@ def source_files(raw: Path) -> dict[str, Path]:
         raise GateError(str(error)) from error
 
 
-def expected_rows(con: duckdb.DuckDBPyConnection, model: ModelSpec, path: Path) -> RowExpectation:
-    """Count the raw rows and what each declared exclusion removes from them.
+def claimed_by_filters(model: ModelSpec) -> tuple[list[tuple[str, str]], str]:
+    """SQL conditions that split the raw rows between the declared filters.
 
     Filters are applied in the order declared and a row is charged to the
     first one that matches it, so a row matched by two filters is removed
-    once. Exact repeats are counted among the rows that the filters leave.
+    once. A condition that is neither true nor false does not match.
+
+    Returns each filter's name with the condition for the rows charged to
+    it, and the condition for the rows that no filter removes.
     """
-    filters = [exclusion for exclusion in model.exclusions if exclusion.where is not None]
+    claimed: list[tuple[str, str]] = []
+    earlier: list[str] = []
+    for exclusion in model.exclusions:
+        if exclusion.where is None:
+            continue
+        condition = f"coalesce(({exclusion.where}), false)"
+        claimed.append((exclusion.name, " AND ".join([*(f"NOT {e}" for e in earlier), condition])))
+        earlier.append(condition)
+    kept = " AND ".join(f"NOT {condition}" for condition in earlier) or "true"
+    return claimed, kept
+
+
+def expected_rows(con: duckdb.DuckDBPyConnection, model: ModelSpec, path: Path) -> RowExpectation:
+    """Count the raw rows and what each declared exclusion removes from them.
+
+    A row matched by two filters is charged to the first and removed once.
+    Exact repeats are counted among the rows that the filters leave.
+    """
     source = relation(path)
     excluded: dict[str, int] = {}
+    claimed, kept_condition = claimed_by_filters(model)
     try:
         source_rows = con.execute(f"SELECT count(*) FROM {source}").fetchone()[0]
-        claimed: list[str] = []
-        for exclusion in filters:
-            condition = f"coalesce(({exclusion.where}), false)"
-            unclaimed = " AND ".join(f"NOT {earlier}" for earlier in claimed)
-            where = f"{unclaimed} AND {condition}" if claimed else condition
-            excluded[exclusion.name] = con.execute(
+        for name, where in claimed:
+            (excluded[name],) = con.execute(
                 f"SELECT count(*) FROM {source} WHERE {where}"
-            ).fetchone()[0]
-            claimed.append(condition)
-        kept = f"SELECT * FROM {source}"
-        if claimed:
-            kept += " WHERE " + " AND ".join(f"NOT {condition}" for condition in claimed)
+            ).fetchone()
+        kept = f"SELECT * FROM {source} WHERE {kept_condition}"
         kept_rows, distinct_rows = con.execute(
             f"SELECT (SELECT count(*) FROM ({kept})), "
             f"(SELECT count(*) FROM (SELECT DISTINCT * FROM ({kept})))"
