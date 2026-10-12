@@ -804,11 +804,16 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
         if model.source is not None and model.source not in files:
             raise GateError(f"{model.name}: no raw file for source {model.source} under {raw}")
     expectations: dict[str, RowExpectation] = {}
+    totals: dict[str, list[TotalExpectation]] = {}
     con = duckdb.connect()
     try:
         for model in models:
             if model.source is not None:
-                expectations[model.name] = expected_rows(con, model, files[model.source])
+                path = files[model.source]
+                expectations[model.name] = expected_rows(con, model, path)
+                totals[model.name] = [
+                    expected_totals(con, model, total, path) for total in model.totals
+                ]
     finally:
         con.close()
 
@@ -821,6 +826,7 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
         for model in models:
             built = relations.get(model.name)
             checks = (["rows"] if model.name in expectations else []) + ["key"]
+            checks += ["total"] * len(model.totals)
             if built is None or con is None:
                 results += [
                     Result(check, model.name, SKIP, "not checked: the model was not built")
@@ -830,6 +836,10 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
             if model.name in expectations:
                 results.append(check_rows(con, model, built, expectations[model.name]))
             results.append(check_key(con, model, built))
+            results += [
+                check_total(con, model, built, expectation)
+                for expectation in totals.get(model.name, [])
+            ]
     finally:
         if con is not None:
             con.close()

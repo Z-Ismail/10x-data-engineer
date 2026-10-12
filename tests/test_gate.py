@@ -942,7 +942,7 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(actual, expected)
         self.assertEqual(
             set(results),
-            {("build", "project")}
+            {("build", "project"), ("total", "stg_billing__invoices")}
             | {(check, model) for check in ("build", "rows", "key") for model in self.models},
         )
 
@@ -980,6 +980,22 @@ class DemoProject(unittest.TestCase):
                     {"rows": kept, "null_rows": 0, "repeated_keys": 0, "surplus_rows": 0},
                 )
 
+        # Money by currency, recounted from the file in whole minor units.
+        raw, test_mode = {}, {}
+        for row in self.invoices:
+            amount, currency = int(row["amount_minor"]), row["currency"]
+            raw[currency] = raw.get(currency, 0) + amount
+            if row["livemode"] == "false":
+                test_mode[currency] = test_mode.get(currency, 0) + amount
+        live = {currency: raw[currency] - test_mode.get(currency, 0) for currency in raw}
+        self.assertIn("jpy", live)
+        self.assertGreater(len(test_mode), 0)
+        facts = results[("total", "stg_billing__invoices")].facts
+        self.assertEqual(facts["source"], raw)
+        self.assertEqual(facts["excluded"], {"test_mode": test_mode})
+        self.assertEqual(facts["expected"], live)
+        self.assertEqual(facts["model"], live)
+
         # The build went into the workdir, and the project folder is untouched.
         self.assertTrue((workdir / "build.duckdb").is_file())
         self.assertTrue((workdir / "target" / "run_results.json").is_file())
@@ -991,9 +1007,9 @@ class DemoProject(unittest.TestCase):
         with redirect_stdout(stdout):
             code = main([str(PROJECT), "--raw", str(self.raw), "--checks", str(DECLARATION)])
         self.assertEqual(code, 0)
-        self.assertTrue(stdout.getvalue().startswith("gate: PASS (13 passed, 0 failed, 0 not run)"))
+        self.assertTrue(stdout.getvalue().startswith("gate: PASS (14 passed, 0 failed, 0 not run)"))
 
-    def test_lost_and_surplus_rows_fail_the_rows_check_alone(self):
+    def test_lost_and_surplus_rows_fail_the_rows_check(self):
         project = self.broken_copy()
         staging = project / "models" / "staging"
         # One account dropped.
@@ -1018,6 +1034,8 @@ class DemoProject(unittest.TestCase):
                 ("rows", "stg_crm__accounts"): FAIL,
                 ("rows", "stg_billing__invoices"): FAIL,
                 ("rows", "stg_billing__customers"): FAIL,
+                # Dropping refunds also leaves too much money.
+                ("total", "stg_billing__invoices"): FAIL,
             },
         )
         live_invoices = [row for row in self.invoices if row["livemode"] == "true"]
@@ -1029,6 +1047,21 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(
             results[("rows", "stg_billing__invoices")].facts["model_rows"],
             len(live_invoices) - refunds,
+        )
+        refunded = {}
+        for row in live_invoices:
+            if int(row["amount_minor"]) <= 0:
+                refunded[row["currency"]] = refunded.get(row["currency"], 0) + int(
+                    row["amount_minor"]
+                )
+        facts = results[("total", "stg_billing__invoices")].facts
+        self.assertEqual(
+            {
+                currency: facts["model"].get(currency, 0) - facts["expected"][currency]
+                for currency in facts["expected"]
+                if facts["model"].get(currency, 0) != facts["expected"][currency]
+            },
+            {currency: -amount for currency, amount in refunded.items() if amount},
         )
         self.assertEqual(
             results[("rows", "stg_billing__customers")].facts["model_rows"], len(self.customers)
@@ -1117,7 +1150,7 @@ class DemoProject(unittest.TestCase):
             code = main([str(project), "--raw", str(self.raw), "--checks", str(DECLARATION)])
         self.assertEqual(code, 1)
         report = stdout.getvalue()
-        self.assertTrue(report.startswith("gate: FAIL (10 passed, 3 failed, 0 not run)"), report)
+        self.assertTrue(report.startswith("gate: FAIL (11 passed, 3 failed, 0 not run)"), report)
         self.assertRegex(report, r"FAIL  build  project +dbt build exited 1, 1 of 12 nodes")
         self.assertRegex(report, r"test\.demo\.unique_stg_events__events_event_id\.\w+: fail")
         self.assertRegex(report, r"FAIL  rows   stg_events__events")
@@ -1131,7 +1164,7 @@ class DemoProject(unittest.TestCase):
         failures = {key: result.status for key, result in results.items() if result.status != PASS}
         self.assertEqual(
             failures,
-            {("build", "project"): FAIL}
+            {("build", "project"): FAIL, ("total", "stg_billing__invoices"): SKIP}
             | {("build", model): FAIL for model in self.models}
             | {(check, model): SKIP for check in ("rows", "key") for model in self.models},
         )

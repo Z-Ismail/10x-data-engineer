@@ -10,7 +10,8 @@
       "name": "stg_billing__invoices",
       "key": ["invoice_id"],
       "source": "billing.invoices",
-      "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}]
+      "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}],
+      "totals": [{"column": "amount_minor", "by": "currency"}]
     },
     {
       "name": "stg_crm__accounts",
