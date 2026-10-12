@@ -10,6 +10,10 @@ Notable changes to this project.
 
 ### Added
 
+- Gate: a fourth check, `total`. A declared money column must add up to
+  exactly the raw total, less what the declared exclusions removed, for each
+  currency. Raw amounts are added without rounding, and money held as
+  floating point fails.
 - Gate (`python -m tenx.gate`): builds a dbt project into an empty database
   and checks it against the raw files. Three checks so far: the build
   succeeds and produces every expected model, each model holds exactly the

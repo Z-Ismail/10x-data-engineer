@@ -8,6 +8,9 @@ and then asks its own questions of the result:
     rows   each model holds the rows of its source, less the rows that were
            declared as excluded, and not one more or fewer
     key    each model's declared key has no nulls and no repeated values
+    total  each declared money column adds up to exactly the raw total, less
+           what the exclusions removed, for each value of a column such as
+           the currency
 
 What to expect is declared in a JSON file kept outside the dbt project, so
 that whoever writes the models cannot relax a check to make it pass:
@@ -20,6 +23,9 @@ that whoever writes the models cannot relax a check to make it pass:
           "source": "billing.invoices",
           "exclusions": [
             {"name": "test_mode", "where": "livemode = 'false'"}
+          ],
+          "totals": [
+            {"column": "amount_minor", "by": "currency"}
           ]
         }
       ]
@@ -31,6 +37,12 @@ file; CSV columns are read as text, as they are by the profiler. An exclusion
 written as ``{"name": ..., "duplicate_rows": true}`` removes exact repeats of a
 row. Rows are only ever removed by a declared exclusion, and the report counts
 what each one removed.
+
+A total names a model column and, if it is named differently in the raw file,
+``source_column``; likewise ``by`` and ``source_by`` for the grouping column.
+The model column must hold the amount in the same unit as the raw file, as an
+integer or DECIMAL. Raw amounts must be plain decimal numbers and are added
+without rounding.
 
 The project reads the raw files from the folder passed to dbt as the variable
 ``raw_dir``.

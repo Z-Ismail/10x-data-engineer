@@ -15,8 +15,8 @@ use.
 | --- | --- |
 | Demo data generator | Available |
 | Source profiler | Available |
-| Gate: build, row count and key checks | Available |
-| Gate: money totals and repeat build | Next |
+| Gate: build, row count, key and money total checks | Available |
+| Gate: repeat build | Next |
 | Agents | Planned |
 
 ## Why
@@ -103,7 +103,7 @@ notes:
 
 `python -m tenx.gate <project> --raw <folder> --checks <file>` builds a dbt
 project into an empty DuckDB database and checks the result against the raw
-files. A successful build is only the first check. Three checks exist
+files. A successful build is only the first check. Four checks exist
 today:
 
 | Check | Fails when |
@@ -111,6 +111,7 @@ today:
 | `build` | `dbt build` does not succeed, or an expected model is missing from the build |
 | `rows` | a model does not hold exactly the rows of its source, less the rows declared as excluded |
 | `key` | a column of a model's declared key is missing, or the key is null or repeated in any row |
+| `total` | a declared money column does not add up to exactly the raw total less the declared exclusions, overall or for each value of a column such as the currency |
 
 What to expect is declared in a JSON file that is kept outside the dbt
 project, so the checks cannot be edited by whoever writes the models:
@@ -124,6 +125,9 @@ project, so the checks cannot be edited by whoever writes the models:
       "source": "billing.invoices",
       "exclusions": [
         {"name": "test_mode", "where": "livemode = 'false'"}
+      ],
+      "totals": [
+        {"column": "amount_minor", "by": "currency"}
       ]
     },
     {
@@ -144,13 +148,18 @@ counts what each one removed. A model that filters out anything else comes up
 short and fails, and so does a model that keeps rows it was told to exclude.
 
 ```
-gate: FAIL (12 passed, 1 failed, 0 not run)
+gate: FAIL (12 passed, 2 failed, 0 not run)
 
 PASS  build  project                 dbt build exited 0 after running 12 nodes
 PASS  build  stg_billing__invoices   built as "build"."main"."stg_billing__invoices"
 ...
 FAIL  rows   stg_billing__invoices   496 rows in billing.invoices, 20 excluded (test_mode 20), 476 expected, 458 in the model: 18 fewer than expected
 PASS  key    stg_billing__invoices   invoice_id: unique and not null over 458 rows
+FAIL  total  stg_billing__invoices   amount_minor by currency: 4 of 4 currency values do not tie with the raw data
+      eur: raw 987100, expected 987100, model 917500, 69600 short
+      gbp: raw 1351900, expected 1351900, model 1329200, 22700 short
+      jpy: raw 2537400, expected 2537400, model 2507700, 29700 short
+      usd: raw 24152800, test_mode 19998000, expected 4154800, model 4070700, 84100 short
 ...
 ```
 
@@ -163,9 +172,35 @@ it is given in the dbt variable `raw_dir`. Exit status is 0 when every check
 passes, 1 when any check fails and 2 when the gate could not run. Pass
 `--workdir` to keep the built database, dbt's artifacts and its log.
 
-The row check compares counts, so it does not notice one row swapped for
-another. The check of money totals against the raw data covers that and is
-the next one to be built, followed by the repeat build.
+A total is compared exactly, with no tolerance, separately for each value of
+the `by` column. The gate adds up the raw column itself and reports what each
+exclusion removed, so the figures can be followed by hand:
+
+```
+FAIL  total  stg_billing__invoices   amount_minor by currency: 1 of 4 currency values do not tie with the raw data
+      jpy: raw 2537400, expected 2537400, model 253740000, 251202600 over
+```
+
+That report is from a model that treats yen as if it had cents.
+
+The row check compares counts, so on its own it would not notice one row
+swapped for another; the money no longer ties, and the total check fails.
+Rules for totals:
+
+- The model column must be in the same unit as the raw column. The gate does
+  not convert between units, because a wrong conversion is one of the things
+  it is there to catch.
+- The model column must be an integer or DECIMAL. Money held as floating
+  point fails, because it cannot be added up exactly.
+- Raw amounts must be plain decimal numbers such as `-1250` or `12.50`. They
+  are added at full precision, so nothing is rounded. A raw value that is not
+  a number, such as `n/a` or `12,50`, fails the check unless an exclusion
+  removes its row.
+- If `source_column` or `source_by` is given, the raw file's column of that
+  name is used; otherwise the raw column has the same name as the model's.
+
+The repeat build, which builds the project a second time and compares the
+results, is the next check to be built.
 
 ## Design
 
