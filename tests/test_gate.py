@@ -29,9 +29,11 @@ from tenx.gate import (
     ModelSpec,
     Result,
     Total,
+    TotalExpectation,
     check_build,
     check_key,
     check_rows,
+    check_total,
     expected_rows,
     expected_totals,
     load_declaration,
@@ -594,6 +596,142 @@ class TotalsExpectation(unittest.TestCase):
     def test_a_missing_source_column_stops_the_gate(self):
         with self.assertRaises(GateError):
             self.expectation(Total("amount", "no_such_column"))
+
+
+class TotalCheck(unittest.TestCase):
+    BY_CURRENCY = Total("amount", "amount", "currency", "currency")
+    # Raw usd 30 less 5 test mode, eur 12.50 less 2.50 test mode, and 4 with
+    # no currency: the model must hold usd 25, eur 10.00 and 4.
+    EXPECTATION = TotalExpectation(
+        total=BY_CURRENCY,
+        source_totals=amounts(usd="30", eur="12.50", none="4"),
+        excluded=(("test_mode", amounts(usd="5", eur="2.50")),),
+        expected=amounts(usd="25", eur="10.00", none="4"),
+    )
+
+    def setUp(self):
+        self.con = duckdb.connect()
+        self.addCleanup(self.con.close)
+
+    def model(self, rows, amount_type="DECIMAL(18,2)"):
+        self.con.execute(
+            f"CREATE OR REPLACE TABLE built (id INTEGER, currency VARCHAR, amount {amount_type})"
+        )
+        self.con.executemany(
+            "INSERT INTO built VALUES (?, ?, ?)",
+            [(n, currency, amount) for n, (currency, amount) in enumerate(rows)],
+        )
+
+    def check(self, expectation=EXPECTATION):
+        spec = ModelSpec("stg_payments", ("id",), "shop.payments", (), (expectation.total,))
+        return check_total(self.con, spec, "built", expectation)
+
+    def test_money_that_ties_in_every_currency_passes(self):
+        self.model([("usd", "20"), ("usd", "5"), ("eur", "7.25"), ("eur", "2.75"), (None, "4")])
+        result = self.check()
+        self.assertEqual(result.status, PASS, result.detail)
+        self.assertEqual(result.facts["model"], amounts(usd="25", eur="10", none="4"))
+        self.assertEqual(
+            result.detail,
+            "amount by currency: ties with the raw data, eur 10.00, usd 25.00, (null) 4.00",
+        )
+
+    def test_whole_numbers_are_accepted(self):
+        self.model([("usd", 25), ("eur", 10), (None, 4)], "BIGINT")
+        self.assertEqual(self.check().status, PASS)
+
+    def test_one_currency_short_fails_and_explains_the_figures(self):
+        self.model([("usd", "20"), ("eur", "10"), (None, "4")])
+        result = self.check()
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(
+            result.detail,
+            "amount by currency: 1 of 3 currency values do not tie with the raw data\n"
+            "usd: raw 30, test_mode 5, expected 25, model 20.00, 5.00 short",
+        )
+
+    def test_a_cent_over_fails(self):
+        self.model([("usd", "25"), ("eur", "10.01"), (None, "4")])
+        result = self.check()
+        self.assertEqual(result.status, FAIL)
+        self.assertIn(
+            "eur: raw 12.50, test_mode 2.50, expected 10.00, model 10.01, 0.01 over", result.detail
+        )
+
+    def test_a_renamed_currency_fails_on_both_sides(self):
+        self.model([("USD", "25"), ("eur", "10"), (None, "4")])
+        result = self.check()
+        self.assertEqual(result.status, FAIL)
+        self.assertIn("2 of 4 currency values", result.detail)
+        self.assertIn("USD: raw 0, expected 0, model 25.00, 25.00 over", result.detail)
+        self.assertIn("usd: raw 30, test_mode 5, expected 25, model 0, 25 short", result.detail)
+
+    def test_a_null_currency_is_a_group_of_its_own(self):
+        self.model([("usd", "25"), ("eur", "14")])
+        result = self.check()
+        self.assertEqual(result.status, FAIL)
+        self.assertIn("(null): raw 4, expected 4, model 0, 4 short", result.detail)
+
+    def test_an_ungrouped_total(self):
+        expectation = TotalExpectation(
+            total=Total("amount", "amount"),
+            source_totals={"all": Decimal(39)},
+            excluded=(),
+            expected={"all": Decimal(39)},
+        )
+        self.model([("usd", "25"), ("eur", "10"), (None, "4")])
+        self.assertEqual(self.check(expectation).status, PASS)
+        self.model([("usd", "25"), ("eur", "10")])
+        result = self.check(expectation)
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(
+            result.detail,
+            "amount: 1 of 1 totals do not tie with the raw data\n"
+            "raw 39, expected 39, model 35.00, 4.00 short",
+        )
+
+    def test_floating_point_money_fails_even_when_it_adds_up(self):
+        for kind in ("DOUBLE", "FLOAT"):
+            with self.subTest(kind):
+                self.model([("usd", 25), ("eur", 10), (None, 4)], kind)
+                result = self.check()
+                self.assertEqual(result.status, FAIL)
+                self.assertIn("floating point", result.detail)
+
+    def test_money_held_as_text_fails(self):
+        self.model([("usd", "25"), ("eur", "10"), (None, "4")], "VARCHAR")
+        result = self.check()
+        self.assertEqual(result.status, FAIL)
+        self.assertIn("VARCHAR, not a number", result.detail)
+
+    def test_a_missing_column_fails(self):
+        self.con.execute("CREATE TABLE built (id INTEGER, cur VARCHAR, amount BIGINT)")
+        result = self.check()
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(result.facts["missing_columns"], ["currency"])
+
+    def test_raw_values_that_are_not_numbers_fail(self):
+        expectation = TotalExpectation(
+            total=self.BY_CURRENCY,
+            source_totals=self.EXPECTATION.source_totals,
+            excluded=self.EXPECTATION.excluded,
+            expected=self.EXPECTATION.expected,
+            unreadable=2,
+            unreadable_examples=("12,50", "n/a"),
+        )
+        self.model([("usd", "25"), ("eur", "10"), (None, "4")])
+        result = self.check(expectation)
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(
+            result.detail,
+            "amount by currency: 2 raw values in shop.payments.amount not excluded and "
+            "not a number, for example '12,50', 'n/a'",
+        )
+
+    def test_a_model_that_cannot_be_read_fails(self):
+        spec = ModelSpec("stg_payments", ("id",), "shop.payments", (), (self.BY_CURRENCY,))
+        result = check_total(self.con, spec, "no_such_table", self.EXPECTATION)
+        self.assertEqual(result.status, FAIL)
 
 
 class KeyCheck(unittest.TestCase):

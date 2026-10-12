@@ -76,6 +76,11 @@ PLAIN_NUMBER = r"^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$"
 DECIMAL_DIGITS = 38
 # The group of a total that is not split by any column.
 ALL = "all"
+INTEGER_TYPES = {
+    "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT",
+    "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT",
+}  # fmt: skip
+FLOAT_TYPES = {"FLOAT", "REAL", "DOUBLE"}
 
 
 class GateError(Exception):
@@ -467,6 +472,121 @@ def check_rows(
     direction = "more" if difference > 0 else "fewer"
     return Result(
         "rows", model.name, FAIL, f"{detail}: {abs(difference)} {direction} than expected", facts
+    )
+
+
+def _group_label(group: str | None) -> str:
+    return "(null)" if group is None else group
+
+
+def _amounts(values: dict[str | None, Decimal]) -> str:
+    ordered = sorted(values.items(), key=lambda item: (item[0] is None, item[0] or ""))
+    return ", ".join(f"{_group_label(group)} {amount}" for group, amount in ordered)
+
+
+def check_total(
+    con: duckdb.DuckDBPyConnection, model: ModelSpec, built: str, expectation: TotalExpectation
+) -> Result:
+    """The model's money must equal the raw money less the exclusions, exactly.
+
+    Totals are compared group by group, and a group found on one side only is
+    compared with zero. The model column must hold whole numbers or DECIMAL:
+    floating point cannot hold money exactly.
+    """
+    total = expectation.total
+    label = f"{total.column} by {total.by}" if total.by else total.column
+    facts: dict = {
+        "source": expectation.source_totals,
+        "excluded": dict(expectation.excluded),
+        "expected": expectation.expected,
+    }
+    if expectation.unreadable:
+        shown = ", ".join(repr(value) for value in expectation.unreadable_examples)
+        facts["unreadable"] = expectation.unreadable
+        return Result(
+            "total",
+            model.name,
+            FAIL,
+            f"{label}: {counted(expectation.unreadable, 'raw value')} in "
+            f"{model.source}.{total.source_column} not excluded and not a number, "
+            f"for example {shown}",
+            facts,
+        )
+    try:
+        types = {
+            name.lower(): kind for name, kind, *_ in con.execute(f"DESCRIBE {built}").fetchall()
+        }
+        missing = [
+            column for column in (total.column, total.by) if column and column.lower() not in types
+        ]
+        if missing:
+            return Result(
+                "total",
+                model.name,
+                FAIL,
+                f"{label}: column {', '.join(missing)} is not in the model",
+                {**facts, "missing_columns": missing},
+            )
+        kind = types[total.column.lower()]
+        if kind in FLOAT_TYPES:
+            return Result(
+                "total",
+                model.name,
+                FAIL,
+                f"{label}: the model holds money as floating point ({kind}), "
+                "which cannot add up exactly; use an integer or DECIMAL",
+                facts,
+            )
+        if kind not in INTEGER_TYPES and not kind.startswith("DECIMAL"):
+            return Result(
+                "total",
+                model.name,
+                FAIL,
+                f"{label}: the model column is {kind}, not a number; use an integer or DECIMAL",
+                facts,
+            )
+        group = f"CAST({quote_identifier(total.by)} AS VARCHAR)" if total.by else f"'{ALL}'"
+        actual = _sums(
+            con,
+            f"SELECT {group}, sum({quote_identifier(total.column)}) FROM {built} GROUP BY ALL",
+        )
+    except duckdb.Error as error:
+        return Result("total", model.name, FAIL, f"could not read the model: {error}", facts)
+    facts["model"] = actual
+    groups = sorted(
+        set(expectation.expected) | set(actual), key=lambda group: (group is None, group or "")
+    )
+    lines = []
+    for group in groups:
+        expected = expectation.expected.get(group, Decimal(0))
+        found = actual.get(group, Decimal(0))
+        if expected == found:
+            continue
+        parts = [f"raw {expectation.source_totals.get(group, Decimal(0))}"]
+        parts += [
+            f"{name} {amounts[group]}"
+            for name, amounts in expectation.excluded
+            if amounts.get(group, Decimal(0)) != 0
+        ]
+        difference = found - expected
+        direction = "over" if difference > 0 else "short"
+        prefix = f"{_group_label(group)}: " if total.by else ""
+        lines.append(
+            f"{prefix}{', '.join(parts)}, expected {expected}, model {found}, "
+            f"{abs(difference)} {direction}"
+        )
+    if lines:
+        kind_of_group = f"{total.by} values" if total.by else "totals"
+        head = (
+            f"{label}: {len(lines)} of {len(groups)} {kind_of_group} do not tie with the raw data"
+        )
+        return Result("total", model.name, FAIL, "\n".join([head, *lines]), facts)
+    return Result(
+        "total",
+        model.name,
+        PASS,
+        f"{label}: ties with the raw data, {_amounts(actual) or 'nothing to add up'}",
+        facts,
     )
 
 
