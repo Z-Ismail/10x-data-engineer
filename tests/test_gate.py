@@ -27,6 +27,7 @@ from tenx.gate import (
     GateError,
     ModelSpec,
     Result,
+    Total,
     check_build,
     check_key,
     check_rows,
@@ -87,6 +88,11 @@ class Declaration(unittest.TestCase):
                             {"name": "test_mode", "where": "mode = 'test'"},
                             {"name": "repeats", "duplicate_rows": True},
                         ],
+                        "totals": [
+                            {"column": "amount_minor", "source_column": "amount", "by": "currency"},
+                            {"column": "tax", "by": "currency", "source_by": "cur"},
+                            {"column": "fee"},
+                        ],
                     },
                     {"name": "orders", "key": ["order_id"]},
                 ]
@@ -102,6 +108,11 @@ class Declaration(unittest.TestCase):
                     exclusions=(
                         Exclusion(name="test_mode", where="mode = 'test'"),
                         Exclusion(name="repeats", duplicate_rows=True),
+                    ),
+                    totals=(
+                        Total("amount_minor", "amount", "currency", "currency"),
+                        Total("tax", "tax", "currency", "cur"),
+                        Total("fee", "fee"),
                     ),
                 ),
                 ModelSpec(name="orders", key=("order_id",)),
@@ -173,6 +184,24 @@ class Declaration(unittest.TestCase):
                         ],
                     }
                 ]
+            },
+            "totals without a source": {
+                "models": [{"name": "m", "key": ["id"], "totals": [{"column": "amount"}]}]
+            },
+            "totals that are not a list": {"models": [{**good, "totals": {"column": "amount"}}]},
+            "total without a column": {"models": [{**good, "totals": [{"by": "currency"}]}]},
+            "total with an empty column": {"models": [{**good, "totals": [{"column": " "}]}]},
+            "total grouped by a number": {
+                "models": [{**good, "totals": [{"column": "amount", "by": 1}]}]
+            },
+            "source_by without by": {
+                "models": [{**good, "totals": [{"column": "amount", "source_by": "currency"}]}]
+            },
+            "misspelt total field": {
+                "models": [{**good, "totals": [{"column": "amount", "group_by": "currency"}]}]
+            },
+            "column totalled twice": {
+                "models": [{**good, "totals": [{"column": "amount"}, {"column": "AMOUNT"}]}]
             },
         }
         for label, payload in mistakes.items():

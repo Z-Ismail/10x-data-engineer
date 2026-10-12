@@ -65,8 +65,9 @@ PROFILE_NAME = "tenx_gate"
 DATABASE_FILE = "build.duckdb"
 OUTPUT_TAIL = 15
 EXAMPLES = 3
-MODEL_FIELDS = {"name", "key", "source", "exclusions"}
+MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals"}
 EXCLUSION_FIELDS = {"name", "where", "duplicate_rows"}
+TOTAL_FIELDS = {"column", "source_column", "by", "source_by"}
 
 
 class GateError(Exception):
@@ -83,11 +84,27 @@ class Exclusion:
 
 
 @dataclass(frozen=True)
+class Total:
+    """A money column whose total must tie to the same column in the source.
+
+    The model column holds the amount in the same unit as the raw column.
+    With ``by``, totals are compared separately for each value of that
+    column, such as each currency.
+    """
+
+    column: str
+    source_column: str
+    by: str | None = None
+    source_by: str | None = None
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     name: str
     key: tuple[str, ...]
     source: str | None = None
     exclusions: tuple[Exclusion, ...] = ()
+    totals: tuple[Total, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -141,6 +158,34 @@ def _parse_exclusion(raw: object, model: str) -> Exclusion:
     return Exclusion(name=name, where=where, duplicate_rows=duplicate_rows)
 
 
+def _column_name(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _parse_total(raw: object, model: str) -> Total:
+    _require(isinstance(raw, dict), f"{model}: each total must be an object")
+    unknown = sorted(set(raw) - TOTAL_FIELDS)
+    _require(not unknown, f"{model}: unknown total field {', '.join(unknown)}")
+    column = raw.get("column")
+    _require(_column_name(column), f"{model}: a total needs the column to add up")
+    for name in ("source_column", "by", "source_by"):
+        _require(
+            raw.get(name) is None or _column_name(raw[name]),
+            f"{model}: total of {column}: {name} must be a column name",
+        )
+    _require(
+        raw.get("source_by") is None or raw.get("by") is not None,
+        f"{model}: total of {column}: source_by is given without by",
+    )
+    by = raw.get("by")
+    return Total(
+        column=column,
+        source_column=raw.get("source_column") or column,
+        by=by,
+        source_by=raw.get("source_by") or by,
+    )
+
+
 def _parse_model(raw: object) -> ModelSpec:
     _require(isinstance(raw, dict), "each model must be an object")
     name = raw.get("name")
@@ -176,7 +221,16 @@ def _parse_model(raw: object) -> ModelSpec:
         sum(exclusion.duplicate_rows for exclusion in exclusions) <= 1,
         f"{name}: duplicate_rows can be declared once",
     )
-    return ModelSpec(name=name, key=tuple(key), source=source, exclusions=exclusions)
+    listed = raw.get("totals", [])
+    _require(isinstance(listed, list), f"{name}: totals must be a list")
+    _require(
+        not listed or source is not None,
+        f"{name}: totals are compared with a source, and none is declared",
+    )
+    totals = tuple(_parse_total(item, name) for item in listed)
+    columns = [total.column.lower() for total in totals]
+    _require(len(set(columns)) == len(columns), f"{name}: a column is totalled twice")
+    return ModelSpec(name=name, key=tuple(key), source=source, exclusions=exclusions, totals=totals)
 
 
 def load_declaration(path: Path) -> list[ModelSpec]:
