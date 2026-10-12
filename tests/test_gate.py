@@ -1067,6 +1067,85 @@ class DemoProject(unittest.TestCase):
             results[("rows", "stg_billing__customers")].facts["model_rows"], len(self.customers)
         )
 
+    def live_money(self, change=lambda row, amount: amount):
+        """Live invoice money by currency, after changing each amount as a model might."""
+        totals = {}
+        for row in self.invoices:
+            if row["livemode"] == "true":
+                amount = change(row, int(row["amount_minor"]))
+                totals[row["currency"]] = totals.get(row["currency"], 0) + amount
+        return totals
+
+    def assert_money_fails(self, project, model_money):
+        """Only the totals check fails, and the model holds the money worked out here."""
+        results = self.run_on(project)
+        self.assert_only_failures(results, {("total", "stg_billing__invoices"): FAIL})
+        result = results[("total", "stg_billing__invoices")]
+        self.assertEqual(result.facts["expected"], self.live_money())
+        self.assertEqual(
+            {currency: amount for currency, amount in result.facts["model"].items() if amount},
+            {currency: amount for currency, amount in model_money.items() if amount},
+        )
+        return result
+
+    def test_a_row_swapped_for_an_excluded_one_fails_the_totals_check_alone(self):
+        # The right number of rows and unique keys, but the wrong money: the
+        # largest live invoice is dropped and the smallest test-mode one kept.
+        by_amount = sorted(self.invoices, key=lambda row: (int(row["amount_minor"]), row["id"]))
+        dropped = [row for row in by_amount if row["livemode"] == "true"][-1]
+        added = next(row for row in by_amount if row["livemode"] == "false")
+        self.assertNotEqual(int(dropped["amount_minor"]), int(added["amount_minor"]))
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "staging" / "stg_billing__invoices.sql",
+            "where livemode = 'true'",
+            f"where (livemode = 'true' and id <> '{dropped['id']}') or id = '{added['id']}'",
+        )
+        expected = self.live_money()
+        expected[dropped["currency"]] -= int(dropped["amount_minor"])
+        expected[added["currency"]] = expected.get(added["currency"], 0) + int(
+            added["amount_minor"]
+        )
+        self.assert_money_fails(project, expected)
+
+    def test_yen_converted_as_if_it_had_cents_fails_the_totals_check_alone(self):
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "staging" / "stg_billing__invoices.sql",
+            "cast(amount_minor as bigint) as amount_minor",
+            "case when currency = 'jpy' then cast(amount_minor as bigint) * 100"
+            " else cast(amount_minor as bigint) end as amount_minor",
+        )
+        model_money = self.live_money(
+            lambda row, amount: amount * 100 if row["currency"] == "jpy" else amount
+        )
+        self.assertNotEqual(model_money, self.live_money())
+        result = self.assert_money_fails(project, model_money)
+        self.assertIn("1 of", result.detail)
+        self.assertIn("\njpy: ", result.detail)
+
+    def test_refunds_made_positive_fail_the_totals_check_alone(self):
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "staging" / "stg_billing__invoices.sql",
+            "cast(amount_minor as bigint) as amount_minor",
+            "abs(cast(amount_minor as bigint)) as amount_minor",
+        )
+        model_money = self.live_money(lambda row, amount: abs(amount))
+        self.assertNotEqual(model_money, self.live_money())
+        self.assert_money_fails(project, model_money)
+
+    def test_money_held_as_floating_point_fails_the_totals_check_alone(self):
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "staging" / "stg_billing__invoices.sql",
+            "cast(amount_minor as bigint) as amount_minor",
+            "cast(amount_minor as double) as amount_minor",
+        )
+        results = self.run_on(project)
+        self.assert_only_failures(results, {("total", "stg_billing__invoices"): FAIL})
+        self.assertIn("floating point (DOUBLE)", results[("total", "stg_billing__invoices")].detail)
+
     def test_a_repeated_key_and_a_null_key_fail_the_key_check_alone(self):
         project = self.broken_copy()
         staging = project / "models" / "staging"
