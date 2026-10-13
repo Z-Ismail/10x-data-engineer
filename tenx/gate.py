@@ -159,6 +159,7 @@ class TotalExpectation:
     expected: dict[str | None, Decimal]
     unreadable: int = 0
     unreadable_examples: tuple[str, ...] = ()
+    blank: int = 0
 
 
 @dataclass
@@ -447,6 +448,9 @@ def expected_totals(
             f"SELECT {text} AS value FROM ({kept_once}) WHERE {text} <> '' AND NOT {is_number}"
         )
         (unreadable,) = con.execute(f"SELECT count(*) FROM ({unreadable_rows})").fetchone()
+        (blank,) = con.execute(
+            f"SELECT count(*) FROM ({kept_once}) WHERE coalesce({text}, '') = ''"
+        ).fetchone()
         examples = tuple(
             value
             for (value,) in con.execute(
@@ -470,6 +474,7 @@ def expected_totals(
         expected=expected,
         unreadable=unreadable,
         unreadable_examples=examples,
+        blank=blank,
     )
 
 
@@ -527,7 +532,15 @@ def check_total(
         "source": expectation.source_totals,
         "excluded": dict(expectation.excluded),
         "expected": expectation.expected,
+        "blank": expectation.blank,
     }
+    # Blank amounts add nothing, as SQL's sum ignores nulls, but are reported
+    # so that missing money is seen rather than quietly left out.
+    blank = (
+        f"; {counted(expectation.blank, 'blank raw value')} added nothing"
+        if expectation.blank
+        else ""
+    )
     if expectation.unreadable:
         shown = ", ".join(repr(value) for value in expectation.unreadable_examples)
         facts["unreadable"] = expectation.unreadable
@@ -537,7 +550,7 @@ def check_total(
             FAIL,
             f"{label}: {counted(expectation.unreadable, 'raw value')} in "
             f"{model.source}.{total.source_column} not excluded and not a number, "
-            f"for example {shown}",
+            f"for example {shown}{blank}",
             facts,
         )
     try:
@@ -607,13 +620,14 @@ def check_total(
         kind_of_group = f"{total.by} values" if total.by else "totals"
         head = (
             f"{label}: {len(lines)} of {len(groups)} {kind_of_group} do not tie with the raw data"
+            f"{blank}"
         )
         return Result("total", model.name, FAIL, "\n".join([head, *lines]), facts)
     return Result(
         "total",
         model.name,
         PASS,
-        f"{label}: ties with the raw data, {_amounts(actual) or 'nothing to add up'}",
+        f"{label}: ties with the raw data, {_amounts(actual) or 'nothing to add up'}{blank}",
         facts,
     )
 

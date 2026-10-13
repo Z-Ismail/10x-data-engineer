@@ -7,6 +7,7 @@ against copies of it that are each broken in one known way.
 """
 
 import csv
+import dataclasses
 import io
 import json
 import shutil
@@ -588,6 +589,35 @@ class TotalsExpectation(unittest.TestCase):
         self.assertEqual(expectation.excluded, (("unreadable", {"all": Decimal(0)}),))
         self.assertEqual(expectation.expected, {"all": Decimal("1038.945")})
 
+    def test_blank_amounts_add_nothing_and_are_counted(self):
+        self.assertEqual(self.expectation(Total("amount", "amount")).blank, 1)
+        excluded = self.expectation(
+            Total("amount", "amount"), Exclusion("no_amount", where="id = '8'")
+        )
+        self.assertEqual(excluded.blank, 0)
+        self.assertEqual(excluded.expected, {"all": Decimal("1038.945")})
+
+    def test_spaces_and_missing_json_fields_are_blank(self):
+        csv_path = write(
+            Path(self.tmp.name) / "shop" / "spaces.csv",
+            'id,amount\n1,5\n2,"   "\n3,\n4,-1\n',
+        )
+        jsonl_path = write(
+            Path(self.tmp.name) / "shop" / "partial.jsonl",
+            '{"id": 1, "amount": "5"}\n{"id": 2}\n{"id": 3, "amount": null}\n',
+        )
+        total = Total("amount", "amount")
+        for source, path, blank, expected in (
+            ("shop.spaces", csv_path, 2, "4"),
+            ("shop.partial", jsonl_path, 2, "5"),
+        ):
+            with self.subTest(source):
+                model = ModelSpec("stg", ("id",), source, (), (total,))
+                expectation = expected_totals(self.con, model, total, path)
+                self.assertEqual(expectation.blank, blank)
+                self.assertEqual(expectation.unreadable, 0)
+                self.assertEqual(expectation.expected, {"all": Decimal(expected)})
+
     def test_numbers_typed_by_a_json_file_are_added_exactly(self):
         # Read as numbers, 0.1 and 0.2 would add up to 0.30000000000000004.
         path = write(
@@ -644,6 +674,34 @@ class TotalCheck(unittest.TestCase):
         self.assertEqual(
             result.detail,
             "amount by currency: ties with the raw data, EUR 10.00, USD 25.00, (null) 4.00",
+        )
+
+    def test_blank_raw_amounts_are_reported(self):
+        expectation = TotalExpectation(
+            total=self.BY_CURRENCY,
+            source_totals=self.EXPECTATION.source_totals,
+            excluded=self.EXPECTATION.excluded,
+            expected=self.EXPECTATION.expected,
+            blank=2,
+        )
+        self.model([("usd", "25"), ("eur", "10"), (None, "4")])
+        result = self.check(expectation)
+        self.assertEqual(result.status, PASS)
+        self.assertEqual(result.facts["blank"], 2)
+        self.assertEqual(
+            result.detail,
+            "amount by currency: ties with the raw data, EUR 10.00, USD 25.00, (null) 4.00; "
+            "2 blank raw values added nothing",
+        )
+        self.model([("usd", "25"), ("eur", "9"), (None, "4")])
+        result = self.check(dataclasses.replace(expectation, blank=1))
+        self.assertEqual(result.status, FAIL)
+        self.assertTrue(
+            result.detail.startswith(
+                "amount by currency: 1 of 3 currency values do not tie with the raw data; "
+                "1 blank raw value added nothing\n"
+            ),
+            result.detail,
         )
 
     def test_whole_numbers_are_accepted(self):
@@ -1029,6 +1087,8 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(facts["excluded"], {"test_mode": test_mode})
         self.assertEqual(facts["expected"], live)
         self.assertEqual(facts["model"], live)
+        # Every demo invoice has an amount: int() above would fail on a blank.
+        self.assertEqual(facts["blank"], 0)
 
         # The build went into the workdir, and the project folder is untouched.
         self.assertTrue((workdir / "build.duckdb").is_file())
