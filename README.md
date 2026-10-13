@@ -156,10 +156,10 @@ PASS  build  stg_billing__invoices   built as "build"."main"."stg_billing__invoi
 FAIL  rows   stg_billing__invoices   496 rows in billing.invoices, 20 excluded (test_mode 20), 476 expected, 458 in the model: 18 fewer than expected
 PASS  key    stg_billing__invoices   invoice_id: unique and not null over 458 rows
 FAIL  total  stg_billing__invoices   amount_minor by currency: 4 of 4 currency values do not tie with the raw data
-      eur: raw 987100, expected 987100, model 917500, 69600 short
-      gbp: raw 1351900, expected 1351900, model 1329200, 22700 short
-      jpy: raw 2537400, expected 2537400, model 2507700, 29700 short
-      usd: raw 24152800, test_mode 19998000, expected 4154800, model 4070700, 84100 short
+      EUR: raw 987100, expected 987100, model 917500, 69600 short
+      GBP: raw 1351900, expected 1351900, model 1329200, 22700 short
+      JPY: raw 2537400, expected 2537400, model 2507700, 29700 short
+      USD: raw 24152800, test_mode 19998000, expected 4154800, model 4070700, 84100 short
 ...
 ```
 
@@ -178,7 +178,7 @@ exclusion removed, so the figures can be followed by hand:
 
 ```
 FAIL  total  stg_billing__invoices   amount_minor by currency: 1 of 4 currency values do not tie with the raw data
-      jpy: raw 2537400, expected 2537400, model 253740000, 251202600 over
+      JPY: raw 2537400, expected 2537400, model 253740000, 251202600 over
 ```
 
 That report is from a model that treats yen as if it had cents.
@@ -195,7 +195,14 @@ Rules for totals:
 - Raw amounts must be plain decimal numbers such as `-1250` or `12.50`. They
   are added at full precision, so nothing is rounded. A raw value that is not
   a number, such as `n/a` or `12,50`, fails the check unless an exclusion
-  removes its row.
+  removes its row; the report gives how many rows and up to three of the
+  values.
+- A blank raw amount adds nothing, as it would in SQL's `sum`. The report
+  counts blank amounts so that missing money is visible.
+- Values of the `by` column are compared in capitals with surrounding spaces
+  removed, so `usd` in the raw file and `USD` in the model are the same
+  currency, and the report shows `USD`. Nothing else is changed: `US$` is
+  not `USD`.
 - If `source_column` or `source_by` is given, the raw file's column of that
   name is used; otherwise the raw column has the same name as the model's.
 

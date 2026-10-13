@@ -6,6 +6,10 @@ Notable changes to this project.
 
 ### Changed
 
+- Gate: the `total` check compares the values of the `by` column in capitals
+  with surrounding spaces removed. A correct model that writes currency codes
+  in capitals (`USD`) where the raw file has lower case (`usd`) used to fail.
+- Gate: the `total` check reports how many raw amounts were blank.
 - `make install` now installs dbt-core and dbt-duckdb as well as DuckDB.
 
 ### Added
