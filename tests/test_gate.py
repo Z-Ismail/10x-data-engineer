@@ -534,11 +534,11 @@ class TotalsExpectation(unittest.TestCase):
 
     def test_amounts_are_added_by_group_without_rounding(self):
         expectation = self.expectation(Total("amount", "amount", "currency", "currency"))
-        raw = amounts(usd="23.495", eur="13.45", jpy="1000", none="2")
+        raw = amounts(USD="23.495", EUR="13.45", JPY="1000", none="2")
         self.assertEqual(expectation.source_totals, raw)
         self.assertEqual(expectation.expected, raw)
         # The three decimal places of row 10 survive the addition.
-        self.assertEqual(str(expectation.source_totals["usd"]), "23.495")
+        self.assertEqual(str(expectation.source_totals["USD"]), "23.495")
 
     def test_each_exclusion_is_charged_to_the_first_filter_that_matches(self):
         expectation = self.expectation(
@@ -550,19 +550,29 @@ class TotalsExpectation(unittest.TestCase):
         self.assertEqual(
             expectation.excluded,
             (
-                ("test_mode", amounts(usd="9", eur="7.25")),
-                ("void", amounts(usd="5")),
-                ("repeats", amounts(usd="0", eur="3.10", jpy="0", none="0")),
+                ("test_mode", amounts(USD="9", EUR="7.25")),
+                ("void", amounts(USD="5")),
+                ("repeats", amounts(USD="0", EUR="3.10", JPY="0", none="0")),
             ),
         )
         self.assertEqual(
-            expectation.expected, amounts(usd="9.495", eur="3.10", jpy="1000", none="2")
+            expectation.expected, amounts(USD="9.495", EUR="3.10", JPY="1000", none="2")
         )
+
+    def test_raw_codes_in_any_case_or_spacing_are_one_group(self):
+        path = write(
+            Path(self.tmp.name) / "shop" / "mixed.csv",
+            "id,currency,amount\n1,usd,1.50\n2,USD,2\n3, Usd ,0.25\n4,eur,7\n5,,1\n6,EUR,-2\n",
+        )
+        total = Total("amount", "amount", "currency", "currency")
+        model = ModelSpec("stg_mixed", ("id",), "shop.mixed", (), (total,))
+        expectation = expected_totals(self.con, model, total, path)
+        self.assertEqual(expectation.expected, amounts(USD="3.75", EUR="5", none="1"))
 
     def test_the_source_columns_can_have_other_names(self):
         expectation = self.expectation(Total("amount_minor", "amount", "cur", "currency"))
         self.assertEqual(
-            expectation.expected, amounts(usd="23.495", eur="13.45", jpy="1000", none="2")
+            expectation.expected, amounts(USD="23.495", EUR="13.45", JPY="1000", none="2")
         )
 
     def test_text_that_is_not_a_number_is_counted_and_shown(self):
@@ -590,7 +600,7 @@ class TotalsExpectation(unittest.TestCase):
         total = Total("amount", "amount", "currency", "currency")
         model = ModelSpec("stg_refunds", ("id",), "shop.refunds", (), (total,))
         expectation = expected_totals(self.con, model, total, path)
-        self.assertEqual(expectation.expected, amounts(usd="0.3", eur="99.5"))
+        self.assertEqual(expectation.expected, amounts(USD="0.3", EUR="99.5"))
         self.assertEqual(expectation.unreadable, 0)
 
     def test_a_missing_source_column_stops_the_gate(self):
@@ -601,12 +611,12 @@ class TotalsExpectation(unittest.TestCase):
 class TotalCheck(unittest.TestCase):
     BY_CURRENCY = Total("amount", "amount", "currency", "currency")
     # Raw usd 30 less 5 test mode, eur 12.50 less 2.50 test mode, and 4 with
-    # no currency: the model must hold usd 25, eur 10.00 and 4.
+    # no currency: the model must hold USD 25, EUR 10.00 and 4.
     EXPECTATION = TotalExpectation(
         total=BY_CURRENCY,
-        source_totals=amounts(usd="30", eur="12.50", none="4"),
-        excluded=(("test_mode", amounts(usd="5", eur="2.50")),),
-        expected=amounts(usd="25", eur="10.00", none="4"),
+        source_totals=amounts(USD="30", EUR="12.50", none="4"),
+        excluded=(("test_mode", amounts(USD="5", EUR="2.50")),),
+        expected=amounts(USD="25", EUR="10.00", none="4"),
     )
 
     def setUp(self):
@@ -630,10 +640,10 @@ class TotalCheck(unittest.TestCase):
         self.model([("usd", "20"), ("usd", "5"), ("eur", "7.25"), ("eur", "2.75"), (None, "4")])
         result = self.check()
         self.assertEqual(result.status, PASS, result.detail)
-        self.assertEqual(result.facts["model"], amounts(usd="25", eur="10", none="4"))
+        self.assertEqual(result.facts["model"], amounts(USD="25", EUR="10", none="4"))
         self.assertEqual(
             result.detail,
-            "amount by currency: ties with the raw data, eur 10.00, usd 25.00, (null) 4.00",
+            "amount by currency: ties with the raw data, EUR 10.00, USD 25.00, (null) 4.00",
         )
 
     def test_whole_numbers_are_accepted(self):
@@ -647,7 +657,7 @@ class TotalCheck(unittest.TestCase):
         self.assertEqual(
             result.detail,
             "amount by currency: 1 of 3 currency values do not tie with the raw data\n"
-            "usd: raw 30, test_mode 5, expected 25, model 20.00, 5.00 short",
+            "USD: raw 30, test_mode 5, expected 25, model 20.00, 5.00 short",
         )
 
     def test_a_cent_over_fails(self):
@@ -655,16 +665,35 @@ class TotalCheck(unittest.TestCase):
         result = self.check()
         self.assertEqual(result.status, FAIL)
         self.assertIn(
-            "eur: raw 12.50, test_mode 2.50, expected 10.00, model 10.01, 0.01 over", result.detail
+            "EUR: raw 12.50, test_mode 2.50, expected 10.00, model 10.01, 0.01 over", result.detail
         )
 
-    def test_a_renamed_currency_fails_on_both_sides(self):
-        self.model([("USD", "25"), ("eur", "10"), (None, "4")])
+    def test_currency_codes_tie_whatever_their_case_or_spacing(self):
+        self.model([("USD", "20"), ("usd", "3"), (" Usd ", "2"), ("EUR", "10"), (None, "4")])
+        result = self.check()
+        self.assertEqual(result.status, PASS, result.detail)
+        self.assertEqual(result.facts["model"], amounts(USD="25", EUR="10", none="4"))
+
+    def test_money_moved_to_another_currency_fails_on_both_sides(self):
+        # The euros are labelled as dollars: the grand total is right, but
+        # neither currency is.
+        self.model([("usd", "25"), ("USD", "10"), (None, "4")])
         result = self.check()
         self.assertEqual(result.status, FAIL)
-        self.assertIn("2 of 4 currency values", result.detail)
-        self.assertIn("USD: raw 0, expected 0, model 25.00, 25.00 over", result.detail)
-        self.assertIn("usd: raw 30, test_mode 5, expected 25, model 0, 25 short", result.detail)
+        self.assertIn("2 of 3 currency values", result.detail)
+        self.assertIn(
+            "EUR: raw 12.50, test_mode 2.50, expected 10.00, model 0, 10.00 short", result.detail
+        )
+        self.assertIn(
+            "USD: raw 30, test_mode 5, expected 25, model 35.00, 10.00 over", result.detail
+        )
+
+    def test_a_currency_spelt_differently_is_not_the_same_currency(self):
+        self.model([("US$", "25"), ("eur", "10"), (None, "4")])
+        result = self.check()
+        self.assertEqual(result.status, FAIL)
+        self.assertIn("US$: raw 0, expected 0, model 25.00, 25.00 over", result.detail)
+        self.assertIn("USD: raw 30, test_mode 5, expected 25, model 0, 25 short", result.detail)
 
     def test_a_null_currency_is_a_group_of_its_own(self):
         self.model([("usd", "25"), ("eur", "14")])
@@ -899,6 +928,11 @@ def replace_in(path: Path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new), encoding="utf-8")
 
 
+def currency_of(row: dict) -> str:
+    """The currency of a raw invoice, as the totals check groups it: in capitals."""
+    return row["currency"].strip().upper()
+
+
 class DemoProject(unittest.TestCase):
     """The gate run end to end with dbt, on generated demo data."""
 
@@ -983,12 +1017,12 @@ class DemoProject(unittest.TestCase):
         # Money by currency, recounted from the file in whole minor units.
         raw, test_mode = {}, {}
         for row in self.invoices:
-            amount, currency = int(row["amount_minor"]), row["currency"]
+            amount, currency = int(row["amount_minor"]), currency_of(row)
             raw[currency] = raw.get(currency, 0) + amount
             if row["livemode"] == "false":
                 test_mode[currency] = test_mode.get(currency, 0) + amount
         live = {currency: raw[currency] - test_mode.get(currency, 0) for currency in raw}
-        self.assertIn("jpy", live)
+        self.assertIn("JPY", live)
         self.assertGreater(len(test_mode), 0)
         facts = results[("total", "stg_billing__invoices")].facts
         self.assertEqual(facts["source"], raw)
@@ -1051,9 +1085,8 @@ class DemoProject(unittest.TestCase):
         refunded = {}
         for row in live_invoices:
             if int(row["amount_minor"]) <= 0:
-                refunded[row["currency"]] = refunded.get(row["currency"], 0) + int(
-                    row["amount_minor"]
-                )
+                currency = currency_of(row)
+                refunded[currency] = refunded.get(currency, 0) + int(row["amount_minor"])
         facts = results[("total", "stg_billing__invoices")].facts
         self.assertEqual(
             {
@@ -1073,7 +1106,7 @@ class DemoProject(unittest.TestCase):
         for row in self.invoices:
             if row["livemode"] == "true":
                 amount = change(row, int(row["amount_minor"]))
-                totals[row["currency"]] = totals.get(row["currency"], 0) + amount
+                totals[currency_of(row)] = totals.get(currency_of(row), 0) + amount
         return totals
 
     def assert_money_fails(self, project, model_money):
@@ -1102,8 +1135,8 @@ class DemoProject(unittest.TestCase):
             f"where (livemode = 'true' and id <> '{dropped['id']}') or id = '{added['id']}'",
         )
         expected = self.live_money()
-        expected[dropped["currency"]] -= int(dropped["amount_minor"])
-        expected[added["currency"]] = expected.get(added["currency"], 0) + int(
+        expected[currency_of(dropped)] -= int(dropped["amount_minor"])
+        expected[currency_of(added)] = expected.get(currency_of(added), 0) + int(
             added["amount_minor"]
         )
         self.assert_money_fails(project, expected)
@@ -1122,7 +1155,7 @@ class DemoProject(unittest.TestCase):
         self.assertNotEqual(model_money, self.live_money())
         result = self.assert_money_fails(project, model_money)
         self.assertIn("1 of", result.detail)
-        self.assertIn("\njpy: ", result.detail)
+        self.assertIn("\nJPY: ", result.detail)
 
     def test_refunds_made_positive_fail_the_totals_check_alone(self):
         project = self.broken_copy()

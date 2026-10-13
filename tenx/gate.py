@@ -40,6 +40,8 @@ what each one removed.
 
 A total names a model column and, if it is named differently in the raw file,
 ``source_column``; likewise ``by`` and ``source_by`` for the grouping column.
+Group values are compared in capitals with surrounding spaces removed, so
+``usd`` in the raw file and ``USD`` in the model are the same currency.
 The model column must hold the amount in the same unit as the raw file, as an
 integer or DECIMAL. Raw amounts must be plain decimal numbers and are added
 without rounding.
@@ -146,8 +148,9 @@ class RowExpectation:
 class TotalExpectation:
     """What a money column must add up to, worked out from the raw file alone.
 
-    Each mapping goes from a value of the grouping column, as text, to an
-    amount. ``expected`` is the raw total less every exclusion, group by group.
+    Each mapping goes from a value of the grouping column, as text in
+    capitals, to an amount. ``expected`` is the raw total less every
+    exclusion, group by group.
     """
 
     total: Total
@@ -370,6 +373,19 @@ def expected_rows(con: duckdb.DuckDBPyConnection, model: ModelSpec, path: Path) 
     )
 
 
+def _group(column: str | None) -> str:
+    """SQL for the group a row's amount is added to.
+
+    Codes such as currencies are written in capitals by the standard but in
+    lower case by some sources, so both sides are compared in capitals with
+    surrounding spaces removed. Nothing else is changed: a value spelt
+    differently is a different group.
+    """
+    if column is None:
+        return f"'{ALL}'"
+    return f"upper(trim(CAST({quote_identifier(column)} AS VARCHAR)))"
+
+
 def _sums(con: duckdb.DuckDBPyConnection, query: str) -> dict[str | None, Decimal]:
     """Run a query of (group, amount) rows into a mapping of exact amounts."""
     return {
@@ -391,7 +407,7 @@ def expected_totals(
     source = relation(path)
     text = f"trim(CAST({quote_identifier(total.source_column)} AS VARCHAR))"
     is_number = f"regexp_full_match({text}, '{PLAIN_NUMBER}')"
-    group = f"CAST({quote_identifier(total.source_by)} AS VARCHAR)" if total.by else f"'{ALL}'"
+    group = _group(total.source_by if total.by else None)
     claimed, kept_condition = claimed_by_filters(model)
     distinct = any(exclusion.duplicate_rows for exclusion in model.exclusions)
     kept = f"SELECT * FROM {source} WHERE {kept_condition}"
@@ -501,9 +517,9 @@ def check_total(
 ) -> Result:
     """The model's money must equal the raw money less the exclusions, exactly.
 
-    Totals are compared group by group, and a group found on one side only is
-    compared with zero. The model column must hold whole numbers or DECIMAL:
-    floating point cannot hold money exactly.
+    Totals are compared group by group, in capitals, and a group found on one
+    side only is compared with zero. The model column must hold whole numbers
+    or DECIMAL: floating point cannot hold money exactly.
     """
     total = expectation.total
     label = f"{total.column} by {total.by}" if total.by else total.column
@@ -557,7 +573,7 @@ def check_total(
                 f"{label}: the model column is {kind}, not a number; use an integer or DECIMAL",
                 facts,
             )
-        group = f"CAST({quote_identifier(total.by)} AS VARCHAR)" if total.by else f"'{ALL}'"
+        group = _group(total.by)
         actual = _sums(
             con,
             f"SELECT {group}, sum({quote_identifier(total.column)}) FROM {built} GROUP BY ALL",
