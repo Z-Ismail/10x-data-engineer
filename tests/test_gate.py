@@ -1179,6 +1179,41 @@ class DemoProject(unittest.TestCase):
         self.assert_only_failures(results, {("total", "stg_billing__invoices"): FAIL})
         self.assertIn("floating point (DOUBLE)", results[("total", "stg_billing__invoices")].detail)
 
+    def test_a_project_that_writes_currency_in_capitals_passes(self):
+        # A correct project written differently from the reference: the raw
+        # file holds `usd`, the model `USD`.
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "staging" / "stg_billing__invoices.sql",
+            "    currency,\n",
+            "    upper(currency) as currency,\n",
+        )
+        self.assertTrue(any(row["currency"] != currency_of(row) for row in self.invoices))
+        results = self.run_on(project)
+        self.assert_only_failures(results, {})
+        facts = results[("total", "stg_billing__invoices")].facts
+        self.assertEqual(facts["expected"], self.live_money())
+        self.assertEqual(facts["model"], self.live_money())
+
+    def test_money_moved_to_another_currency_fails_the_totals_check_alone(self):
+        # Every amount is kept and the grand total is right, but the yen is
+        # labelled as another currency.
+        live = self.live_money()
+        other = min(currency for currency in live if currency != "JPY")
+        self.assertNotEqual(live["JPY"], 0)
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "staging" / "stg_billing__invoices.sql",
+            "    currency,\n",
+            f"    case when currency = 'jpy' then '{other.lower()}' else currency end as currency,\n",
+        )
+        moved = dict(live)
+        moved[other] += moved.pop("JPY")
+        result = self.assert_money_fails(project, moved)
+        self.assertIn("2 of", result.detail)
+        self.assertIn("\nJPY: ", result.detail)
+        self.assertIn(f"\n{other}: ", result.detail)
+
     def test_a_repeated_key_and_a_null_key_fail_the_key_check_alone(self):
         project = self.broken_copy()
         staging = project / "models" / "staging"
