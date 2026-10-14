@@ -1468,6 +1468,77 @@ class DemoProject(unittest.TestCase):
         self.assertIn("\nJPY: ", result.detail)
         self.assertIn(f"\n{other}: ", result.detail)
 
+    def test_a_random_identifier_fails_the_repeat_check_alone(self):
+        # Every row gets a new identifier on each build: the right rows, keys
+        # and money, but not the same tables twice.
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "staging" / "stg_crm__accounts.sql",
+            "    account_id,\n",
+            "    account_id,\n    uuid() as row_uid,\n",
+        )
+        results = self.run_on(project)
+        self.assert_only_failures(results, {("repeat", "stg_crm__accounts"): FAIL})
+        rows = len(self.accounts)
+        self.assertEqual(
+            results[("repeat", "stg_crm__accounts")].facts,
+            {
+                "rows": rows,
+                "second_rows": rows,
+                "only_first": rows,
+                "only_second": rows,
+                "differing_columns": ["row_uid"],
+            },
+        )
+
+    def test_a_load_time_fails_the_repeat_check_alone(self):
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "staging" / "stg_billing__invoices.sql",
+            "    status,\n",
+            "    status,\n    current_timestamp as loaded_at,\n",
+        )
+        results = self.run_on(project)
+        self.assert_only_failures(results, {("repeat", "stg_billing__invoices"): FAIL})
+        result = results[("repeat", "stg_billing__invoices")]
+        live = sum(1 for row in self.invoices if row["livemode"] == "true")
+        self.assertEqual(result.facts["only_first"], live)
+        self.assertEqual(result.facts["differing_columns"], ["loaded_at"])
+        self.assertIn("values differ in loaded_at", result.detail)
+
+    def test_views_and_an_undeclared_model_are_compared(self):
+        # A correct project written differently from the reference: models
+        # are views, and a mart reads a staging view through ref(). The mart
+        # is not declared but is compared all the same.
+        project = self.broken_copy()
+        replace_in(project / "dbt_project.yml", "+materialized: table", "+materialized: view")
+        write(
+            project / "models" / "marts" / "invoices_by_currency.sql",
+            "select upper(currency) as currency, sum(amount_minor) as amount_minor,"
+            " count(*) as invoices\nfrom {{ ref('stg_billing__invoices') }}\ngroup by 1\n",
+        )
+        results = self.run_on(project)
+        mart = results.pop(("repeat", "invoices_by_currency"))
+        self.assert_only_failures(results, {})
+        self.assertEqual(mart.status, PASS)
+        self.assertEqual(mart.facts["rows"], len(self.live_money()))
+
+    def test_an_undeclared_model_that_does_not_repeat_fails(self):
+        project = self.broken_copy()
+        write(
+            project / "models" / "marts" / "invoice_snapshot.sql",
+            "select upper(currency) as currency, count(*) as invoices,"
+            " current_timestamp as taken_at\nfrom {{ ref('stg_billing__invoices') }}\ngroup by 1\n",
+        )
+        results = self.run_on(project)
+        mart = results.pop(("repeat", "invoice_snapshot"))
+        self.assert_only_failures(results, {})
+        self.assertEqual(mart.status, FAIL)
+        currencies = len(self.live_money())
+        self.assertEqual(mart.facts["only_first"], currencies)
+        self.assertEqual(mart.facts["only_second"], currencies)
+        self.assertEqual(mart.facts["differing_columns"], ["taken_at"])
+
     def test_a_repeated_key_and_a_null_key_fail_the_key_check_alone(self):
         project = self.broken_copy()
         staging = project / "models" / "staging"
