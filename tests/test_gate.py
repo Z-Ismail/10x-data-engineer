@@ -31,6 +31,7 @@ from tenx.gate import (
     Result,
     Total,
     TotalExpectation,
+    built_models,
     check_build,
     check_key,
     check_repeat,
@@ -389,6 +390,44 @@ class BuildCheck(unittest.TestCase):
         self.assertIn("exited 2", results[0].detail)
         self.assertIn("line 40", results[0].detail)
         self.assertNotIn("line 20", results[0].detail)
+
+
+class BuiltModels(unittest.TestCase):
+    def test_only_models_that_were_built_are_listed(self):
+        run_results = {
+            "results": [
+                node("model.shop.stg_orders", "success", '"build"."main"."stg_orders"'),
+                node("model.shop.stg_items", "error", '"build"."main"."stg_items"'),
+                node("model.shop.stg_lines", "skipped", '"build"."main"."stg_lines"'),
+                node("test.shop.unique_stg_orders_id.abc", "pass"),
+                node("seed.shop.rates", "success", '"build"."main"."rates"'),
+                node("model.shop.no_relation", "success"),
+            ]
+        }
+        self.assertEqual(
+            built_models(run_results),
+            {"model.shop.stg_orders": ("stg_orders", '"build"."main"."stg_orders"')},
+        )
+
+    def test_a_name_two_packages_share_is_given_in_full(self):
+        run_results = {
+            "results": [
+                node("model.shop.orders", "success", '"build"."main"."orders"'),
+                node("model.other.orders", "success", '"build"."other"."orders"'),
+                node("model.shop.items", "success", '"build"."main"."items"'),
+            ]
+        }
+        self.assertEqual(
+            built_models(run_results),
+            {
+                "model.shop.orders": ("model.shop.orders", '"build"."main"."orders"'),
+                "model.other.orders": ("model.other.orders", '"build"."other"."orders"'),
+                "model.shop.items": ("items", '"build"."main"."items"'),
+            },
+        )
+
+    def test_no_results_means_no_models(self):
+        self.assertEqual(built_models(None), {})
 
 
 class RowsCheck(unittest.TestCase):
@@ -1173,8 +1212,12 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(actual, expected)
         self.assertEqual(
             set(results),
-            {("build", "project"), ("total", "stg_billing__invoices")}
-            | {(check, model) for check in ("build", "rows", "key") for model in self.models},
+            {("build", "project"), ("repeat", "project"), ("total", "stg_billing__invoices")}
+            | {
+                (check, model)
+                for check in ("build", "rows", "key", "repeat")
+                for model in self.models
+            },
         )
 
     def test_the_correct_project_passes_with_the_recounted_figures(self):
@@ -1210,6 +1253,16 @@ class DemoProject(unittest.TestCase):
                     results[("key", model)].facts,
                     {"rows": kept, "null_rows": 0, "repeated_keys": 0, "surplus_rows": 0},
                 )
+                self.assertEqual(
+                    results[("repeat", model)].facts,
+                    {
+                        "rows": kept,
+                        "second_rows": kept,
+                        "only_first": 0,
+                        "only_second": 0,
+                        "differing_columns": [],
+                    },
+                )
 
         # Money by currency, recounted from the file in whole minor units.
         raw, test_mode = {}, {}
@@ -1232,6 +1285,8 @@ class DemoProject(unittest.TestCase):
         # The build went into the workdir, and the project folder is untouched.
         self.assertTrue((workdir / "build.duckdb").is_file())
         self.assertTrue((workdir / "target" / "run_results.json").is_file())
+        self.assertTrue((workdir / "repeat" / "repeat.duckdb").is_file())
+        self.assertTrue((workdir / "repeat" / "target" / "run_results.json").is_file())
         self.assertFalse((PROJECT / "target").exists())
         self.assertFalse((PROJECT / "logs").exists())
 
@@ -1240,7 +1295,7 @@ class DemoProject(unittest.TestCase):
         with redirect_stdout(stdout):
             code = main([str(PROJECT), "--raw", str(self.raw), "--checks", str(DECLARATION)])
         self.assertEqual(code, 0)
-        self.assertTrue(stdout.getvalue().startswith("gate: PASS (14 passed, 0 failed, 0 not run)"))
+        self.assertTrue(stdout.getvalue().startswith("gate: PASS (19 passed, 0 failed, 0 not run)"))
 
     def test_lost_and_surplus_rows_fail_the_rows_check(self):
         project = self.broken_copy()
@@ -1464,6 +1519,9 @@ class DemoProject(unittest.TestCase):
                 ("build", "stg_crm__accounts"): FAIL,
                 ("rows", "stg_crm__accounts"): SKIP,
                 ("key", "stg_crm__accounts"): SKIP,
+                # The second build fails the same way; the other models repeat.
+                ("repeat", "project"): FAIL,
+                ("repeat", "stg_crm__accounts"): SKIP,
             },
         )
         self.assertIn("model.demo.stg_crm__accounts: error", results[("build", "project")].detail)
@@ -1481,6 +1539,7 @@ class DemoProject(unittest.TestCase):
                 ("build", "stg_events__events"): FAIL,
                 ("rows", "stg_events__events"): SKIP,
                 ("key", "stg_events__events"): SKIP,
+                ("repeat", "stg_events__events"): SKIP,
             },
         )
 
@@ -1496,12 +1555,14 @@ class DemoProject(unittest.TestCase):
             code = main([str(project), "--raw", str(self.raw), "--checks", str(DECLARATION)])
         self.assertEqual(code, 1)
         report = stdout.getvalue()
-        self.assertTrue(report.startswith("gate: FAIL (11 passed, 3 failed, 0 not run)"), report)
-        self.assertRegex(report, r"FAIL  build  project +dbt build exited 1, 1 of 12 nodes")
+        self.assertTrue(report.startswith("gate: FAIL (15 passed, 4 failed, 0 not run)"), report)
+        self.assertRegex(report, r"FAIL  build   project +dbt build exited 1, 1 of 12 nodes")
+        self.assertRegex(report, r"FAIL  repeat  project +second build: dbt build exited 1")
         self.assertRegex(report, r"test\.demo\.unique_stg_events__events_event_id\.\w+: fail")
-        self.assertRegex(report, r"FAIL  rows   stg_events__events")
-        self.assertRegex(report, r"FAIL  key    stg_events__events")
-        self.assertRegex(report, r"PASS  build  stg_events__events")
+        self.assertRegex(report, r"FAIL  rows    stg_events__events")
+        self.assertRegex(report, r"FAIL  key     stg_events__events")
+        self.assertRegex(report, r"PASS  build   stg_events__events")
+        self.assertRegex(report, r"PASS  repeat  stg_events__events")
 
     def test_a_project_dbt_cannot_parse_fails_without_results(self):
         project = self.broken_copy()
@@ -1510,9 +1571,15 @@ class DemoProject(unittest.TestCase):
         failures = {key: result.status for key, result in results.items() if result.status != PASS}
         self.assertEqual(
             failures,
-            {("build", "project"): FAIL, ("total", "stg_billing__invoices"): SKIP}
+            {
+                ("build", "project"): FAIL,
+                ("repeat", "project"): SKIP,
+                ("total", "stg_billing__invoices"): SKIP,
+            }
             | {("build", model): FAIL for model in self.models}
-            | {(check, model): SKIP for check in ("rows", "key") for model in self.models},
+            | {
+                (check, model): SKIP for check in ("rows", "key", "repeat") for model in self.models
+            },
         )
         self.assertIn("nowhere", results[("build", "project")].detail)
 

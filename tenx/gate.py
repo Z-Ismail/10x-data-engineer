@@ -11,6 +11,8 @@ and then asks its own questions of the result:
     total  each declared money column adds up to exactly the raw total, less
            what the exclusions removed, for each value of a column such as
            the currency
+    repeat each model comes out the same when the project is built a second
+           time into another empty database
 
 What to expect is declared in a JSON file kept outside the dbt project, so
 that whoever writes the models cannot relax a check to make it pass:
@@ -70,7 +72,14 @@ from pathlib import Path
 
 import duckdb
 
-from tenx.profile import ProfileError, discover, quote_identifier, relation, table_name
+from tenx.profile import (
+    ProfileError,
+    discover,
+    quote_identifier,
+    quote_literal,
+    relation,
+    table_name,
+)
 
 PASS, FAIL, SKIP = "pass", "fail", "skip"
 # Statuses dbt records for a node that did what was asked. A test set to warn
@@ -78,6 +87,11 @@ PASS, FAIL, SKIP = "pass", "fail", "skip"
 ACCEPTED_STATUSES = {"success", "pass", "warn"}
 PROFILE_NAME = "tenx_gate"
 DATABASE_FILE = "build.duckdb"
+# The second build has a database file of its own name. dbt-duckdb names the
+# catalog after the file, and a view refers to other models through that name,
+# so two files with one name could not be opened side by side.
+REPEAT_DIR = "repeat"
+REPEAT_FILE = "repeat.duckdb"
 OUTPUT_TAIL = 15
 EXAMPLES = 3
 MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals"}
@@ -861,7 +875,62 @@ def dbt_installed() -> bool:
         return False
 
 
-def build_project(project: Path, raw: Path, workdir: Path) -> tuple[int, dict | None, str]:
+def built_models(run_results: dict | None) -> dict[str, tuple[str, str]]:
+    """Every model a build produced, by unique id, with its name and relation.
+
+    The name is the model's own unless two packages use it, in which case it
+    is the unique id.
+    """
+    built = {
+        str(node["unique_id"]): str(node["relation_name"])
+        for node in (run_results or {}).get("results", [])
+        if str(node.get("unique_id", "")).startswith("model.")
+        and node.get("status") == "success"
+        and node.get("relation_name")
+    }
+    names = [unique_id.split(".", 2)[-1] for unique_id in built]
+    return {
+        unique_id: (name if names.count(name) == 1 else unique_id, relation_name)
+        for (unique_id, relation_name), name in zip(built.items(), names)
+    }
+
+
+def check_repeat_build(
+    workdir: Path,
+    first: dict[str, tuple[str, str]],
+    exit_code: int,
+    run_results: dict | None,
+    output: str,
+) -> list[Result]:
+    """Judge a second build of the project against the first, model by model.
+
+    ``first`` holds the models the first build produced. Each must be
+    produced again, with the same rows.
+    """
+    (judged,), _ = check_build(exit_code, run_results, [], output)
+    result = Result("repeat", "project", judged.status, f"second build: {judged.detail}")
+    results = [result]
+    second = built_models(run_results)
+    database = workdir / REPEAT_DIR / REPEAT_FILE
+    con = duckdb.connect(str(workdir / DATABASE_FILE), read_only=True)
+    try:
+        if database.is_file():
+            con.execute(f"ATTACH {quote_literal(str(database))} (READ_ONLY)")
+        for unique_id, (name, relation_name) in first.items():
+            if unique_id not in second:
+                results.append(
+                    Result("repeat", name, FAIL, "the second build did not produce this model")
+                )
+            else:
+                results.append(check_repeat(con, name, relation_name, second[unique_id][1]))
+    finally:
+        con.close()
+    return results
+
+
+def build_project(
+    project: Path, raw: Path, workdir: Path, database_file: str = DATABASE_FILE
+) -> tuple[int, dict | None, str]:
     """Run ``dbt build`` on the project into a new database under workdir.
 
     dbt runs as its own process, as its documentation asks of callers, and
@@ -875,7 +944,7 @@ def build_project(project: Path, raw: Path, workdir: Path) -> tuple[int, dict | 
         )
     profiles = workdir / "profiles"
     profiles.mkdir(parents=True)
-    database = workdir / DATABASE_FILE
+    database = workdir / database_file
     (profiles / "profiles.yml").write_text(
         f"{PROFILE_NAME}:\n"
         "  target: gate\n"
@@ -948,6 +1017,7 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
     results, relations = check_build(exit_code, run_results, models, output)
 
     database = workdir / DATABASE_FILE
+    first = built_models(run_results) if database.is_file() else {}
     con = duckdb.connect(str(database), read_only=True) if database.is_file() else None
     try:
         for model in models:
@@ -970,6 +1040,21 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
     finally:
         if con is not None:
             con.close()
+
+    # The project is built again from nothing and must give the same tables.
+    if first:
+        second = build_project(project, raw, workdir / REPEAT_DIR, REPEAT_FILE)
+        results += check_repeat_build(workdir, first, *second)
+    else:
+        results.append(
+            Result("repeat", "project", SKIP, "not checked: the first build produced no model")
+        )
+    built = {name for name, _ in first.values()}
+    results += [
+        Result("repeat", model.name, SKIP, "not checked: the model was not built")
+        for model in models
+        if model.name not in built
+    ]
     return results
 
 
