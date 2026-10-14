@@ -924,11 +924,13 @@ def render(results: list[Result]) -> str:
         f"gate: {verdict} ({tally[PASS]} passed, {tally[FAIL]} failed, {tally[SKIP]} not run)",
         "",
     ]
+    checks = max((len(result.check) for result in results), default=0)
     width = max((len(result.subject) for result in results), default=0)
     for result in results:
         first, *rest = result.detail.splitlines() or [""]
         lines.append(
-            f"{result.status.upper():<4}  {result.check:<5}  {result.subject:<{width}}  {first}"
+            f"{result.status.upper():<4}  {result.check:<{checks}}  "
+            f"{result.subject:<{width}}  {first}"
         )
         lines.extend(f"      {line}" for line in rest)
     return "\n".join(lines) + "\n"

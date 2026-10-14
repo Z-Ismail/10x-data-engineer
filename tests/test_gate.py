@@ -924,6 +924,21 @@ class Report(unittest.TestCase):
             "SKIP  key    stg_orders  not checked\n",
         )
 
+    def test_columns_are_as_wide_as_their_longest_entry(self):
+        text = render(
+            [
+                Result("key", "m", PASS, "fine"),
+                Result("compare", "model_b", FAIL, "differs"),
+            ]
+        )
+        self.assertEqual(
+            text,
+            "gate: FAIL (1 passed, 1 failed, 0 not run)\n"
+            "\n"
+            "PASS  key      m        fine\n"
+            "FAIL  compare  model_b  differs\n",
+        )
+
 
 class CannotRun(unittest.TestCase):
     """Problems found before dbt is started."""
