@@ -15,8 +15,7 @@ use.
 | --- | --- |
 | Demo data generator | Available |
 | Source profiler | Available |
-| Gate: build, row count, key and money total checks | Available |
-| Gate: repeat build | Next |
+| Gate: build, row count, key, money total and repeat build checks | Available |
 | Agents | Planned |
 
 ## Why
@@ -103,8 +102,7 @@ notes:
 
 `python -m tenx.gate <project> --raw <folder> --checks <file>` builds a dbt
 project into an empty DuckDB database and checks the result against the raw
-files. A successful build is only the first check. Four checks exist
-today:
+files. A successful build is only the first check. There are five checks:
 
 | Check | Fails when |
 | --- | --- |
@@ -112,6 +110,7 @@ today:
 | `rows` | a model does not hold exactly the rows of its source, less the rows declared as excluded |
 | `key` | a column of a model's declared key is missing, or the key is null or repeated in any row |
 | `total` | a declared money column does not add up to exactly the raw total less the declared exclusions, overall or for each value of a column such as the currency |
+| `repeat` | a second build of the project into another empty database does not give the same rows in every model |
 
 What to expect is declared in a JSON file that is kept outside the dbt
 project, so the checks cannot be edited by whoever writes the models:
@@ -148,18 +147,20 @@ counts what each one removed. A model that filters out anything else comes up
 short and fails, and so does a model that keeps rows it was told to exclude.
 
 ```
-gate: FAIL (12 passed, 2 failed, 0 not run)
+gate: FAIL (17 passed, 2 failed, 0 not run)
 
-PASS  build  project                 dbt build exited 0 after running 12 nodes
-PASS  build  stg_billing__invoices   built as "build"."main"."stg_billing__invoices"
+PASS  build   project                 dbt build exited 0 after running 12 nodes
+PASS  build   stg_billing__invoices   built as "build"."main"."stg_billing__invoices"
 ...
-FAIL  rows   stg_billing__invoices   496 rows in billing.invoices, 20 excluded (test_mode 20), 476 expected, 458 in the model: 18 fewer than expected
-PASS  key    stg_billing__invoices   invoice_id: unique and not null over 458 rows
-FAIL  total  stg_billing__invoices   amount_minor by currency: 4 of 4 currency values do not tie with the raw data
+FAIL  rows    stg_billing__invoices   496 rows in billing.invoices, 20 excluded (test_mode 20), 476 expected, 458 in the model: 18 fewer than expected
+PASS  key     stg_billing__invoices   invoice_id: unique and not null over 458 rows
+FAIL  total   stg_billing__invoices   amount_minor by currency: 4 of 4 currency values do not tie with the raw data
       EUR: raw 987100, expected 987100, model 917500, 69600 short
       GBP: raw 1351900, expected 1351900, model 1329200, 22700 short
       JPY: raw 2537400, expected 2537400, model 2507700, 29700 short
       USD: raw 24152800, test_mode 19998000, expected 4154800, model 4070700, 84100 short
+...
+PASS  repeat  stg_billing__invoices   the same 458 rows in both builds
 ...
 ```
 
@@ -170,14 +171,15 @@ so the project does not choose the database it is built into, and nothing is
 written to the project folder. The project reads the raw files from the folder
 it is given in the dbt variable `raw_dir`. Exit status is 0 when every check
 passes, 1 when any check fails and 2 when the gate could not run. Pass
-`--workdir` to keep the built database, dbt's artifacts and its log.
+`--workdir` to keep the built databases and dbt's artifacts and logs for
+both builds; the second build is in the `repeat` folder.
 
 A total is compared exactly, with no tolerance, separately for each value of
 the `by` column. The gate adds up the raw column itself and reports what each
 exclusion removed, so the figures can be followed by hand:
 
 ```
-FAIL  total  stg_billing__invoices   amount_minor by currency: 1 of 4 currency values do not tie with the raw data
+FAIL  total   stg_billing__invoices   amount_minor by currency: 1 of 4 currency values do not tie with the raw data
       JPY: raw 2537400, expected 2537400, model 253740000, 251202600 over
 ```
 
@@ -206,8 +208,28 @@ Rules for totals:
 - If `source_column` or `source_by` is given, the raw file's column of that
   name is used; otherwise the raw column has the same name as the model's.
 
-The repeat build, which builds the project a second time and compares the
-results, is the next check to be built.
+The `repeat` check builds the project a second time, from nothing, into a
+separate database, and compares every model the first build produced, not
+only the declared ones. A model that stamps the load time into its rows or
+generates random keys gives different results on each build, and the
+report names the columns whose values changed:
+
+```
+FAIL  repeat  stg_billing__invoices   the builds differ: 476 rows in the first and 476 in the second, of which 476 only in the first and 476 only in the second; values differ in loaded_at
+```
+
+Rules for the repeat build:
+
+- Rows are compared as a whole, in any order, but every copy counts: a build
+  that repeats a row does not match one that holds it once.
+- Both builds must have the same columns, with the same types, in the same
+  order.
+- dbt runs with one thread for both builds, so differences come from the
+  models and not from the order work was scheduled in.
+- A view is stored as its query, so its two builds run the same query over
+  the same files. The check still catches a view whose query gives a
+  different answer each time it runs.
+- The second build roughly doubles the time the gate takes.
 
 ## Design
 

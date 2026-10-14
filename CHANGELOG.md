@@ -6,6 +6,7 @@ Notable changes to this project.
 
 ### Changed
 
+- Gate: the report's check column is as wide as the longest check name.
 - Gate: the `total` check compares the values of the `by` column in capitals
   with surrounding spaces removed. A correct model that writes currency codes
   in capitals (`USD`) where the raw file has lower case (`usd`) used to fail.
@@ -14,6 +15,9 @@ Notable changes to this project.
 
 ### Added
 
+- Gate: a fifth check, `repeat`. The project is built a second time into
+  another empty database, and every model must hold the same rows as in the
+  first build. The report names the columns whose values changed.
 - Gate: a fourth check, `total`. A declared money column must add up to
   exactly the raw total, less what the declared exclusions removed, for each
   currency. Raw amounts are added without rounding, and money held as
