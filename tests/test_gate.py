@@ -33,6 +33,7 @@ from tenx.gate import (
     TotalExpectation,
     check_build,
     check_key,
+    check_repeat,
     check_rows,
     check_total,
     expected_rows,
@@ -896,6 +897,129 @@ class KeyCheck(unittest.TestCase):
 
     def test_a_model_that_cannot_be_read_fails(self):
         self.assertEqual(self.check("no_such_table", "a").status, FAIL)
+
+
+class RepeatCheck(unittest.TestCase):
+    """Two builds of one table, in two database files named as the gate names them."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def check(self, first_rows, second_rows, columns="id INTEGER, name VARCHAR"):
+        """Build table t from VALUES rows in each database and compare them."""
+        second_columns = columns
+        if isinstance(columns, tuple):
+            columns, second_columns = columns
+        for stem, rows, shape in (
+            ("build", first_rows, columns),
+            ("repeat", second_rows, second_columns),
+        ):
+            con = duckdb.connect(str(self.root / f"{stem}.duckdb"))
+            con.execute(f"CREATE TABLE t ({shape})")
+            if rows:
+                con.execute(f"INSERT INTO t VALUES {rows}")
+            con.close()
+        con = duckdb.connect(str(self.root / "build.duckdb"), read_only=True)
+        self.addCleanup(con.close)
+        con.execute(f"ATTACH '{self.root / 'repeat.duckdb'}' (READ_ONLY)")
+        return check_repeat(con, "t", '"build"."main"."t"', '"repeat"."main"."t"')
+
+    def test_the_same_rows_in_another_order_pass(self):
+        result = self.check("(1, 'a'), (2, 'b'), (3, 'c')", "(3, 'c'), (1, 'a'), (2, 'b')")
+        self.assertEqual(result.status, PASS)
+        self.assertEqual(result.detail, "the same 3 rows in both builds")
+        self.assertEqual(
+            result.facts,
+            {
+                "rows": 3,
+                "second_rows": 3,
+                "only_first": 0,
+                "only_second": 0,
+                "differing_columns": [],
+            },
+        )
+
+    def test_nulls_and_repeated_rows_held_by_both_builds_pass(self):
+        rows = "(1, NULL), (1, NULL), (NULL, 'x')"
+        self.assertEqual(self.check(rows, rows).status, PASS)
+
+    def test_empty_builds_pass(self):
+        self.assertEqual(self.check("", "").detail, "the same 0 rows in both builds")
+
+    def test_a_row_repeated_by_one_build_fails(self):
+        # The second build holds (2, 'b') twice: one row more, and nothing
+        # missing. Both columns' values differ because 2 and 'b' appear twice.
+        result = self.check("(1, 'a'), (2, 'b')", "(1, 'a'), (2, 'b'), (2, 'b')")
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(
+            result.facts,
+            {
+                "rows": 2,
+                "second_rows": 3,
+                "only_first": 0,
+                "only_second": 1,
+                "differing_columns": ["id", "name"],
+            },
+        )
+
+    def test_a_column_that_changes_between_builds_is_named(self):
+        result = self.check(
+            "(1, 'a', TIMESTAMP '2026-10-14 09:00:00'), (2, 'b', TIMESTAMP '2026-10-14 09:00:00')",
+            "(1, 'a', TIMESTAMP '2026-10-14 09:00:05'), (2, 'b', TIMESTAMP '2026-10-14 09:00:05')",
+            "id INTEGER, name VARCHAR, loaded_at TIMESTAMP",
+        )
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(result.facts["only_first"], 2)
+        self.assertEqual(result.facts["only_second"], 2)
+        self.assertEqual(result.facts["differing_columns"], ["loaded_at"])
+        self.assertEqual(
+            result.detail,
+            "the builds differ: 2 rows in the first and 2 in the second, "
+            "of which 2 only in the first and 2 only in the second; values differ in loaded_at",
+        )
+
+    def test_values_swapped_between_rows_fail_with_no_column_named(self):
+        result = self.check("(1, 'a'), (2, 'b')", "(1, 'b'), (2, 'a')")
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(result.facts["differing_columns"], [])
+        self.assertIn("combined differently across rows", result.detail)
+
+    def test_a_column_of_another_type_fails_without_comparing_rows(self):
+        # As a bag of rows the values would compare equal, since DuckDB casts
+        # one side to the other's type, so the columns are compared first.
+        result = self.check(
+            "(1, 'a')", "(1, 'a')", ("id INTEGER, name VARCHAR", "id BIGINT, name VARCHAR")
+        )
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(
+            result.detail,
+            "the two builds have different columns: "
+            "id is INTEGER in the first build and BIGINT in the second",
+        )
+
+    def test_a_missing_column_fails(self):
+        result = self.check("(1, 'a')", "(1)", ("id INTEGER, name VARCHAR", "id INTEGER"))
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(result.facts, {"column_changes": ["name only in the first build"]})
+
+    def test_columns_in_another_order_fail(self):
+        # Set operations match columns by position, so the order is part of
+        # what must repeat.
+        result = self.check(
+            "(1, 'a')", "('a', 1)", ("id INTEGER, name VARCHAR", "name VARCHAR, id INTEGER")
+        )
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(result.facts, {"column_changes": ["the columns are in a different order"]})
+
+    def test_a_relation_the_second_build_lacks_fails(self):
+        con = duckdb.connect()
+        self.addCleanup(con.close)
+        con.execute("CREATE TABLE t AS SELECT 1 AS id")
+        result = check_repeat(con, "t", "t", "absent")
+        self.assertEqual(result.status, FAIL)
+        self.assertIn("could not compare the two builds", result.detail)
 
 
 class Report(unittest.TestCase):

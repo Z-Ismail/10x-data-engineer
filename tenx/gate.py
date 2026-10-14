@@ -687,6 +687,91 @@ def check_key(con: duckdb.DuckDBPyConnection, model: ModelSpec, built: str) -> R
     )
 
 
+def _columns(con: duckdb.DuckDBPyConnection, relation_name: str) -> list[tuple[str, str]]:
+    return [(name, kind) for name, kind, *_ in con.execute(f"DESCRIBE {relation_name}").fetchall()]
+
+
+def _surplus(con: duckdb.DuckDBPyConnection, select: str, one: str, other: str) -> int:
+    """Rows of one that other does not have, counting each copy of a row."""
+    (count,) = con.execute(
+        f"SELECT count(*) FROM (SELECT {select} FROM {one} EXCEPT ALL SELECT {select} FROM {other})"
+    ).fetchone()
+    return count
+
+
+def _column_changes(first: list[tuple[str, str]], second: list[tuple[str, str]]) -> list[str]:
+    """What differs between the columns of two builds of a model, in words."""
+    one, other = dict(first), dict(second)
+    changes = [f"{name} only in the first build" for name in one if name not in other]
+    changes += [f"{name} only in the second build" for name in other if name not in one]
+    changes += [
+        f"{name} is {one[name]} in the first build and {other[name]} in the second"
+        for name in one
+        if name in other and one[name] != other[name]
+    ]
+    if not changes:
+        changes.append("the columns are in a different order")
+    return changes
+
+
+def check_repeat(con: duckdb.DuckDBPyConnection, model: str, first: str, second: str) -> Result:
+    """A model built twice from the same files must hold the same rows both times.
+
+    The two relations are compared as bags of rows: row order does not
+    matter, but every copy of a row does, so a row that one build repeats is
+    found. Both builds must have the same columns, with the same types, in
+    the same order. When rows differ, the columns whose values differ are
+    named, so a load time or a random key is easy to spot.
+    """
+    try:
+        columns, second_columns = _columns(con, first), _columns(con, second)
+        if columns != second_columns:
+            changes = _column_changes(columns, second_columns)
+            return Result(
+                "repeat",
+                model,
+                FAIL,
+                f"the two builds have different columns: {'; '.join(changes)}",
+                {"column_changes": changes},
+            )
+        names = [quote_identifier(name) for name, _ in columns]
+        select = ", ".join(names)
+        rows, second_rows = con.execute(
+            f"SELECT (SELECT count(*) FROM {first}), (SELECT count(*) FROM {second})"
+        ).fetchone()
+        only_first = _surplus(con, select, first, second)
+        only_second = _surplus(con, select, second, first)
+        differing = []
+        if only_first or only_second:
+            differing = [
+                name
+                for (name, _), quoted in zip(columns, names)
+                if _surplus(con, quoted, first, second) or _surplus(con, quoted, second, first)
+            ]
+    except duckdb.Error as error:
+        return Result("repeat", model, FAIL, f"could not compare the two builds: {error}")
+    facts = {
+        "rows": rows,
+        "second_rows": second_rows,
+        "only_first": only_first,
+        "only_second": only_second,
+        "differing_columns": differing,
+    }
+    if not only_first and not only_second:
+        return Result(
+            "repeat", model, PASS, f"the same {counted(rows, 'row')} in both builds", facts
+        )
+    detail = (
+        f"the builds differ: {rows} rows in the first and {second_rows} in the second, "
+        f"of which {only_first} only in the first and {only_second} only in the second"
+    )
+    if differing:
+        detail += f"; values differ in {', '.join(differing)}"
+    else:
+        detail += "; each column holds the same values, combined differently across rows"
+    return Result("repeat", model, FAIL, detail, facts)
+
+
 def _reason(message: object) -> str:
     """The start of a dbt message: what failed, then the database's own error."""
     lines = [line.strip() for line in str(message or "").splitlines() if line.strip()]
