@@ -16,7 +16,8 @@ use.
 | Demo data generator | Available |
 | Source profiler | Available |
 | Gate: build, row count, key, money total and repeat build checks | Available |
-| Agents | Planned |
+| Engineer agent: one agent that builds staging models from a goal | Available |
+| The rest of the crew | Planned |
 
 ## Why
 
@@ -41,6 +42,7 @@ make install     # installs the package, DuckDB and dbt
 make demo-data   # writes three source systems to demo/data
 make profile     # writes one profile per source table to profiles/
 make test
+make engineer    # has the engineer agent build the demo project, then gates it
 ```
 
 ### Demo data
@@ -231,6 +233,55 @@ Rules for the repeat build:
   different answer each time it runs.
 - The second build roughly doubles the time the gate takes.
 
+### Engineer agent
+
+`python -m tenx.engineer --raw <folder> --goal <file> --checks <file> --out <folder>`
+has one agent build a dbt project from raw files and then runs the gate on
+it. The run passes only if the gate passes.
+
+The goal is a short Markdown file in plain English. It names each model,
+what one row of it means, its key and which source rows to leave out.
+[demo/goal.md](demo/goal.md) is the goal for the demo data.
+
+The runner prepares a folder for the agent with the goal, a profile of every
+raw table and a dbt project with no models, set to read the raw files from
+the `raw_dir` variable. The agent reads the goal and the profiles, writes the
+sources, the staging models and their key tests, and runs `dbt build`. It is
+told to count rows with `dbt show` until every model reconciles with its
+source before it stops, but only the gate's verdict counts. The gate's
+declaration is never put in the agent's folder, so the agent cannot read the
+checks or change them.
+
+The agent runs in Claude Code without anyone at the keyboard. It may write
+files in its own folder and run `dbt`, and every other action is refused
+rather than asked about. It is pinned to the Sonnet model and stops after 60
+turns, US$5 of estimated usage or 30 minutes, whichever comes first.
+
+```
+agent: success after 15 turns (exit 0)
+project: runs/demo/project
+
+gate: PASS (19 passed, 0 failed, 0 not run)
+
+PASS  build   project                 dbt build exited 0 after running 12 nodes
+...
+PASS  repeat  stg_events__events      the same 1183 rows in both builds
+```
+
+Everything from the run is kept under the `--out` folder:
+
+| Path | Contents |
+| --- | --- |
+| `project/` | The dbt project the agent wrote |
+| `agent.json` | What Claude Code reported when the agent stopped |
+| `gate/` | The gate's databases, dbt artifacts and logs |
+| `plugin/` | The copy of the add-on the agent was loaded from |
+
+Today the agent builds staging models only: one model per source table, with
+renames, type conversions and the exclusions the goal asks for, and no joins.
+It runs once; if the gate fails, nothing is retried. Running it needs a clone
+of this repository and Claude Code installed and signed in.
+
 ## Design
 
 This section describes the target design. The status table above shows which
@@ -274,13 +325,17 @@ profiler needs DuckDB 1.1 or later. The gate also needs dbt-core 1.12 and
 dbt-duckdb 1.11, which are the `pipeline` dependency group in
 `pyproject.toml`. `make install` installs all of them.
 
+The engineer agent also needs [Claude Code](https://code.claude.com/docs),
+installed and signed in. It runs on your own Claude subscription or API key.
+
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
-| `demo/` | Demo data generator |
-| `tenx/` | Python package: the source profiler and the gate |
+| `agents/` | The agents' instructions |
+| `demo/` | Demo data generator, and the goal for the demo data |
+| `tenx/` | Python package: the source profiler, the gate and the engineer agent's runner |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
 ## Licence

@@ -15,6 +15,12 @@ Notable changes to this project.
 
 ### Added
 
+- The engineer agent (`python -m tenx.engineer`, `make engineer`): one agent
+  that reads a goal in plain English and the source profiles, builds the
+  staging models in a fresh dbt project, and is then checked by the gate.
+  The agent may only write files in its project folder and run `dbt`, and
+  never sees the gate's declaration.
+- A goal for the demo data, `demo/goal.md`.
 - Gate: a fifth check, `repeat`. The project is built a second time into
   another empty database, and every model must hold the same rows as in the
   first build. The report names the columns whose values changed.

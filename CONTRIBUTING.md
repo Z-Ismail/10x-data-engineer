@@ -10,8 +10,12 @@ make profile
 ```
 
 Python 3.10 or later. `make install` installs the package in editable mode
-together with DuckDB and dbt. The gate tests run `dbt build` several times and
-take most of a minute.
+together with DuckDB and dbt. The gate tests run `dbt build` many times and
+take a few minutes.
+
+The tests do not run the engineer agent itself: they replace the `claude`
+command with a stand-in that writes a known project. To run the real agent
+on the demo data, install Claude Code, sign in and run `make engineer`.
 
 ## Guidelines
 
@@ -25,6 +29,7 @@ take most of a minute.
 | Path | Contents |
 | --- | --- |
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
-| `demo/` | Generator for the three demo source systems |
-| `tenx/` | Python package: the source profiler and the gate |
+| `agents/` | The agents' instructions |
+| `demo/` | Generator for the three demo source systems, and their goal |
+| `tenx/` | Python package: the source profiler, the gate and the engineer agent's runner |
 | `tests/` | Tests, and the dbt project the gate is tested against |
