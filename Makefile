@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test demo-data profile clean
+.PHONY: install test demo-data profile engineer clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline]"
@@ -14,5 +14,11 @@ demo-data:
 profile:
 	$(PYTHON) -m tenx.profile demo/data --out profiles
 
+# Needs Claude Code, signed in. Each run starts from an empty runs/demo.
+engineer: demo-data
+	rm -rf runs/demo
+	$(PYTHON) -m tenx.engineer --raw demo/data --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/demo
+
 clean:
-	rm -rf demo/data demo/answers profiles
+	rm -rf demo/data demo/answers profiles runs
