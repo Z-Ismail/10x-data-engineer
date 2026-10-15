@@ -66,7 +66,9 @@ The current folder is a dbt project with no models yet. It holds:
 - The build must give the same rows every time it runs. Do not add load
   times, the current date or time, random values or generated IDs.
 - Build only what the goal asks for.
-- The only shell command you may run is `dbt`. Look at data with
+- Create and change files with the Write and Edit tools, one file at a
+  time. The only shell command you may run is `dbt`: a shell command that
+  writes files, or that runs anything else, is refused. Look at data with
   `dbt show --inline "<sql>" --limit <n>`.
 
 Your work is checked after you finish by building the project from an empty
