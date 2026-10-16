@@ -17,6 +17,7 @@ use.
 | Source profiler | Available |
 | Gate: build, row count, key, money total and repeat build checks | Available |
 | Engineer agent: one agent that builds staging models from a goal | Available |
+| Usage ledger: tokens, turns, time and cost by role for every run | Available |
 | The rest of the crew | Planned |
 
 ## Why
@@ -266,6 +267,16 @@ gate: PASS (19 passed, 0 failed, 0 not run)
 PASS  build   project                 dbt build exited 0 after running 12 nodes
 ...
 PASS  repeat  stg_events__events      the same 1183 rows in both builds
+
+usage by role (cost is Claude Code's own estimate, not a bill)
+
+role      outcome    turns  refused    time  cost (US$)
+engineer  success       15        0  34.6 s      0.0724
+run       gate PASS     15        0  34.6 s      0.0724
+
+role      model              input  cache write  cache read  output
+engineer  claude-haiku-5-5   1,177            0           0      18
+engineer  claude-sonnet-5-5     12        9,346      47,283   3,010
 ```
 
 Everything from the run is kept under the `--out` folder:
@@ -274,6 +285,7 @@ Everything from the run is kept under the `--out` folder:
 | --- | --- |
 | `project/` | The dbt project the agent wrote |
 | `agent.json` | What Claude Code reported when the agent stopped |
+| `usage.json` | The usage ledger: each role's figures and the gate verdict |
 | `gate/` | The gate's databases, dbt artifacts and logs |
 | `plugin/` | The copy of the add-on the agent was loaded from |
 
@@ -281,6 +293,27 @@ Today the agent builds staging models only: one model per source table, with
 renames, type conversions and the exclusions the goal asks for, and no joins.
 It runs once; if the gate fails, nothing is retried. Running it needs a clone
 of this repository and Claude Code installed and signed in.
+
+### Usage ledger
+
+Every run ends with its usage by role, printed and saved as `usage.json`.
+Each role runs as its own Claude Code session, and the figures are read from
+the report Claude Code prints when that session ends. Today the engineer is
+the only role.
+
+| Column | Meaning |
+| --- | --- |
+| `outcome` | How the session ended, as Claude Code reports it: `success`, or an error such as `error_max_turns` or `error_max_budget_usd`. `timed out` or `no report` when the session printed nothing. The `run` row shows the gate verdict instead |
+| `turns` | Turns the agent took |
+| `refused` | Tool calls refused because the agent is not allowed to make them |
+| `time` | How long the session ran; the gate's own time is not included |
+| `cost (US$)` | Claude Code's own estimate of the session's cost. It is not a bill, and on a subscription it is not what you are charged. Shown as `unknown` when Claude Code does not know a model's price |
+| `input`, `cache write`, `cache read`, `output` | Tokens per model, as Claude Code reports them |
+
+The tokens are listed per model because a session can use more than one: in
+the example above, Claude Code made a small request of its own on a second
+model. A figure that was not reported is shown as `-`, and the `run` row is
+only added up when every role reported.
 
 ## Design
 

@@ -15,6 +15,9 @@ Notable changes to this project.
 
 ### Added
 
+- Usage ledger: every engineer run prints its tokens per model, turns,
+  refused tool calls, time and Claude Code's cost estimate by role, with the
+  gate verdict, and saves them as `usage.json` beside the run.
 - The engineer agent (`python -m tenx.engineer`, `make engineer`): one agent
   that reads a goal in plain English and the source profiles, builds the
   staging models in a fresh dbt project, and is then checked by the gate.
