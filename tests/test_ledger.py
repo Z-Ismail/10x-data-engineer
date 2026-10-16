@@ -5,9 +5,12 @@ The reports are written by hand in the shape Claude Code prints with
 handmade reports, not computed by the code under test.
 """
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from tenx.ledger import ModelUsage, RoleUsage, role_usage
+from tenx.ledger import Ledger, ModelUsage, RoleUsage, render, role_usage
 
 # Shaped like a real report: the main model plus a small helper request
 # that appears in modelUsage but not in usage.
@@ -154,6 +157,79 @@ class RoleUsageTest(unittest.TestCase):
                 "refused_tool_calls": None,
                 "models": [],
             },
+        )
+
+
+class RenderTest(unittest.TestCase):
+    def test_one_role_with_two_models(self):
+        ledger = Ledger((role_usage("engineer", REPORT),), "PASS")
+        self.assertEqual(
+            render(ledger),
+            "usage by role (cost is Claude Code's own estimate, not a bill)\n"
+            "\n"
+            "role      outcome    turns  refused    time  cost (US$)\n"
+            "engineer  success       16        0  36.0 s      0.0928\n"
+            "run       gate PASS     16        0  36.0 s      0.0928\n"
+            "\n"
+            "role      model              input  cache write  cache read  output\n"
+            "engineer  claude-haiku-5-5   1,177            0           0      18\n"
+            "engineer  claude-sonnet-5-5     14       13,501      58,591   3,277\n",
+        )
+
+    def test_the_run_row_adds_up_every_role(self):
+        # 16 + 9 turns, 0 + 2 refused, 36.008 + 4.5 s, 0.0927878 + 0.25 US$.
+        reviewer = RoleUsage("reviewer", "success", 9, 4500, 3000, 0.25, 2)
+        ledger = Ledger((role_usage("engineer", REPORT), reviewer), "FAIL")
+        lines = render(ledger).splitlines()
+        self.assertEqual(lines[4], "reviewer  success        9        2   4.5 s      0.2500")
+        self.assertEqual(lines[5], "run       gate FAIL     25        2  40.5 s      0.3428")
+
+    def test_a_role_without_a_report_leaves_the_run_figures_unknown(self):
+        ledger = Ledger(
+            (role_usage("engineer", REPORT), role_usage("reviewer", None, "timed out")), "FAIL"
+        )
+        lines = render(ledger).splitlines()
+        self.assertEqual(lines[4], "reviewer  timed out      -        -       -           -")
+        self.assertEqual(lines[5], "run       gate FAIL      -        -       -           -")
+        # The engineer's tokens are still listed; the reviewer has none.
+        self.assertEqual(len(lines), 10)
+
+    def test_an_unknown_price_is_shown_as_unknown_not_as_a_figure(self):
+        models = dict(REPORT["modelUsage"])
+        models["claude-new-model"] = {"inputTokens": 5, "outputTokens": 1, "costBasis": "unknown"}
+        ledger = Ledger((role_usage("engineer", dict(REPORT, modelUsage=models)),), "PASS")
+        lines = render(ledger).splitlines()
+        self.assertTrue(lines[3].endswith("  unknown"), lines[3])
+        self.assertTrue(lines[4].endswith("  unknown"), lines[4])
+        self.assertEqual(
+            lines[-1], "engineer  claude-new-model       5            -           -       1"
+        )
+
+    def test_no_token_table_when_no_role_reported(self):
+        ledger = Ledger((role_usage("engineer", None, "timed out"),), "FAIL")
+        self.assertEqual(
+            render(ledger),
+            "usage by role (cost is Claude Code's own estimate, not a bill)\n"
+            "\n"
+            "role      outcome    turns  refused  time  cost (US$)\n"
+            "engineer  timed out      -        -     -           -\n"
+            "run       gate FAIL      -        -     -           -\n",
+        )
+
+
+class LedgerFileTest(unittest.TestCase):
+    def test_writes_the_gate_verdict_and_every_role_as_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "usage.json"
+            Ledger((role_usage("engineer", REPORT),), "PASS").write(path)
+            written = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(written["gate"], "PASS")
+        self.assertEqual([role["role"] for role in written["roles"]], ["engineer"])
+        role = written["roles"][0]
+        self.assertEqual((role["turns"], role["cost_usd"]), (16, 0.0927878))
+        self.assertEqual(
+            [model["model"] for model in role["models"]],
+            ["claude-haiku-5-5", "claude-sonnet-5-5"],
         )
 
 
