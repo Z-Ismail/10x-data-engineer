@@ -6,6 +6,8 @@ Notable changes to this project.
 
 ### Changed
 
+- The engineer agent is asked to run one `dbt` command per shell call, since
+  a command piped into another program is refused.
 - Gate: the report's check column is as wide as the longest check name.
 - Gate: the `total` check compares the values of the `by` column in capitals
   with surrounding spaces removed. A correct model that writes currency codes

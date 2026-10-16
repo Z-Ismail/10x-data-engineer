@@ -70,6 +70,10 @@ The current folder is a dbt project with no models yet. It holds:
   time. The only shell command you may run is `dbt`: a shell command that
   writes files, or that runs anything else, is refused. Look at data with
   `dbt show --inline "<sql>" --limit <n>`.
+- Run one `dbt` command per shell call, with no pipes, loops or
+  redirections: a command such as `dbt build 2>&1 | tail` runs `tail` as
+  well and is refused. To count several models, put the counts in one
+  query with `union all`.
 
 Your work is checked after you finish by building the project from an empty
 database twice and comparing it with the raw files: the row count of each
