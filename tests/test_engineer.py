@@ -32,6 +32,7 @@ from tenx.engineer import (
     PROJECT_DIR,
     PROJECT_NAME,
     SOURCE_PROFILES_DIR,
+    USAGE_FILE,
     EngineerError,
     agent_command,
     main,
@@ -67,8 +68,15 @@ if mode == "crash":
     sys.exit(1)
 if mode == "hang":
     time.sleep(60)
-print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
-                  "num_turns": 7, "result": "Built four models."}))
+print(json.dumps({
+    "type": "result", "subtype": "success", "is_error": False, "num_turns": 7,
+    "duration_ms": 41300, "duration_api_ms": 30000, "total_cost_usd": 0.0812,
+    "result": "Built four models.",
+    "modelUsage": {"claude-sonnet-5-5": {
+        "inputTokens": 20, "cacheCreationInputTokens": 12000,
+        "cacheReadInputTokens": 50000, "outputTokens": 2500, "costBasis": "list"}},
+    "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "ls /"}}],
+}))
 """
 
 # Seven orders, one of them written twice.
@@ -312,6 +320,27 @@ class RunTest(unittest.TestCase):
         reported = json.loads((self.out / AGENT_FILE).read_text(encoding="utf-8"))
         self.assertEqual(reported["result"], "Built four models.")
 
+        # The stand-in reported 7 turns, 1 refused call, 41.3 s and US$0.0812.
+        self.assertTrue(
+            report.endswith(
+                "usage by role (cost is Claude Code's own estimate, not a bill)\n"
+                "\n"
+                "role      outcome    turns  refused    time  cost (US$)\n"
+                "engineer  success        7        1  41.3 s      0.0812\n"
+                "run       gate PASS      7        1  41.3 s      0.0812\n"
+                "\n"
+                "role      model              input  cache write  cache read  output\n"
+                "engineer  claude-sonnet-5-5     20       12,000      50,000   2,500\n"
+            ),
+            report,
+        )
+        ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(ledger["gate"], "PASS")
+        self.assertEqual(
+            [(r["role"], r["outcome"], r["turns"]) for r in ledger["roles"]],
+            [("engineer", "success", 7)],
+        )
+
     def test_models_that_keep_test_mode_invoices_fail_on_those_invoices(self):
         with (self.raw / "billing" / "invoices.csv").open(newline="", encoding="utf-8") as handle:
             test_mode = [row for row in csv.DictReader(handle) if row["livemode"] == "false"]
@@ -326,12 +355,20 @@ class RunTest(unittest.TestCase):
         )
         rows = next(r for r in results if r.status == FAIL and r.check == "rows")
         self.assertTrue(rows.detail.endswith(f": {len(test_mode)} more than expected"), rows.detail)
+        # The agent itself succeeded; the run's verdict is the gate's.
+        ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual((ledger["gate"], ledger["roles"][0]["outcome"]), ("FAIL", "success"))
 
     def test_an_agent_that_fails_to_run_leaves_nothing_to_pass(self):
         with self.stub(mode="crash"):
             agent, results = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
         self.assertEqual(agent.describe(), "exited 1 without a report: Error: not signed in")
         self.assertFalse(passed(results))
+        ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(ledger["gate"], "FAIL")
+        self.assertEqual(
+            (ledger["roles"][0]["outcome"], ledger["roles"][0]["turns"]), ("no report", None)
+        )
         missing = [r.subject for r in results if r.check == "build" and r.status == FAIL]
         self.assertIn("stg_billing__invoices", missing)
 
@@ -342,6 +379,11 @@ class RunTest(unittest.TestCase):
         self.assertFalse((self.out / AGENT_FILE).exists())
         # What the agent wrote before it was stopped is still checked.
         self.assertTrue(passed(results))
+        ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(ledger["gate"], "PASS")
+        self.assertEqual(
+            (ledger["roles"][0]["outcome"], ledger["roles"][0]["cost_usd"]), ("timed out", None)
+        )
 
     def test_a_missing_claude_command_is_reported(self):
         with (

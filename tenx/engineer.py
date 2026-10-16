@@ -16,13 +16,15 @@ be read or edited by the agent.
             models/             empty; the agent writes the models here
         plugin/                 the add-on's manifest and agents, as loaded for the run
         agent.json              what Claude Code reported when the agent stopped
+        usage.json              tokens, turns, time and cost by role, and the gate verdict
         gate/                   the gate's databases, dbt artifacts and logs
 
 The agent runs headless in Claude Code, on the user's own subscription. It
 may edit files in the project folder and run ``dbt``, and nothing else; any
 other action is refused rather than asked about. Once it stops, the gate
 builds the project from an empty database and checks it against the raw
-files. The run passes only if the gate passes.
+files. The run passes only if the gate passes. Last, the run's usage is
+recorded and printed by role.
 """
 
 from __future__ import annotations
@@ -37,10 +39,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tenx.gate import GateError, Result, load_declaration, passed, render, run_gate
+from tenx.ledger import Ledger, role_usage
+from tenx.ledger import render as render_usage
 from tenx.profile import ProfileError, profile_folder
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 AGENT = "tenx:engineer"
+ROLE = "engineer"
 PROMPT = "Build what GOAL.md asks for."
 ALLOWED_TOOLS = ("Edit", "Write", "Bash(dbt *)")
 MAX_TURNS = 60
@@ -51,6 +56,7 @@ STOP_GRACE_SECONDS = 30
 PROJECT_DIR = "project"
 PLUGIN_COPY_DIR = "plugin"
 AGENT_FILE = "agent.json"
+USAGE_FILE = "usage.json"
 GATE_DIR = "gate"
 PROJECT_NAME = "tenx_project"
 GOAL_FILE = "GOAL.md"
@@ -221,6 +227,12 @@ def run_agent(project: Path, command: list[str], report_file: Path, timeout: flo
     return AgentRun(process.returncode, report, message=lines[-1] if lines else "")
 
 
+def usage(agent: AgentRun, results: list[Result]) -> Ledger:
+    """The run's usage by role, with the gate's verdict."""
+    missing = "timed out" if agent.timed_out_after is not None else "no report"
+    return Ledger((role_usage(ROLE, agent.report, missing),), "PASS" if passed(results) else "FAIL")
+
+
 def run(
     raw: Path,
     goal: Path,
@@ -244,6 +256,7 @@ def run(
     command = agent_command(claude, plugin)
     agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout)
     results = run_gate(project, raw, checks, out / GATE_DIR)
+    usage(agent, results).write(out / USAGE_FILE)
     return agent, results
 
 
@@ -267,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"project: {args.out / PROJECT_DIR}")
     print()
     print(render(results), end="")
+    print()
+    print(render_usage(usage(agent, results)), end="")
     return 0 if passed(results) else 1
 
 
