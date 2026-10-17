@@ -5,11 +5,14 @@ recounted with the csv and json modules, never by calling the module's own
 SQL.
 """
 
+import io
+import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from tenx.overlap import overlap_folder
+from tenx.overlap import main, overlap_folder, render
 from tenx.profile import ProfileError
 
 CUSTOMERS = """id,email,country,signup
@@ -155,6 +158,96 @@ class HandmadeTables(unittest.TestCase):
         self.assertEqual(self.report["pairs"][0]["sides"][0]["table"], "crm.contacts")
 
 
+EXPECTED_TEXT = """\
+overlap: 3 tables, 11 columns
+values are compared in lower case with surrounding spaces removed; \
+nulls, blanks and placeholders are left out
+pairs listed: 3, where at least 50% of one column's values are found in the other; \
+1 more pair shares fewer values
+
+crm.contacts.email ~ shop.customers.email: 2 shared values
+  crm.contacts.email    2 of 3 values found (66.7%), 3 of 4 rows match (0 exactly), \
+many rows per value, not found: dan@x.example
+  shop.customers.email  2 of 3 values found (66.7%), 2 of 3 rows match (0 exactly), \
+one row per value, not found: cat@x.example
+
+shop.orders.customer_id ~ shop.customers.id: 2 shared values
+  shop.orders.customer_id  2 of 3 values found (66.7%), 3 of 4 rows match (3 exactly), \
+many rows per value, not found: c9
+  shop.customers.id        2 of 5 values found (40.0%), 2 of 5 rows match (2 exactly), \
+one row per value, not found: c3, c4, c5
+
+shop.customers.country ~ crm.contacts.country: 1 shared value
+  shop.customers.country  1 of 2 values found (50.0%), 3 of 5 rows match (3 exactly), \
+many rows per value, not found: fr
+  crm.contacts.country    1 of 5 values found (20.0%), 1 of 5 rows match (1 exactly), \
+one row per value, not found: de, es, it
+
+rows left out before comparing:
+  crm.contacts.email: 1 placeholder
+  crm.contacts.score: 2 null
+  shop.customers.email: 1 blank, 1 placeholder
+  shop.orders.customer_id: 1 null
+"""
+
+
+class Report(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        write(self.root, "raw/shop/customers.csv", CUSTOMERS)
+        write(self.root, "raw/shop/orders.csv", ORDERS)
+        write(self.root, "raw/crm/contacts.csv", CONTACTS)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_main(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_text_lists_pairs_from_half_overlap_and_what_was_left_out(self):
+        self.assertEqual(render(overlap_folder(self.root / "raw")), EXPECTED_TEXT)
+
+    def test_command_line_writes_text_and_json(self):
+        out = self.root / "profiles"
+        code, printed, errors = self.run_main(str(self.root / "raw"), "--out", str(out))
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual(
+            printed,
+            f"4 column pairs share values, 3 listed; wrote overlap.txt and overlap.json to {out}\n",
+        )
+        self.assertEqual((out / "overlap.txt").read_text(encoding="utf-8"), EXPECTED_TEXT)
+        written = json.loads((out / "overlap.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["tables"], ["crm.contacts", "shop.customers", "shop.orders"])
+        self.assertEqual(len(written["pairs"]), 4)
+        self.assertEqual([pair["listed"] for pair in written["pairs"]], [True, True, True, False])
+
+    def test_files_in_the_output_folder_are_not_read(self):
+        out = self.root / "raw" / "profiles"
+        write(out, "old.json", '{"email": "ann@x.example"}\n')
+        code, _, errors = self.run_main(str(self.root / "raw"), "--out", str(out))
+        self.assertEqual((code, errors), (0, ""))
+        written = json.loads((out / "overlap.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["tables"], ["crm.contacts", "shop.customers", "shop.orders"])
+
+    def test_a_table_named_like_the_report_is_refused(self):
+        write(self.root, "raw/overlap.csv", "id\n1\n")
+        out = self.root / "profiles"
+        code, printed, errors = self.run_main(str(self.root / "raw"), "--out", str(out))
+        self.assertEqual((code, printed), (1, ""))
+        self.assertIn("a table named overlap", errors)
+        self.assertFalse(out.exists())
+
+    def test_errors_are_reported_without_a_traceback(self):
+        code, printed, errors = self.run_main(str(self.root / "missing"))
+        self.assertEqual((code, printed), (1, ""))
+        self.assertTrue(errors.startswith("error: "))
+        self.assertNotIn("Traceback", errors)
+
+
 class TypedAndNestedJson(unittest.TestCase):
     def test_numbers_match_their_text_and_nested_columns_are_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,6 +270,12 @@ class TypedAndNestedJson(unittest.TestCase):
         order = find(report, "app.events.order", "shop.orders.order_id")
         self.assertEqual(order["sides"][0]["found"], 2)
         self.assertEqual(order["sides"][0]["rows_matched_exactly"], 1)
+        self.assertIn(
+            "not compared, because the values are nested:\n"
+            "  app.events.tags (VARCHAR[])\n"
+            "  app.events.meta (STRUCT(k BIGINT))\n",
+            render(report),
+        )
 
 
 class Errors(unittest.TestCase):

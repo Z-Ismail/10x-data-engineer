@@ -12,10 +12,19 @@ so `Billing@x.example ` and `billing@x.example` are the same value. Rows
 that match only exactly are also counted, to show what an exact join would
 miss. Nulls, blanks and placeholder values such as `null`, `anonymous` and
 `-1` are left out before comparing, and counted.
+
+The report is written as compact text for an agent to read and as JSON for
+code, beside the table profiles.
+
+Usage:
+    python -m tenx.overlap demo/data --out profiles
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from pathlib import Path
 
 import duckdb
@@ -27,6 +36,7 @@ from tenx.profile import (
     quote_identifier,
     quote_literal,
     relation,
+    shorten,
     table_name,
 )
 
@@ -35,6 +45,7 @@ from tenx.profile import (
 MIN_CONTAINMENT = 0.5
 NOT_FOUND_EXAMPLES = 3
 NESTED_TYPES = ("STRUCT", "MAP", "UNION")
+REPORT_NAME = "overlap"
 
 
 def is_nested(native_type: str) -> bool:
@@ -147,11 +158,11 @@ def side(con: duckdb.DuckDBPyConnection, this: dict, other: dict, shared: int) -
     ).fetchone()
     examples = con.execute(
         f"""
-        WITH a AS (SELECT raw, norm FROM vals WHERE tbl = ? AND col = ?),
-             b AS (SELECT DISTINCT norm FROM vals WHERE tbl = ? AND col = ?)
-        SELECT min(raw) FROM a
+        WITH a AS (SELECT norm FROM vals WHERE tbl = ? AND col = ?),
+             b AS (SELECT norm FROM vals WHERE tbl = ? AND col = ?)
+        SELECT DISTINCT norm FROM a
         WHERE norm NOT IN (SELECT norm FROM b)
-        GROUP BY norm ORDER BY norm LIMIT {NOT_FOUND_EXAMPLES}
+        ORDER BY norm LIMIT {NOT_FOUND_EXAMPLES}
         """,
         params,
     ).fetchall()
@@ -165,7 +176,7 @@ def side(con: duckdb.DuckDBPyConnection, this: dict, other: dict, shared: int) -
         "rows_matched": int(matched),
         "rows_matched_exactly": int(exact),
         "one_row_per_value": this["one_row_per_value"],
-        "not_found": [raw for (raw,) in examples],
+        "not_found": [norm for (norm,) in examples],
     }
 
 
@@ -201,11 +212,18 @@ def compare(con: duckdb.DuckDBPyConnection, columns: list[dict]) -> list[dict]:
     return pairs
 
 
-def overlap_folder(root: Path) -> dict:
-    """Compare the columns of every table under root."""
+def overlap_folder(root: Path, exclude: Path | None = None) -> dict:
+    """Compare the columns of every table under root.
+
+    Files under `exclude`, such as profiles written inside the source
+    folder, are not read.
+    """
     files = []
     seen: dict[str, Path] = {}
+    excluded = exclude.resolve() if exclude is not None else None
     for path in discover(root):
+        if excluded is not None and excluded in path.resolve().parents:
+            continue
         name = table_name(path, root)
         if name in seen:
             raise ProfileError(
@@ -230,3 +248,109 @@ def overlap_folder(root: Path) -> dict:
         "min_containment": MIN_CONTAINMENT,
         "pairs": pairs,
     }
+
+
+def qualified(side: dict) -> str:
+    return f"{side['table']}.{side['column']}"
+
+
+def describe_side(side: dict) -> str:
+    parts = [
+        f"{side['found']} of {side['values']} values found ({side['containment']:.1%})",
+        (
+            f"{side['rows_matched']} of {side['rows']} rows match "
+            f"({side['rows_matched_exactly']} exactly)"
+        ),
+        "one row per value" if side["one_row_per_value"] else "many rows per value",
+    ]
+    if side["not_found"]:
+        parts.append("not found: " + ", ".join(shorten(value) for value in side["not_found"]))
+    return ", ".join(parts)
+
+
+def render(report: dict) -> str:
+    """The compact text report: the listed pairs, then what was left out."""
+    listed = [pair for pair in report["pairs"] if pair["listed"]]
+    below = len(report["pairs"]) - len(listed)
+    lines = [
+        f"overlap: {len(report['tables'])} tables, {len(report['columns'])} columns",
+        (
+            "values are compared in lower case with surrounding spaces removed; "
+            "nulls, blanks and placeholders are left out"
+        ),
+        (
+            f"pairs listed: {len(listed)}, where at least {report['min_containment']:.0%} "
+            "of one column's values are found in the other; "
+            f"{below} more {'pair shares' if below == 1 else 'pairs share'} fewer values"
+        ),
+    ]
+    for pair in listed:
+        width = max(len(qualified(side)) for side in pair["sides"])
+        lines.append("")
+        first, second = pair["sides"]
+        noun = "value" if pair["shared"] == 1 else "values"
+        lines.append(f"{qualified(first)} ~ {qualified(second)}: {pair['shared']} shared {noun}")
+        for side in pair["sides"]:
+            lines.append(f"  {qualified(side):<{width}}  {describe_side(side)}")
+    left_out = []
+    for column in report["columns"]:
+        counts = [
+            f"{column[key]} {label}"
+            for key, label in (
+                ("nulls", "null"),
+                ("blanks", "blank"),
+                ("placeholders", "placeholder"),
+            )
+            if column[key]
+        ]
+        if counts:
+            left_out.append(f"  {column['table']}.{column['column']}: {', '.join(counts)}")
+    if left_out:
+        lines.append("")
+        lines.append("rows left out before comparing:")
+        lines.extend(left_out)
+    if report["skipped"]:
+        lines.append("")
+        lines.append("not compared, because the values are nested:")
+        lines.extend(
+            f"  {column['table']}.{column['column']} ({column['type']})"
+            for column in report["skipped"]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_report(report: dict, out: Path) -> None:
+    """Write overlap.txt and overlap.json to out."""
+    if REPORT_NAME in report["tables"]:
+        raise ProfileError(
+            f"a table named {REPORT_NAME} would have its profile overwritten by this report; "
+            "rename the file"
+        )
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{REPORT_NAME}.txt").write_text(render(report), encoding="utf-8")
+    (out / f"{REPORT_NAME}.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("root", type=Path, help="folder of raw CSV, JSON or Parquet files")
+    parser.add_argument("--out", type=Path, default=Path("profiles"))
+    args = parser.parse_args(argv)
+    try:
+        report = overlap_folder(args.root, exclude=args.out)
+        write_report(report, args.out)
+    except ProfileError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    listed = sum(1 for pair in report["pairs"] if pair["listed"])
+    print(
+        f"{len(report['pairs'])} column pairs share values, {listed} listed; "
+        f"wrote {REPORT_NAME}.txt and {REPORT_NAME}.json to {args.out}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
