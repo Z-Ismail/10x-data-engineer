@@ -15,6 +15,7 @@ use.
 | --- | --- |
 | Demo data generator | Available |
 | Source profiler | Available |
+| Overlap report: values shared between columns of different tables | Available |
 | Gate: build, row count, key, money total and repeat build checks | Available |
 | Engineer agent: one agent that builds staging models from a goal | Available |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
@@ -42,6 +43,7 @@ green build and checks the output against the raw data.
 make install     # installs the package, DuckDB and dbt
 make demo-data   # writes three source systems to demo/data
 make profile     # writes one profile per source table to profiles/
+make overlap     # writes a report of columns that share values to profiles/
 make test
 make engineer    # has the engineer agent build the demo project, then gates it
 ```
@@ -100,6 +102,46 @@ notes:
   - billing_email: 13 values with leading or trailing spaces
   - created_date: dates are written day/month/year
 ```
+
+### Overlap report
+
+`python -m tenx.overlap <folder> --out <folder>` compares every column with
+every column of the other tables and reports which pairs hold the same
+values. It is the starting point for working out how tables join, within one
+source system and across systems, and it writes `overlap.txt` and
+`overlap.json` beside the profiles. On the demo data:
+
+```
+billing.customers.email ~ crm.accounts.billing_email: 132 shared values
+  billing.customers.email     132 of 150 values found (88.0%), 138 of 157 rows match (89 exactly), many rows per value, not found: billing@company0082.example, ...
+  crm.accounts.billing_email  132 of 180 values found (73.3%), 132 of 180 rows match (86 exactly), one row per value, not found: Billing@company0003.example, ...
+```
+
+That pair is the billing system and the CRM sharing the customer's email.
+Each side is reported separately, because the two directions differ: most
+billing addresses are in the CRM, while a quarter of CRM accounts have no
+billing record (they are prospects). An exact join would match 86 CRM rows;
+comparing in lower case without surrounding spaces matches 132.
+
+Rules:
+
+- Values are compared as text, in lower case, with surrounding spaces
+  removed. Nothing else is changed.
+- Nulls, blanks and placeholder values such as `null`, `anonymous` and `-1`
+  are left out before comparing, and the report counts them per column.
+- A pair is listed when at least half of one column's distinct values are
+  found in the other. Pairs that share fewer values are counted in the text
+  and kept in the JSON.
+- Up to three values that were not found are shown for each side, as they
+  are written in the file, so the reason for unmatched rows can be seen.
+- Columns of the same table are not compared with each other, and nested
+  JSON columns (lists and objects) are skipped.
+- Every figure is exact. Nothing is sampled.
+
+The report gives facts, not joins. Two columns of currency codes, or two
+timestamp columns, can share values without being related, and the distinct
+counts are shown so that such pairs are easy to recognise. The engineer
+agent is not given this report yet.
 
 ### Gate
 
@@ -368,7 +410,7 @@ installed and signed in. It runs on your own Claude subscription or API key.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the gate and the engineer agent's runner |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate and the engineer agent's runner |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
 ## Licence

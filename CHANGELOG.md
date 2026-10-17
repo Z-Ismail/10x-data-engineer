@@ -17,6 +17,11 @@ Notable changes to this project.
 
 ### Added
 
+- Overlap report (`python -m tenx.overlap`, `make overlap`): every pair of
+  columns in different tables is compared on its values, in lower case with
+  surrounding spaces removed, and the share found each way, the rows matched
+  with and without that normalisation, and examples not found are written
+  to `overlap.txt` and `overlap.json`.
 - Usage ledger: every engineer run prints its tokens per model, turns,
   refused tool calls, time and Claude Code's cost estimate by role, with the
   gate verdict, and saves them as `usage.json` beside the run.
