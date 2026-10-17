@@ -21,3 +21,5 @@ jobs:
         run: make demo-data
       - name: Profile demo data
         run: make profile
+      - name: Compare columns across demo tables
+        run: make overlap

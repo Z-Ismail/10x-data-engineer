@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test demo-data profile engineer clean
+.PHONY: install test demo-data profile overlap engineer clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline]"
@@ -13,6 +13,9 @@ demo-data:
 
 profile:
 	$(PYTHON) -m tenx.profile demo/data --out profiles
+
+overlap:
+	$(PYTHON) -m tenx.overlap demo/data --out profiles
 
 # Needs Claude Code, signed in. Each run starts from an empty runs/demo.
 engineer: demo-data
