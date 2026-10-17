@@ -147,6 +147,16 @@ class HandmadeTables(unittest.TestCase):
         self.assertEqual([side["containment"] for side in pair["sides"]], [0.5, 0.2])
         self.assertTrue(pair["listed"])
 
+    def test_values_not_found_are_shown_as_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "a/one.csv", "id\nX1\n Pad \nZz\n")
+            write(root, "b/two.csv", "id\nx1\n")
+            report = overlap_folder(root)
+        (pair,) = report["pairs"]
+        self.assertEqual(pair["sides"][1]["not_found"], [" Pad ", "Zz"])
+        self.assertIn('not found: " Pad ", Zz', render(report))
+
     def test_a_pair_below_half_is_reported_but_not_listed(self):
         pair = find(self.report, "crm.contacts.score", "shop.orders.amount")
         self.assertAlmostEqual(pair["sides"][0]["containment"], 1 / 3)
@@ -181,9 +191,9 @@ one row per value, not found: c3, c4, c5
 
 shop.customers.country ~ crm.contacts.country: 1 shared value
   shop.customers.country  1 of 2 values found (50.0%), 3 of 5 rows match (3 exactly), \
-many rows per value, not found: fr
+many rows per value, not found: FR
   crm.contacts.country    1 of 5 values found (20.0%), 1 of 5 rows match (1 exactly), \
-one row per value, not found: de, es, it
+one row per value, not found: DE, ES, IT
 
 rows left out before comparing:
   crm.contacts.email: 1 placeholder
@@ -315,7 +325,12 @@ def recount(rows: list[dict], column: str, other_rows: list[dict], other: str) -
         "rows_matched": sum(1 for value in kept if usable(value) in other_norm),
         "rows_matched_exactly": sum(1 for value in kept if value in other_raw),
         "one_row_per_value": len(kept) == len(norms),
-        "not_found": sorted(norms - other_norm)[:3],
+        # Each value not found, as written in the file (the first spelling
+        # in sort order), in order of its compared form.
+        "not_found": [
+            min(value for value in kept if usable(value) == norm)
+            for norm in sorted(norms - other_norm)[:3]
+        ],
     }
 
 

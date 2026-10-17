@@ -158,11 +158,11 @@ def side(con: duckdb.DuckDBPyConnection, this: dict, other: dict, shared: int) -
     ).fetchone()
     examples = con.execute(
         f"""
-        WITH a AS (SELECT norm FROM vals WHERE tbl = ? AND col = ?),
+        WITH a AS (SELECT raw, norm FROM vals WHERE tbl = ? AND col = ?),
              b AS (SELECT norm FROM vals WHERE tbl = ? AND col = ?)
-        SELECT DISTINCT norm FROM a
+        SELECT min(raw) FROM a
         WHERE norm NOT IN (SELECT norm FROM b)
-        ORDER BY norm LIMIT {NOT_FOUND_EXAMPLES}
+        GROUP BY norm ORDER BY norm LIMIT {NOT_FOUND_EXAMPLES}
         """,
         params,
     ).fetchall()
@@ -176,7 +176,7 @@ def side(con: duckdb.DuckDBPyConnection, this: dict, other: dict, shared: int) -
         "rows_matched": int(matched),
         "rows_matched_exactly": int(exact),
         "one_row_per_value": this["one_row_per_value"],
-        "not_found": [norm for (norm,) in examples],
+        "not_found": [raw for (raw,) in examples],
     }
 
 
@@ -254,6 +254,11 @@ def qualified(side: dict) -> str:
     return f"{side['table']}.{side['column']}"
 
 
+def example(value: str) -> str:
+    """A value as it is in the file, quoted if it has surrounding spaces."""
+    return json.dumps(value) if value != value.strip(" ") else shorten(value)
+
+
 def describe_side(side: dict) -> str:
     parts = [
         f"{side['found']} of {side['values']} values found ({side['containment']:.1%})",
@@ -264,7 +269,7 @@ def describe_side(side: dict) -> str:
         "one row per value" if side["one_row_per_value"] else "many rows per value",
     ]
     if side["not_found"]:
-        parts.append("not found: " + ", ".join(shorten(value) for value in side["not_found"]))
+        parts.append("not found: " + ", ".join(example(value) for value in side["not_found"]))
     return ", ".join(parts)
 
 
