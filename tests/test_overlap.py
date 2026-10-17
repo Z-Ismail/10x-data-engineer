@@ -5,6 +5,7 @@ recounted with the csv and json modules, never by calling the module's own
 SQL.
 """
 
+import csv
 import io
 import json
 import tempfile
@@ -12,8 +13,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from demo.generate import generate
 from tenx.overlap import main, overlap_folder, render
-from tenx.profile import ProfileError
+from tenx.profile import PLACEHOLDERS, ProfileError
 
 CUSTOMERS = """id,email,country,signup
 c1,ann@x.example,GB,2026-01-01
@@ -276,6 +278,111 @@ class TypedAndNestedJson(unittest.TestCase):
             "  app.events.meta (STRUCT(k BIGINT))\n",
             render(report),
         )
+
+
+def read_tables(root: Path) -> dict[str, list[dict]]:
+    """The demo tables read with the csv and json modules. Empty CSV fields are null."""
+    tables = {}
+    for relative in ("billing/customers.csv", "billing/invoices.csv", "crm/accounts.csv"):
+        with (root / relative).open(newline="", encoding="utf-8") as handle:
+            rows = [
+                {k: (v if v != "" else None) for k, v in row.items()}
+                for row in csv.DictReader(handle)
+            ]
+        tables[relative[:-4].replace("/", ".")] = rows
+    lines = (root / "events/events.jsonl").read_text(encoding="utf-8").splitlines()
+    tables["events.events"] = [json.loads(line) for line in lines]
+    return tables
+
+
+def recount(rows: list[dict], column: str, other_rows: list[dict], other: str) -> dict:
+    """One side of a pair, recounted in Python with the documented rules."""
+
+    def usable(value):
+        if value is None:
+            return None
+        norm = str(value).strip(" ").lower()
+        return None if norm == "" or norm in PLACEHOLDERS else norm
+
+    other_raw = {str(row[other]) for row in other_rows if usable(row[other]) is not None}
+    other_norm = {usable(value) for value in other_raw}
+    kept = [str(row[column]) for row in rows if usable(row[column]) is not None]
+    norms = {usable(value) for value in kept}
+    return {
+        "values": len(norms),
+        "found": len(norms & other_norm),
+        "rows": len(kept),
+        "rows_matched": sum(1 for value in kept if usable(value) in other_norm),
+        "rows_matched_exactly": sum(1 for value in kept if value in other_raw),
+        "one_row_per_value": len(kept) == len(norms),
+        "not_found": sorted(norms - other_norm)[:3],
+    }
+
+
+# The joins the demo data is built around: invoices belong to billing
+# customers, and the three systems share the customer's email address.
+DEMO_JOINS = (
+    ("billing.invoices", "customer_id", "billing.customers", "id"),
+    ("billing.customers", "email", "crm.accounts", "billing_email"),
+    ("billing.customers", "email", "events.events", "user_email"),
+    ("crm.accounts", "billing_email", "events.events", "user_email"),
+)
+
+
+class DemoData(unittest.TestCase):
+    def check(self, seed: int, companies: int) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generate(
+                seed=seed, companies=companies, out=root / "data", answers_out=root / "answers"
+            )
+            answers = json.loads((root / "answers/answers.json").read_text(encoding="utf-8"))
+            tables = read_tables(root / "data")
+            report = overlap_folder(root / "data")
+        for table_a, column_a, table_b, column_b in DEMO_JOINS:
+            pair = next(
+                pair
+                for pair in report["pairs"]
+                if {(side["table"], side["column"]) for side in pair["sides"]}
+                == {(table_a, column_a), (table_b, column_b)}
+            )
+            self.assertTrue(pair["listed"], (table_a, column_a, table_b, column_b))
+            for side in pair["sides"]:
+                if (side["table"], side["column"]) == (table_a, column_a):
+                    expected = recount(tables[table_a], column_a, tables[table_b], column_b)
+                else:
+                    expected = recount(tables[table_b], column_b, tables[table_a], column_a)
+                got = {key: side[key] for key in expected}
+                self.assertEqual(got, expected, (side["table"], side["column"]))
+        # Every invoice belongs to a billing customer.
+        invoices = next(
+            side
+            for pair in report["pairs"]
+            for side in pair["sides"]
+            if (side["table"], side["column"]) == ("billing.invoices", "customer_id")
+        )
+        self.assertEqual(invoices["containment"], 1.0)
+        # Billing emails of test-mode customers never appear in the CRM, so
+        # the CRM rows with no billing match are the planted prospects.
+        crm = next(
+            side
+            for pair in report["pairs"]
+            for side in pair["sides"]
+            if side["column"] == "billing_email"
+            and {s["column"] for s in pair["sides"]} == {"billing_email", "email"}
+        )
+        self.assertEqual(
+            crm["rows"] - crm["rows_matched"], answers["crm_accounts_without_live_billing"]
+        )
+
+    def test_seed_42_with_200_companies(self):
+        self.check(42, 200)
+
+    def test_smallest_dataset(self):
+        self.check(2026, 20)
+
+    def test_another_seed(self):
+        self.check(7, 45)
 
 
 class Errors(unittest.TestCase):
