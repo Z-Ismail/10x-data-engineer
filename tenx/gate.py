@@ -140,12 +140,21 @@ class Total:
 
 
 @dataclass(frozen=True)
+class Expected:
+    """Rows a model must hold in the named columns, given by a query on the raw files."""
+
+    columns: tuple[str, ...]
+    query: str
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     name: str
     key: tuple[str, ...]
     source: str | None = None
     exclusions: tuple[Exclusion, ...] = ()
     totals: tuple[Total, ...] = ()
+    expected: Expected | None = None
 
 
 @dataclass(frozen=True)
@@ -784,6 +793,93 @@ def check_repeat(con: duckdb.DuckDBPyConnection, model: str, first: str, second:
     else:
         detail += "; each column holds the same values, combined differently across rows"
     return Result("repeat", model, FAIL, detail, facts)
+
+
+def _as_text(columns: tuple[str, ...]) -> str:
+    return ", ".join(
+        f"CAST({quote_identifier(column)} AS VARCHAR) AS {quote_identifier(column)}"
+        for column in columns
+    )
+
+
+def _value(value: str | None) -> str:
+    """A value as text, quoted when spaces around it or its being empty would not show."""
+    if value is None:
+        return "null"
+    return f'"{value}"' if value != value.strip() or not value else value
+
+
+def _shown(row: tuple) -> str:
+    return "(" + ", ".join(map(_value, row)) + ")"
+
+
+def check_expected(
+    con: duckdb.DuckDBPyConnection, model: ModelSpec, built: str, reference: str
+) -> Result:
+    """The model must hold exactly the expected rows in the declared columns.
+
+    ``reference`` holds the expected rows, worked out from the raw files, as
+    text. The model's columns are read as text too, so the comparison is of
+    values, not of the types the project chose. Rows are compared as bags:
+    order does not matter, every copy of a row does, and nulls are equal.
+    """
+    columns = model.expected.columns
+    label = ", ".join(columns)
+    try:
+        present = {row[0].lower() for row in con.execute(f"DESCRIBE {built}").fetchall()}
+        missing = [column for column in columns if column.lower() not in present]
+        if missing:
+            return Result(
+                "expected",
+                model.name,
+                FAIL,
+                f"column {', '.join(missing)} is not in the model",
+                {"missing_columns": missing},
+            )
+        actual = f"(SELECT {_as_text(columns)} FROM {built})"
+        wanted = f"(SELECT {_as_text(columns)} FROM {reference})"
+        names = ", ".join(quote_identifier(column) for column in columns)
+
+        def surplus(one: str, other: str) -> tuple[int, list[tuple]]:
+            rows = f"SELECT {names} FROM {one} EXCEPT ALL SELECT {names} FROM {other}"
+            (count,) = con.execute(f"SELECT count(*) FROM ({rows})").fetchone()
+            examples = con.execute(
+                f"SELECT * FROM ({rows}) ORDER BY ALL NULLS FIRST LIMIT {EXAMPLES}"
+            ).fetchall()
+            return count, examples
+
+        model_rows, expected_rows = con.execute(
+            f"SELECT (SELECT count(*) FROM {built}), (SELECT count(*) FROM {reference})"
+        ).fetchone()
+        only_model, model_examples = surplus(actual, wanted)
+        only_expected, expected_examples = surplus(wanted, actual)
+    except duckdb.Error as error:
+        return Result("expected", model.name, FAIL, f"could not read the model: {error}")
+    facts = {
+        "expected_rows": expected_rows,
+        "model_rows": model_rows,
+        "only_model": only_model,
+        "only_expected": only_expected,
+    }
+    if not only_model and not only_expected:
+        return Result(
+            "expected",
+            model.name,
+            PASS,
+            f"{label}: the {counted(expected_rows, 'expected row')}, and no other",
+            facts,
+        )
+    lines = [
+        (
+            f"{label}: {counted(expected_rows, 'row')} expected and {model_rows} in the model, "
+            f"of which {only_model} not expected and {only_expected} expected but missing"
+        )
+    ]
+    if model_examples:
+        lines.append("not expected: " + ", ".join(map(_shown, model_examples)))
+    if expected_examples:
+        lines.append("missing: " + ", ".join(map(_shown, expected_examples)))
+    return Result("expected", model.name, FAIL, "\n".join(lines), facts)
 
 
 def _reason(message: object) -> str:

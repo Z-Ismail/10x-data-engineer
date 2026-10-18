@@ -26,6 +26,7 @@ from tenx.gate import (
     PASS,
     SKIP,
     Exclusion,
+    Expected,
     GateError,
     ModelSpec,
     Result,
@@ -33,6 +34,7 @@ from tenx.gate import (
     TotalExpectation,
     built_models,
     check_build,
+    check_expected,
     check_key,
     check_repeat,
     check_rows,
@@ -1059,6 +1061,142 @@ class RepeatCheck(unittest.TestCase):
         result = check_repeat(con, "t", "t", "absent")
         self.assertEqual(result.status, FAIL)
         self.assertIn("could not compare the two builds", result.detail)
+
+
+class ExpectedCheck(unittest.TestCase):
+    """A model table m compared with a table of expected rows r, held as text."""
+
+    COLUMNS = ("customer_id", "account_id")
+
+    def setUp(self):
+        self.con = duckdb.connect()
+        self.addCleanup(self.con.close)
+
+    def check(self, model_rows, expected_rows, shape="customer_id VARCHAR, account_id VARCHAR"):
+        self.con.execute(f"CREATE TABLE m ({shape})")
+        if model_rows:
+            self.con.execute(f"INSERT INTO m VALUES {model_rows}")
+        self.con.execute("CREATE TABLE r (customer_id VARCHAR, account_id VARCHAR)")
+        if expected_rows:
+            self.con.execute(f"INSERT INTO r VALUES {expected_rows}")
+        model = ModelSpec("int_matches", ("customer_id",), expected=Expected(self.COLUMNS, "-"))
+        return check_expected(self.con, model, "m", "r")
+
+    def test_the_expected_rows_in_another_order_pass(self):
+        result = self.check(
+            "('c3', 'a3'), ('c1', 'a1'), ('c2', NULL)", "('c1', 'a1'), ('c2', NULL), ('c3', 'a3')"
+        )
+        self.assertEqual(result.status, PASS)
+        self.assertEqual(
+            result.detail, "customer_id, account_id: the 3 expected rows, and no other"
+        )
+        self.assertEqual(
+            result.facts,
+            {"expected_rows": 3, "model_rows": 3, "only_model": 0, "only_expected": 0},
+        )
+
+    def test_one_row(self):
+        result = self.check("('c1', 'a1')", "('c1', 'a1')")
+        self.assertEqual(result.detail, "customer_id, account_id: the 1 expected row, and no other")
+
+    def test_values_are_compared_as_text_and_other_columns_are_ignored(self):
+        # 12 as an integer reads as '12'. The model's extra column is not compared.
+        result = self.check(
+            "(12, 'a1', 'x'), (13, NULL, 'y')",
+            "('12', 'a1'), ('13', NULL)",
+            shape="CUSTOMER_ID INTEGER, Account_Id VARCHAR, note VARCHAR",
+        )
+        self.assertEqual(result.status, PASS)
+
+    def test_a_wrong_match_is_shown_both_ways(self):
+        # c2 should match a2 but was left unmatched: one row the model should
+        # not have and one row it lacks.
+        result = self.check(
+            "('c1', 'a1'), ('c2', NULL), ('c3', 'a3')", "('c1', 'a1'), ('c2', 'a2'), ('c3', 'a3')"
+        )
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(
+            result.detail,
+            "customer_id, account_id: 3 rows expected and 3 in the model, "
+            "of which 1 not expected and 1 expected but missing\n"
+            "not expected: (c2, null)\n"
+            "missing: (c2, a2)",
+        )
+        self.assertEqual(
+            result.facts,
+            {"expected_rows": 3, "model_rows": 3, "only_model": 1, "only_expected": 1},
+        )
+
+    def test_a_row_the_model_repeats_fails(self):
+        result = self.check("('c1', 'a1'), ('c1', 'a1')", "('c1', 'a1')")
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(
+            result.facts,
+            {"expected_rows": 1, "model_rows": 2, "only_model": 1, "only_expected": 0},
+        )
+        self.assertEqual(result.detail.splitlines()[1:], ["not expected: (c1, a1)"])
+
+    def test_a_missing_row_fails(self):
+        result = self.check("('c1', 'a1')", "('c1', 'a1'), ('c2', NULL)")
+        self.assertEqual(
+            result.facts,
+            {"expected_rows": 2, "model_rows": 1, "only_model": 0, "only_expected": 1},
+        )
+        self.assertEqual(result.detail.splitlines()[1:], ["missing: (c2, null)"])
+
+    def test_nulls_held_by_both_sides_are_equal(self):
+        rows = "(NULL, NULL), ('c1', NULL), ('c1', NULL)"
+        self.assertEqual(self.check(rows, rows).status, PASS)
+
+    def test_an_identifier_that_lost_its_leading_zeros_fails(self):
+        result = self.check(
+            "(7, 'a1')", "('007', 'a1')", shape="customer_id INTEGER, account_id VARCHAR"
+        )
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(
+            result.detail.splitlines()[1:], ["not expected: (7, a1)", "missing: (007, a1)"]
+        )
+
+    def test_values_with_spaces_around_them_or_empty_are_quoted(self):
+        result = self.check("(' c1', 'a1'), ('', 'a2')", "('c1', 'a1'), ('c2', 'a2')")
+        self.assertEqual(
+            result.detail.splitlines()[1:],
+            ['not expected: ("", a2), (" c1", a1)', "missing: (c1, a1), (c2, a2)"],
+        )
+
+    def test_at_most_three_examples_are_shown_each_way_in_order(self):
+        result = self.check(
+            "('c5', 'x'), ('c4', 'x'), ('c3', 'x'), ('c2', 'x'), ('c1', NULL)",
+            "('c5', 'a5'), ('c1', 'a1')",
+        )
+        self.assertEqual(
+            result.facts,
+            {"expected_rows": 2, "model_rows": 5, "only_model": 5, "only_expected": 2},
+        )
+        self.assertEqual(
+            result.detail.splitlines()[1:],
+            ["not expected: (c1, null), (c2, x), (c3, x)", "missing: (c1, a1), (c5, a5)"],
+        )
+
+    def test_an_empty_model_misses_every_expected_row(self):
+        result = self.check("", "('c1', 'a1')")
+        self.assertEqual(
+            result.facts,
+            {"expected_rows": 1, "model_rows": 0, "only_model": 0, "only_expected": 1},
+        )
+
+    def test_a_missing_column_fails(self):
+        result = self.check("('c1')", "('c1', 'a1')", shape="customer_id VARCHAR")
+        self.assertEqual(result.status, FAIL)
+        self.assertEqual(result.detail, "column account_id is not in the model")
+        self.assertEqual(result.facts, {"missing_columns": ["account_id"]})
+
+    def test_a_model_that_cannot_be_read_fails(self):
+        self.con.execute("CREATE TABLE r (customer_id VARCHAR, account_id VARCHAR)")
+        model = ModelSpec("int_matches", ("customer_id",), expected=Expected(self.COLUMNS, "-"))
+        result = check_expected(self.con, model, "absent", "r")
+        self.assertEqual(result.status, FAIL)
+        self.assertTrue(result.detail.startswith("could not read the model: "))
 
 
 class Report(unittest.TestCase):
