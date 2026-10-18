@@ -1,8 +1,12 @@
-# Goal: staging models for the demo sources
+# Goal: staging models and a customer crosswalk for the demo sources
 
 Build the staging layer for the three demo source systems: billing, CRM and
-the product event log. One staging model per source table, with these names
-and keys:
+the product event log, and one model that matches billing customers to CRM
+accounts.
+
+## Staging
+
+One staging model per source table, with these names and keys:
 
 | Model | One row per | Key |
 | --- | --- | --- |
@@ -23,3 +27,15 @@ Keep every other row.
 
 Invoice amounts stay in the currency's smallest unit, in a column named
 `amount_minor`, next to the invoice's `currency`.
+
+## Customer crosswalk
+
+`int_customers_matched_to_accounts`: one row per live billing customer, keyed
+on `customer_id`, with `account_id`, the CRM account of the same company.
+
+- The only thing billing and the CRM have in common is the customer's email
+  address.
+- A company can have more than one billing customer; each of them gets the
+  company's account.
+- A customer whose company has no CRM account keeps its row, with no
+  `account_id`.

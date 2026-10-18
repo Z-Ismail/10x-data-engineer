@@ -39,7 +39,7 @@ from tenx.engineer import (
     prepare_project,
     run,
 )
-from tenx.gate import FAIL, GateError, passed
+from tenx.gate import FAIL, GateError, load_declaration, passed
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REFERENCE_MODELS = FIXTURES / "demo_project" / "models"
@@ -197,6 +197,16 @@ class PrepareProjectTest(unittest.TestCase):
         empty.mkdir()
         with self.assertRaisesRegex(EngineerError, "no CSV, JSON or Parquet"):
             prepare_project(self.project, empty, self.goal)
+
+
+class DemoGoalTest(unittest.TestCase):
+    def test_names_every_model_the_demo_declaration_checks(self):
+        goal = DEMO_GOAL.read_text(encoding="utf-8")
+        for model in load_declaration(DECLARATION):
+            with self.subTest(model.name):
+                self.assertIn(f"`{model.name}`", goal)
+                for column in model.key + (model.expected.columns if model.expected else ()):
+                    self.assertIn(f"`{column}`", goal)
 
 
 class AgentCommandTest(unittest.TestCase):
