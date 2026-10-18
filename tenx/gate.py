@@ -4,15 +4,17 @@ A dbt project can build cleanly and still be wrong, so the gate does not take
 a green build as proof. It builds the project itself into an empty database
 and then asks its own questions of the result:
 
-    build  ``dbt build`` succeeds and every expected model was produced
-    rows   each model holds the rows of its source, less the rows that were
-           declared as excluded, and not one more or fewer
-    key    each model's declared key has no nulls and no repeated values
-    total  each declared money column adds up to exactly the raw total, less
-           what the exclusions removed, for each value of a column such as
-           the currency
-    repeat each model comes out the same when the project is built a second
-           time into another empty database
+    build     ``dbt build`` succeeds and every expected model was produced
+    rows      each model holds the rows of its source, less the rows that
+              were declared as excluded, and not one more or fewer
+    key       each model's declared key has no nulls and no repeated values
+    total     each declared money column adds up to exactly the raw total,
+              less what the exclusions removed, for each value of a column
+              such as the currency
+    expected  a model that declares its expected rows holds exactly those
+              rows in the named columns
+    repeat    each model comes out the same when the project is built a
+              second time into another empty database
 
 What to expect is declared in a JSON file kept outside the dbt project, so
 that whoever writes the models cannot relax a check to make it pass:
@@ -47,6 +49,19 @@ Group values are compared in capitals with surrounding spaces removed, so
 The model column must hold the amount in the same unit as the raw file, as an
 integer or DECIMAL. Raw amounts must be plain decimal numbers and are added
 without rounding.
+
+Expected rows are declared as the columns to compare and a query that gives
+them from the raw files, for a model whose right answer is not a count or a
+total, such as one that matches records across sources:
+
+    "expected": {
+      "columns": ["customer_id", "account_id"],
+      "query": "SELECT c.id AS customer_id, a.account_id FROM billing.customers c ..."
+    }
+
+The query reads each raw file by its table name, such as ``billing.customers``,
+and runs before the project is built. Values are compared as text, and every
+copy of a row counts.
 
 The project reads the raw files from the folder passed to dbt as the variable
 ``raw_dir``.
@@ -98,9 +113,10 @@ EXPECTED_FILE = "expected.duckdb"
 EXPECTED_CATALOG = "tenx_expected"
 OUTPUT_TAIL = 15
 EXAMPLES = 3
-MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals"}
+MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals", "expected"}
 EXCLUSION_FIELDS = {"name", "where", "duplicate_rows"}
 TOTAL_FIELDS = {"column", "source_column", "by", "source_by"}
+EXPECTED_FIELDS = {"columns", "query"}
 # Raw amounts are read from text, and only plain decimal numbers are accepted:
 # an optional sign, digits and an optional decimal point. Anything else, such
 # as `1e3`, `12,50` or `n/a`, is not taken as an amount.
@@ -258,6 +274,27 @@ def _parse_total(raw: object, model: str) -> Total:
     )
 
 
+def _parse_expected(raw: object, model: str) -> Expected:
+    _require(isinstance(raw, dict), f"{model}: expected must be an object")
+    unknown = sorted(set(raw) - EXPECTED_FIELDS)
+    _require(not unknown, f"{model}: unknown expected field {', '.join(unknown)}")
+    columns = raw.get("columns")
+    _require(
+        isinstance(columns, list) and bool(columns) and all(map(_column_name, columns)),
+        f"{model}: expected columns must be a list of one or more column names",
+    )
+    _require(
+        len({column.lower() for column in columns}) == len(columns),
+        f"{model}: expected names the same column twice",
+    )
+    query = raw.get("query")
+    _require(
+        isinstance(query, str) and bool(query.strip()),
+        f"{model}: expected needs the query that gives the rows",
+    )
+    return Expected(columns=tuple(columns), query=query)
+
+
 def _parse_model(raw: object) -> ModelSpec:
     _require(isinstance(raw, dict), "each model must be an object")
     name = raw.get("name")
@@ -302,7 +339,15 @@ def _parse_model(raw: object) -> ModelSpec:
     totals = tuple(_parse_total(item, name) for item in listed)
     columns = [total.column.lower() for total in totals]
     _require(len(set(columns)) == len(columns), f"{name}: a column is totalled twice")
-    return ModelSpec(name=name, key=tuple(key), source=source, exclusions=exclusions, totals=totals)
+    expected = raw.get("expected")
+    return ModelSpec(
+        name=name,
+        key=tuple(key),
+        source=source,
+        exclusions=exclusions,
+        totals=totals,
+        expected=None if expected is None else _parse_expected(expected, name),
+    )
 
 
 def load_declaration(path: Path) -> list[ModelSpec]:
@@ -1161,6 +1206,8 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
                 ]
     finally:
         con.close()
+    if any(model.expected is not None for model in models):
+        store_expected(models, files, workdir / EXPECTED_FILE)
 
     exit_code, run_results, output = build_project(project, raw, workdir)
     results, relations = check_build(exit_code, run_results, models, output)
@@ -1169,10 +1216,16 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
     first = built_models(run_results) if database.is_file() else {}
     con = duckdb.connect(str(database), read_only=True) if database.is_file() else None
     try:
+        if con is not None and (workdir / EXPECTED_FILE).is_file():
+            con.execute(
+                f"ATTACH {quote_literal(str(workdir / EXPECTED_FILE))} "
+                f"AS {EXPECTED_CATALOG} (READ_ONLY)"
+            )
         for model in models:
             built = relations.get(model.name)
             checks = (["rows"] if model.name in expectations else []) + ["key"]
             checks += ["total"] * len(model.totals)
+            checks += ["expected"] if model.expected is not None else []
             if built is None or con is None:
                 results += [
                     Result(check, model.name, SKIP, "not checked: the model was not built")
@@ -1186,6 +1239,8 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
                 check_total(con, model, built, expectation)
                 for expectation in totals.get(model.name, [])
             ]
+            if model.expected is not None:
+                results.append(check_expected(con, model, built, expected_relation(model.name)))
     finally:
         if con is not None:
             con.close()

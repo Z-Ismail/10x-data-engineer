@@ -127,7 +127,14 @@ class Declaration(unittest.TestCase):
                             {"column": "fee"},
                         ],
                     },
-                    {"name": "orders", "key": ["order_id"]},
+                    {
+                        "name": "orders",
+                        "key": ["order_id"],
+                        "expected": {
+                            "columns": ["order_id", "shop_id"],
+                            "query": "SELECT id AS order_id, shop AS shop_id FROM shop.orders",
+                        },
+                    },
                 ]
             }
         )
@@ -148,7 +155,14 @@ class Declaration(unittest.TestCase):
                         Total("fee", "fee"),
                     ),
                 ),
-                ModelSpec(name="orders", key=("order_id",)),
+                ModelSpec(
+                    name="orders",
+                    key=("order_id",),
+                    expected=Expected(
+                        columns=("order_id", "shop_id"),
+                        query="SELECT id AS order_id, shop AS shop_id FROM shop.orders",
+                    ),
+                ),
             ],
         )
 
@@ -235,6 +249,24 @@ class Declaration(unittest.TestCase):
             },
             "column totalled twice": {
                 "models": [{**good, "totals": [{"column": "amount"}, {"column": "AMOUNT"}]}]
+            },
+            "expected that is not an object": {"models": [{**good, "expected": "SELECT 1"}]},
+            "expected without columns": {"models": [{**good, "expected": {"query": "SELECT 1"}}]},
+            "expected with no columns": {
+                "models": [{**good, "expected": {"columns": [], "query": "SELECT 1 AS id"}}]
+            },
+            "expected naming a column twice": {
+                "models": [{**good, "expected": {"columns": ["id", "Id"], "query": "SELECT 1"}}]
+            },
+            "expected column that is not a name": {
+                "models": [{**good, "expected": {"columns": [1], "query": "SELECT 1"}}]
+            },
+            "expected without a query": {"models": [{**good, "expected": {"columns": ["id"]}}]},
+            "expected with an empty query": {
+                "models": [{**good, "expected": {"columns": ["id"], "query": " "}}]
+            },
+            "misspelt expected field": {
+                "models": [{**good, "expected": {"columns": ["id"], "sql": "SELECT 1"}}]
             },
         }
         for label, payload in mistakes.items():
@@ -1274,6 +1306,75 @@ class ExpectedRows(unittest.TestCase):
                     store_expected([model], source_files(self.raw), self.database)
 
 
+class ExpectedEndToEnd(unittest.TestCase):
+    """The expected check run by the gate on a small handmade dbt project."""
+
+    def test_each_declared_model_is_compared_with_its_expected_rows(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        write(root / "raw" / "shop" / "orders.csv", "id,status\n001,paid\n002,void\n003,paid\n")
+        project = root / "project"
+        write(
+            project / "dbt_project.yml", 'name: shop\nconfig-version: 2\nmodel-paths: ["models"]\n'
+        )
+        write(
+            project / "models" / "sources.yml",
+            "version: 2\nsources:\n  - name: shop\n    tables:\n      - name: orders\n"
+            "        config:\n          external_location: \"read_csv('{{ var('raw_dir') }}"
+            "/shop/orders.csv', all_varchar=true, header=true)\"\n",
+        )
+        # The right ids, the ids as numbers (leading zeros lost), and every
+        # order where only paid ones are expected.
+        write(
+            project / "models" / "paid.sql",
+            "select id from {{ source('shop', 'orders') }} where status = 'paid'",
+        )
+        write(
+            project / "models" / "paid_as_numbers.sql",
+            "select cast(id as integer) as id from {{ source('shop', 'orders') }} "
+            "where status = 'paid'",
+        )
+        write(
+            project / "models" / "paid_and_void.sql",
+            "select id from {{ source('shop', 'orders') }}",
+        )
+        query = "SELECT id FROM shop.orders WHERE status = 'paid'"
+        checks = declaration(
+            root,
+            {
+                "models": [
+                    {"name": name, "key": ["id"], "expected": {"columns": ["id"], "query": query}}
+                    for name in ("paid", "paid_as_numbers", "paid_and_void", "absent")
+                ]
+            },
+        )
+        results = {
+            (result.check, result.subject): result
+            for result in run_gate(project, root / "raw", checks, root / "work")
+        }
+        self.assertTrue((root / "work" / "expected.duckdb").is_file())
+        statuses = {
+            subject: result.status
+            for (check, subject), result in results.items()
+            if check == "expected"
+        }
+        self.assertEqual(
+            statuses, {"paid": PASS, "paid_as_numbers": FAIL, "paid_and_void": FAIL, "absent": SKIP}
+        )
+        self.assertEqual(
+            results[("expected", "paid")].detail, "id: the 2 expected rows, and no other"
+        )
+        self.assertEqual(
+            results[("expected", "paid_as_numbers")].detail.splitlines()[1:],
+            ["not expected: (1), (3)", "missing: (001), (003)"],
+        )
+        self.assertEqual(
+            results[("expected", "paid_and_void")].facts,
+            {"expected_rows": 2, "model_rows": 3, "only_model": 1, "only_expected": 0},
+        )
+
+
 class Report(unittest.TestCase):
     def test_a_gate_passes_only_when_every_check_ran_and_passed(self):
         ok = Result("key", "m", PASS, "fine")
@@ -1340,6 +1441,24 @@ class CannotRun(unittest.TestCase):
         )
         with self.assertRaises(GateError):
             run_gate(self.project, self.root / "raw", checks)
+
+    def test_an_expected_query_that_cannot_run(self):
+        checks = declaration(
+            self.root,
+            {
+                "models": [
+                    {
+                        "name": "stg_orders",
+                        "key": ["id"],
+                        "expected": {"columns": ["id"], "query": "SELECT id FROM shop.refunds"},
+                    }
+                ]
+            },
+        )
+        build = mock.patch("tenx.gate.build_project")
+        with build as started, self.assertRaisesRegex(GateError, "could not work out"):
+            run_gate(self.project, self.root / "raw", checks)
+        started.assert_not_called()
 
     def test_a_raw_folder_that_does_not_exist(self):
         with self.assertRaises(GateError):
