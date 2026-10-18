@@ -295,7 +295,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(code, 0, printed.getvalue())
         report = printed.getvalue()
         self.assertTrue(report.startswith("agent: success after 7 turns (exit 0)\n"), report)
-        self.assertIn("gate: PASS (19 passed, 0 failed, 0 not run)", report)
+        self.assertIn("gate: PASS (24 passed, 0 failed, 0 not run)", report)
 
         record = self.recorded()
         project = self.out / PROJECT_DIR

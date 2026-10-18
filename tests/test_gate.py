@@ -13,6 +13,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from collections import Counter
 from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
 from pathlib import Path
@@ -175,6 +176,7 @@ class Declaration(unittest.TestCase):
                 "stg_billing__invoices",
                 "stg_crm__accounts",
                 "stg_events__events",
+                "int_customers_matched_to_accounts",
             ],
         )
 
@@ -1501,6 +1503,23 @@ def currency_of(row: dict) -> str:
     return row["currency"].strip().upper()
 
 
+def company(identifier: str) -> int:
+    """The demo company a billing customer or CRM account belongs to, from its ID.
+
+    The generator writes the company's number into both IDs (``cus_000042A``,
+    ``001000000000000042``), so this is the true match, worked out without
+    looking at emails.
+    """
+    if identifier.startswith("cus_"):
+        return int(identifier[4:10])
+    return int(identifier[3:])
+
+
+def bag_difference(one: list, other: list) -> int:
+    """How many rows of one are not in other, counting every copy."""
+    return sum((Counter(one) - Counter(other)).values())
+
+
 class DemoProject(unittest.TestCase):
     """The gate run end to end with dbt, on generated demo data."""
 
@@ -1522,6 +1541,9 @@ class DemoProject(unittest.TestCase):
         with (cls.raw / "events" / "events.jsonl").open(encoding="utf-8") as handle:
             cls.events = [line for line in handle if line.strip()]
         cls.models = [model.name for model in load_declaration(DECLARATION)]
+        cls.matched = [model.name for model in load_declaration(DECLARATION) if model.expected]
+        # Each CRM account by the company it belongs to.
+        cls.account_of = {company(row["account_id"]): row["account_id"] for row in cls.accounts}
         cls.count = 0
 
     @classmethod
@@ -1545,6 +1567,7 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(
             set(results),
             {("build", "project"), ("repeat", "project"), ("total", "stg_billing__invoices")}
+            | {("expected", model) for model in self.matched}
             | {
                 (check, model)
                 for check in ("build", "rows", "key", "repeat")
@@ -1568,6 +1591,10 @@ class DemoProject(unittest.TestCase):
             "stg_billing__invoices": (len(self.invoices), {"test_mode": test_invoices}),
             "stg_crm__accounts": (len(self.accounts), {}),
             "stg_events__events": (len(self.events), {"repeat_deliveries": repeats}),
+            "int_customers_matched_to_accounts": (
+                len(self.customers),
+                {"test_mode": test_customers},
+            ),
         }
         for model, (source_rows, excluded) in expected.items():
             with self.subTest(model):
@@ -1614,6 +1641,33 @@ class DemoProject(unittest.TestCase):
         # Every demo invoice has an amount: int() above would fail on a blank.
         self.assertEqual(facts["blank"], 0)
 
+        # Each live customer is matched to its own company's account, and the
+        # customers whose company is not in the CRM have none. Matching emails
+        # without regard to case and surrounding spaces finds the same pairs.
+        truth = self.true_matches()
+        self.assertTrue(any(account is None for _, account in truth))
+        self.assertTrue(any(account is not None for _, account in truth))
+        by_email = {
+            row["billing_email"].strip().lower(): row["account_id"] for row in self.accounts
+        }
+        self.assertEqual(
+            truth,
+            [
+                (row["id"], by_email.get(row["email"].strip().lower()))
+                for row in self.customers
+                if row["livemode"] == "true"
+            ],
+        )
+        self.assertEqual(
+            results[("expected", "int_customers_matched_to_accounts")].facts,
+            {
+                "expected_rows": len(truth),
+                "model_rows": len(truth),
+                "only_model": 0,
+                "only_expected": 0,
+            },
+        )
+
         # The build went into the workdir, and the project folder is untouched.
         self.assertTrue((workdir / "build.duckdb").is_file())
         self.assertTrue((workdir / "target" / "run_results.json").is_file())
@@ -1627,7 +1681,7 @@ class DemoProject(unittest.TestCase):
         with redirect_stdout(stdout):
             code = main([str(PROJECT), "--raw", str(self.raw), "--checks", str(DECLARATION)])
         self.assertEqual(code, 0)
-        self.assertTrue(stdout.getvalue().startswith("gate: PASS (19 passed, 0 failed, 0 not run)"))
+        self.assertTrue(stdout.getvalue().startswith("gate: PASS (24 passed, 0 failed, 0 not run)"))
 
     def test_lost_and_surplus_rows_fail_the_rows_check(self):
         project = self.broken_copy()
@@ -1656,6 +1710,9 @@ class DemoProject(unittest.TestCase):
                 ("rows", "stg_billing__customers"): FAIL,
                 # Dropping refunds also leaves too much money.
                 ("total", "stg_billing__invoices"): FAIL,
+                # The crosswalk is built from the broken customers and accounts.
+                ("rows", "int_customers_matched_to_accounts"): FAIL,
+                ("expected", "int_customers_matched_to_accounts"): FAIL,
             },
         )
         live_invoices = [row for row in self.invoices if row["livemode"] == "true"]
@@ -1685,6 +1742,37 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(
             results[("rows", "stg_billing__customers")].facts["model_rows"], len(self.customers)
         )
+        # The crosswalk is built from both models: it holds the test-mode
+        # customers, with no account, and the dropped account's customers lose
+        # their match.
+        dropped = min(row["account_id"] for row in self.accounts)
+        truth = self.true_matches()
+        model = [
+            (
+                row["id"],
+                None if row["livemode"] == "false" else self.account_of.get(company(row["id"])),
+            )
+            for row in self.customers
+        ]
+        model = [(customer, None if account == dropped else account) for customer, account in model]
+        self.assertEqual(
+            results[("rows", "int_customers_matched_to_accounts")].facts["model_rows"],
+            len(self.customers),
+        )
+        facts = results[("expected", "int_customers_matched_to_accounts")].facts
+        self.assertEqual(
+            (facts["only_model"], facts["only_expected"]),
+            (bag_difference(model, truth), bag_difference(truth, model)),
+        )
+        self.assertGreater(facts["only_model"], 0)
+
+    def true_matches(self) -> list[tuple[str, str | None]]:
+        """Each live billing customer with its company's CRM account, if it has one."""
+        return [
+            (row["id"], self.account_of.get(company(row["id"])))
+            for row in self.customers
+            if row["livemode"] == "true"
+        ]
 
     def live_money(self, change=lambda row, amount: amount):
         """Live invoice money by currency, after changing each amount as a model might."""
@@ -1800,6 +1888,96 @@ class DemoProject(unittest.TestCase):
         self.assertIn("\nJPY: ", result.detail)
         self.assertIn(f"\n{other}: ", result.detail)
 
+    def write_crosswalk(self, project: Path, sql: str) -> None:
+        write(project / "models" / "intermediate" / "int_customers_matched_to_accounts.sql", sql)
+
+    def test_matching_emails_exactly_fails_the_expected_check_alone(self):
+        project = self.broken_copy()
+        self.write_crosswalk(
+            project,
+            "select customers.id as customer_id, accounts.account_id\n"
+            "from {{ source('billing', 'customers') }} as customers\n"
+            "left join {{ source('crm', 'accounts') }} as accounts\n"
+            "    on customers.email = accounts.billing_email\n"
+            "where customers.livemode = 'true'\n",
+        )
+        results = self.run_on(project)
+        self.assert_only_failures(
+            results, {("expected", "int_customers_matched_to_accounts"): FAIL}
+        )
+        exact = {row["billing_email"]: row["account_id"] for row in self.accounts}
+        model = [
+            (row["id"], exact.get(row["email"]))
+            for row in self.customers
+            if row["livemode"] == "true"
+        ]
+        truth = self.true_matches()
+        missed = bag_difference(truth, model)
+        self.assertGreater(missed, 0)
+        result = results[("expected", "int_customers_matched_to_accounts")]
+        self.assertEqual(
+            result.facts,
+            {
+                "expected_rows": len(truth),
+                "model_rows": len(truth),
+                "only_model": missed,
+                "only_expected": missed,
+            },
+        )
+        self.assertRegex(result.detail, r"\nnot expected: \(cus_\w+, null\)")
+        self.assertRegex(result.detail, r"\nmissing: \(cus_\w+, 001\d{15}\)")
+
+    def test_leaving_out_customers_with_no_account_fails_the_rows_and_expected_checks(self):
+        project = self.broken_copy()
+        replace_in(
+            project / "models" / "intermediate" / "int_customers_matched_to_accounts.sql",
+            "left join",
+            "inner join",
+        )
+        results = self.run_on(project)
+        self.assert_only_failures(
+            results,
+            {
+                ("rows", "int_customers_matched_to_accounts"): FAIL,
+                ("expected", "int_customers_matched_to_accounts"): FAIL,
+            },
+        )
+        truth = self.true_matches()
+        unmatched = sum(1 for _, account in truth if account is None)
+        self.assertGreater(unmatched, 0)
+        self.assertEqual(
+            results[("rows", "int_customers_matched_to_accounts")].facts["model_rows"],
+            len(truth) - unmatched,
+        )
+        self.assertEqual(
+            results[("expected", "int_customers_matched_to_accounts")].facts,
+            {
+                "expected_rows": len(truth),
+                "model_rows": len(truth) - unmatched,
+                "only_model": 0,
+                "only_expected": unmatched,
+            },
+        )
+
+    def test_a_crosswalk_written_another_way_passes(self):
+        # Built from the raw sources as a view, with its own normalisation,
+        # column names in capitals and an extra column.
+        project = self.broken_copy()
+        self.write_crosswalk(
+            project,
+            "{{ config(materialized='view') }}\n"
+            "select\n"
+            "    customers.id as CUSTOMER_ID,\n"
+            "    accounts.account_id as Account_Id,\n"
+            "    case when accounts.account_id is null then 'none' else 'email' end as match_method\n"
+            "from {{ source('billing', 'customers') }} as customers\n"
+            "left join {{ source('crm', 'accounts') }} as accounts\n"
+            "    on upper(trim(accounts.billing_email)) = upper(trim(customers.email))\n"
+            "where customers.livemode <> 'false'\n",
+        )
+        results = self.run_on(project)
+        self.assert_only_failures(results, {})
+
     def test_a_random_identifier_fails_the_repeat_check_alone(self):
         # Every row gets a new identifier on each build: the right rows, keys
         # and money, but not the same tables twice.
@@ -1871,11 +2049,12 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(mart.facts["only_second"], currencies)
         self.assertEqual(mart.facts["differing_columns"], ["taken_at"])
 
-    def test_a_repeated_key_and_a_null_key_fail_the_key_check_alone(self):
+    def test_a_repeated_key_and_a_null_key_fail_the_key_checks(self):
         project = self.broken_copy()
         staging = project / "models" / "staging"
         # The project's own key tests are removed, as a careless fix would.
         (staging / "staging.yml").unlink()
+        (project / "models" / "intermediate" / "intermediate.yml").unlink()
         # The last account is given the first account's identifier.
         replace_in(
             staging / "stg_crm__accounts.sql",
@@ -1895,7 +2074,13 @@ class DemoProject(unittest.TestCase):
         results = self.run_on(project)
         self.assert_only_failures(
             results,
-            {("key", "stg_crm__accounts"): FAIL, ("key", "stg_billing__customers"): FAIL},
+            {
+                ("key", "stg_crm__accounts"): FAIL,
+                ("key", "stg_billing__customers"): FAIL,
+                # The crosswalk carries both mistakes.
+                ("key", "int_customers_matched_to_accounts"): FAIL,
+                ("expected", "int_customers_matched_to_accounts"): FAIL,
+            },
         )
         accounts = results[("key", "stg_crm__accounts")]
         self.assertEqual(
@@ -1907,6 +2092,22 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(
             results[("key", "stg_billing__customers")].facts,
             {"rows": live_customers, "null_rows": 1, "repeated_keys": 0, "surplus_rows": 0},
+        )
+        self.assertEqual(
+            results[("key", "int_customers_matched_to_accounts")].facts,
+            {"rows": live_customers, "null_rows": 1, "repeated_keys": 0, "surplus_rows": 0},
+        )
+        first, last = min(self.account_of.values()), max(self.account_of.values())
+        nulled = min(row["id"] for row in self.customers if row["livemode"] == "true")
+        truth = self.true_matches()
+        model = [
+            (None if customer == nulled else customer, first if account == last else account)
+            for customer, account in truth
+        ]
+        facts = results[("expected", "int_customers_matched_to_accounts")].facts
+        self.assertEqual(
+            (facts["only_model"], facts["only_expected"]),
+            (bag_difference(model, truth), bag_difference(truth, model)),
         )
 
     def test_a_model_that_does_not_run_fails_the_build_and_is_not_checked(self):
@@ -1925,10 +2126,19 @@ class DemoProject(unittest.TestCase):
                 # The second build fails the same way; the other models repeat.
                 ("repeat", "project"): FAIL,
                 ("repeat", "stg_crm__accounts"): SKIP,
+                # dbt skips the model built from the one that failed.
+                ("build", "int_customers_matched_to_accounts"): FAIL,
+                ("rows", "int_customers_matched_to_accounts"): SKIP,
+                ("key", "int_customers_matched_to_accounts"): SKIP,
+                ("expected", "int_customers_matched_to_accounts"): SKIP,
+                ("repeat", "int_customers_matched_to_accounts"): SKIP,
             },
         )
         self.assertIn("model.demo.stg_crm__accounts: error", results[("build", "project")].detail)
         self.assertIn("no_such_column", results[("build", "stg_crm__accounts")].detail)
+        self.assertTrue(
+            results[("build", "int_customers_matched_to_accounts")].detail.startswith("skipped")
+        )
 
     def test_a_model_left_out_of_a_green_build_fails(self):
         project = self.broken_copy()
@@ -1958,14 +2168,14 @@ class DemoProject(unittest.TestCase):
             code = main([str(project), "--raw", str(self.raw), "--checks", str(DECLARATION)])
         self.assertEqual(code, 1)
         report = stdout.getvalue()
-        self.assertTrue(report.startswith("gate: FAIL (15 passed, 4 failed, 0 not run)"), report)
-        self.assertRegex(report, r"FAIL  build   project +dbt build exited 1, 1 of 12 nodes")
-        self.assertRegex(report, r"FAIL  repeat  project +second build: dbt build exited 1")
+        self.assertTrue(report.startswith("gate: FAIL (20 passed, 4 failed, 0 not run)"), report)
+        self.assertRegex(report, r"FAIL  build     project +dbt build exited 1, 1 of 15 nodes")
+        self.assertRegex(report, r"FAIL  repeat    project +second build: dbt build exited 1")
         self.assertRegex(report, r"test\.demo\.unique_stg_events__events_event_id\.\w+: fail")
-        self.assertRegex(report, r"FAIL  rows    stg_events__events")
-        self.assertRegex(report, r"FAIL  key     stg_events__events")
-        self.assertRegex(report, r"PASS  build   stg_events__events")
-        self.assertRegex(report, r"PASS  repeat  stg_events__events")
+        self.assertRegex(report, r"FAIL  rows      stg_events__events")
+        self.assertRegex(report, r"FAIL  key       stg_events__events")
+        self.assertRegex(report, r"PASS  build     stg_events__events")
+        self.assertRegex(report, r"PASS  repeat    stg_events__events")
 
     def test_a_project_dbt_cannot_parse_fails_without_results(self):
         project = self.broken_copy()
@@ -1978,6 +2188,7 @@ class DemoProject(unittest.TestCase):
                 ("build", "project"): FAIL,
                 ("repeat", "project"): SKIP,
                 ("total", "stg_billing__invoices"): SKIP,
+                ("expected", "int_customers_matched_to_accounts"): SKIP,
             }
             | {("build", model): FAIL for model in self.models}
             | {

@@ -23,6 +23,16 @@
       "key": ["event_id"],
       "source": "events.events",
       "exclusions": [{"name": "repeat_deliveries", "duplicate_rows": true}]
+    },
+    {
+      "name": "int_customers_matched_to_accounts",
+      "key": ["customer_id"],
+      "source": "billing.customers",
+      "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}],
+      "expected": {
+        "columns": ["customer_id", "account_id"],
+        "query": "SELECT customers.id AS customer_id, accounts.account_id FROM billing.customers AS customers LEFT JOIN crm.accounts AS accounts ON lower(trim(customers.email)) = lower(trim(accounts.billing_email)) WHERE customers.livemode = 'true'"
+      }
     }
   ]
 }
