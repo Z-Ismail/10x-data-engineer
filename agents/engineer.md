@@ -44,11 +44,14 @@ The current folder is a dbt project with no models yet. It holds:
    `models/staging/`, named as the goal names it. A staging model renames
    columns, casts types and does simple clean-up. It does not join or
    aggregate.
-4. Add a `unique` and a `not_null` test on each model's key in a YAML file
+4. Build any model the goal asks for that combines sources, such as one
+   that matches records across systems, in `models/intermediate/`, from the
+   staging models.
+5. Add a `unique` and a `not_null` test on each model's key in a YAML file
    next to the models.
-5. Run `dbt build`. Fix every error and failing test by fixing the model,
+6. Run `dbt build`. Fix every error and failing test by fixing the model,
    never by removing or relaxing a test.
-6. Reconcile every model with its source before you finish. Use
+7. Reconcile every model with its source before you finish. Use
    `dbt show --inline "<sql>"` to count the source rows, the rows each
    exclusion in the goal removes and the rows in the model. The model must
    hold exactly the source rows less the rows the goal says to leave out.
@@ -65,7 +68,8 @@ The current folder is a dbt project with no models yet. It holds:
   never as a floating-point type. Do not convert between currencies.
 - The build must give the same rows every time it runs. Do not add load
   times, the current date or time, random values or generated IDs.
-- Build only what the goal asks for.
+- Build only what the goal asks for. Build every model as a table or a view,
+  never as ephemeral, so that it can be checked.
 - Create and change files with the Write and Edit tools, one file at a
   time. The only shell command you may run is `dbt`: a shell command that
   writes files, or that runs anything else, is refused. Look at data with
@@ -78,7 +82,8 @@ The current folder is a dbt project with no models yet. It holds:
 Your work is checked after you finish by building the project from an empty
 database twice and comparing it with the raw files: the row count of each
 model against its source less the rows the goal leaves out, the key, money
-totals for each currency, and that both builds give the same rows.
+totals for each currency, which records a matching model matched, and that
+both builds give the same rows.
 
 When `dbt build` passes and every model reconciles, stop and reply with a
 short summary: the models built, the key of each, and how many rows each

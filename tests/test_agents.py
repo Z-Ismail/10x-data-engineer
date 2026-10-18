@@ -61,6 +61,10 @@ class EngineerAgentTest(unittest.TestCase):
     def test_asks_for_one_dbt_command_per_shell_call(self):
         self.assertIn("Run one `dbt` command per shell call", self.body)
 
+    def test_builds_models_that_combine_sources_from_staging_as_tables_or_views(self):
+        self.assertIn("in `models/intermediate/`, from the\n   staging models", self.body)
+        self.assertIn("never as ephemeral", self.body)
+
     def test_reads_raw_files_through_raw_dir(self):
         self.assertIn("{{ var('raw_dir') }}", self.body)
         self.assertIn("all_varchar=true", self.body)
