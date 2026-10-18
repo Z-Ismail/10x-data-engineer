@@ -92,6 +92,10 @@ DATABASE_FILE = "build.duckdb"
 # so two files with one name could not be opened side by side.
 REPEAT_DIR = "repeat"
 REPEAT_FILE = "repeat.duckdb"
+# The rows each model is expected to hold are worked out from the raw files
+# before the build and kept in a database of their own, under this name.
+EXPECTED_FILE = "expected.duckdb"
+EXPECTED_CATALOG = "tenx_expected"
 OUTPUT_TAIL = 15
 EXAMPLES = 3
 MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals"}
@@ -880,6 +884,55 @@ def check_expected(
     if expected_examples:
         lines.append("missing: " + ", ".join(map(_shown, expected_examples)))
     return Result("expected", model.name, FAIL, "\n".join(lines), facts)
+
+
+def raw_tables(con: duckdb.DuckDBPyConnection, files: dict[str, Path]) -> None:
+    """Make each raw file readable by its table name, such as ``billing.customers``.
+
+    The first part of the name is a schema and the second a view of the file,
+    read as the other checks read it. A file at the top of the raw folder is a
+    view in the main schema. Files nested more deeply are not offered.
+    """
+    for name, path in sorted(files.items()):
+        parts = name.split(".")
+        if len(parts) > 2:
+            continue
+        schema, table = parts if len(parts) == 2 else ("main", parts[0])
+        con.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_identifier(schema)}")
+        con.execute(
+            f"CREATE VIEW {quote_identifier(schema)}.{quote_identifier(table)} AS "
+            f"SELECT * FROM {relation(path)}"
+        )
+
+
+def expected_relation(model: str) -> str:
+    return f"{EXPECTED_CATALOG}.main.{quote_identifier(model)}"
+
+
+def store_expected(models: list[ModelSpec], files: dict[str, Path], database: Path) -> None:
+    """Run each model's expected query on the raw files and keep its rows as text.
+
+    The rows go into a table named after the model in a database file of
+    their own, so they are fixed before the project is built.
+    """
+    con = duckdb.connect()
+    try:
+        raw_tables(con, files)
+        con.execute(f"ATTACH {quote_literal(str(database))} AS {EXPECTED_CATALOG}")
+        for model in models:
+            if model.expected is None:
+                continue
+            try:
+                con.execute(
+                    f"CREATE TABLE {expected_relation(model.name)} AS "
+                    f"SELECT {_as_text(model.expected.columns)} FROM ({model.expected.query})"
+                )
+            except duckdb.Error as error:
+                raise GateError(
+                    f"{model.name}: could not work out the expected rows: {error}"
+                ) from error
+    finally:
+        con.close()
 
 
 def _reason(message: object) -> str:

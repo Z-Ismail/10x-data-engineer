@@ -46,6 +46,8 @@ from tenx.gate import (
     passed,
     render,
     run_gate,
+    source_files,
+    store_expected,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1197,6 +1199,79 @@ class ExpectedCheck(unittest.TestCase):
         result = check_expected(self.con, model, "absent", "r")
         self.assertEqual(result.status, FAIL)
         self.assertTrue(result.detail.startswith("could not read the model: "))
+
+
+class ExpectedRows(unittest.TestCase):
+    """Expected rows worked out from handmade raw files: two sources, a file at the
+    top of the raw folder and one nested too deeply to be offered.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.raw = self.root / "raw"
+        write(
+            self.raw / "shop" / "orders.csv",
+            "id,email\n001,A@x.example\n002, b@x.example\n003,c@x.example\n",
+        )
+        write(
+            self.raw / "crm" / "accounts.jsonl",
+            '{"account": 7, "email": "a@x.example"}\n{"account": 8, "email": "b@x.example"}\n',
+        )
+        write(self.raw / "regions.csv", "code\nEU\n")
+        write(self.raw / "deep" / "er" / "table.csv", "x\n1\n")
+        self.database = self.root / "expected.duckdb"
+
+    def store(self, *models):
+        store_expected(list(models), source_files(self.raw), self.database)
+        con = duckdb.connect(str(self.database), read_only=True)
+        self.addCleanup(con.close)
+        return con
+
+    def test_a_query_over_two_sources_is_kept_as_text(self):
+        query = (
+            "SELECT o.id AS order_id, a.account AS account_id FROM shop.orders o "
+            "LEFT JOIN crm.accounts a ON lower(trim(o.email)) = a.email"
+        )
+        model = ModelSpec(
+            "int_orders", ("order_id",), expected=Expected(("order_id", "account_id"), query)
+        )
+        con = self.store(model, ModelSpec("stg_orders", ("id",)))
+        self.assertEqual(
+            con.execute("SELECT * FROM int_orders ORDER BY order_id").fetchall(),
+            [("001", "7"), ("002", "8"), ("003", None)],
+        )
+        self.assertEqual(
+            [row[:2] for row in con.execute("DESCRIBE int_orders").fetchall()],
+            [("order_id", "VARCHAR"), ("account_id", "VARCHAR")],
+        )
+        # Only models that declare expected rows get a table.
+        self.assertEqual(con.execute("SHOW TABLES").fetchall(), [("int_orders",)])
+
+    def test_a_file_at_the_top_of_the_raw_folder_is_read_by_its_name(self):
+        model = ModelSpec("m", ("code",), expected=Expected(("code",), "SELECT code FROM regions"))
+        con = self.store(model)
+        self.assertEqual(con.execute("SELECT * FROM m").fetchall(), [("EU",)])
+
+    def test_mistakes_in_the_query_stop_the_gate(self):
+        mistakes = {
+            "a declared column the query does not give": (
+                "SELECT id FROM shop.orders",
+                ("id", "account_id"),
+            ),
+            "a table that does not exist": ("SELECT id FROM shop.refunds", ("id",)),
+            "a file nested more deeply": ("SELECT x FROM deep.er.table", ("x",)),
+            "not SQL": ("SELEC id FROM shop.orders", ("id",)),
+        }
+        for label, (query, columns) in mistakes.items():
+            with self.subTest(label):
+                self.database.unlink(missing_ok=True)
+                model = ModelSpec("int_orders", ("id",), expected=Expected(columns, query))
+                with self.assertRaisesRegex(
+                    GateError, "^int_orders: could not work out the expected rows: "
+                ):
+                    store_expected([model], source_files(self.raw), self.database)
 
 
 class Report(unittest.TestCase):
