@@ -6,6 +6,12 @@ Notable changes to this project.
 
 ### Changed
 
+- The demo goal asks for a crosswalk, `int_customers_matched_to_accounts`,
+  that matches each live billing customer to its company's CRM account, as
+  well as the staging models. The gate's demo declaration checks it.
+- The engineer agent builds models that combine sources in
+  `models/intermediate/`, from the staging models, and builds every model as
+  a table or a view.
 - The engineer agent is asked to run one `dbt` command per shell call, since
   a command piped into another program is refused.
 - Gate: the report's check column is as wide as the longest check name.
@@ -17,6 +23,10 @@ Notable changes to this project.
 
 ### Added
 
+- Gate: a sixth check, `expected`. A model can declare the rows it must hold
+  in named columns, as a query on the raw files, and the gate compares the
+  model with them, showing rows the model should not hold and expected rows
+  it lacks.
 - Overlap report (`python -m tenx.overlap`, `make overlap`): every pair of
   columns in different tables is compared on its values, in lower case with
   surrounding spaces removed, and the share found each way, the rows matched

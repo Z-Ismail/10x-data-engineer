@@ -16,8 +16,8 @@ use.
 | Demo data generator | Available |
 | Source profiler | Available |
 | Overlap report: values shared between columns of different tables | Available |
-| Gate: build, row count, key, money total and repeat build checks | Available |
-| Engineer agent: one agent that builds staging models from a goal | Available |
+| Gate: build, row count, key, money total, expected rows and repeat build checks | Available |
+| Engineer agent: one agent that builds the models a goal asks for | Available |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
 | The rest of the crew | Planned |
 
@@ -147,7 +147,7 @@ agent is not given this report yet.
 
 `python -m tenx.gate <project> --raw <folder> --checks <file>` builds a dbt
 project into an empty DuckDB database and checks the result against the raw
-files. A successful build is only the first check. There are five checks:
+files. A successful build is only the first check. There are six checks:
 
 | Check | Fails when |
 | --- | --- |
@@ -155,6 +155,7 @@ files. A successful build is only the first check. There are five checks:
 | `rows` | a model does not hold exactly the rows of its source, less the rows declared as excluded |
 | `key` | a column of a model's declared key is missing, or the key is null or repeated in any row |
 | `total` | a declared money column does not add up to exactly the raw total less the declared exclusions, overall or for each value of a column such as the currency |
+| `expected` | a model's named columns do not hold exactly the rows that a declared query gives from the raw files |
 | `repeat` | a second build of the project into another empty database does not give the same rows in every model |
 
 What to expect is declared in a JSON file that is kept outside the dbt
@@ -192,20 +193,20 @@ counts what each one removed. A model that filters out anything else comes up
 short and fails, and so does a model that keeps rows it was told to exclude.
 
 ```
-gate: FAIL (17 passed, 2 failed, 0 not run)
+gate: FAIL (22 passed, 2 failed, 0 not run)
 
-PASS  build   project                 dbt build exited 0 after running 12 nodes
-PASS  build   stg_billing__invoices   built as "build"."main"."stg_billing__invoices"
+PASS  build     project                            dbt build exited 0 after running 15 nodes
+PASS  build     stg_billing__invoices              built as "build"."main"."stg_billing__invoices"
 ...
-FAIL  rows    stg_billing__invoices   496 rows in billing.invoices, 20 excluded (test_mode 20), 476 expected, 458 in the model: 18 fewer than expected
-PASS  key     stg_billing__invoices   invoice_id: unique and not null over 458 rows
-FAIL  total   stg_billing__invoices   amount_minor by currency: 4 of 4 currency values do not tie with the raw data
+FAIL  rows      stg_billing__invoices              496 rows in billing.invoices, 20 excluded (test_mode 20), 476 expected, 458 in the model: 18 fewer than expected
+PASS  key       stg_billing__invoices              invoice_id: unique and not null over 458 rows
+FAIL  total     stg_billing__invoices              amount_minor by currency: 4 of 4 currency values do not tie with the raw data
       EUR: raw 987100, expected 987100, model 917500, 69600 short
       GBP: raw 1351900, expected 1351900, model 1329200, 22700 short
       JPY: raw 2537400, expected 2537400, model 2507700, 29700 short
       USD: raw 24152800, test_mode 19998000, expected 4154800, model 4070700, 84100 short
 ...
-PASS  repeat  stg_billing__invoices   the same 458 rows in both builds
+PASS  repeat    stg_billing__invoices              the same 458 rows in both builds
 ...
 ```
 
@@ -224,7 +225,7 @@ the `by` column. The gate adds up the raw column itself and reports what each
 exclusion removed, so the figures can be followed by hand:
 
 ```
-FAIL  total   stg_billing__invoices   amount_minor by currency: 1 of 4 currency values do not tie with the raw data
+FAIL  total     stg_billing__invoices              amount_minor by currency: 1 of 4 currency values do not tie with the raw data
       JPY: raw 2537400, expected 2537400, model 253740000, 251202600 over
 ```
 
@@ -260,7 +261,7 @@ generates random keys gives different results on each build, and the
 report names the columns whose values changed:
 
 ```
-FAIL  repeat  stg_billing__invoices   the builds differ: 476 rows in the first and 476 in the second, of which 476 only in the first and 476 only in the second; values differ in loaded_at
+FAIL  repeat    stg_billing__invoices              the builds differ: 476 rows in the first and 476 in the second, of which 476 only in the first and 476 only in the second; values differ in loaded_at
 ```
 
 Rules for the repeat build:
@@ -276,6 +277,49 @@ Rules for the repeat build:
   different answer each time it runs.
 - The second build roughly doubles the time the gate takes.
 
+Some models are right or wrong in a way no count or total shows. A model
+that matches billing customers to CRM accounts on email can have one row per
+customer, a unique key and nothing to add up, and still miss every match
+where the two systems wrote the email differently. For such a model the
+declaration gives the right answer as a query on the raw files, and the
+`expected` check compares the model with it:
+
+```json
+{
+  "name": "int_customers_matched_to_accounts",
+  "key": ["customer_id"],
+  "source": "billing.customers",
+  "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}],
+  "expected": {
+    "columns": ["customer_id", "account_id"],
+    "query": "SELECT customers.id AS customer_id, accounts.account_id FROM billing.customers AS customers LEFT JOIN crm.accounts AS accounts ON lower(trim(customers.email)) = lower(trim(accounts.billing_email)) WHERE customers.livemode = 'true'"
+  }
+}
+```
+
+```
+FAIL  expected  int_customers_matched_to_accounts  customer_id, account_id: 147 rows expected and 147 in the model, of which 49 not expected and 49 expected but missing
+      not expected: (cus_000008A, null), (cus_000021A, null), (cus_000023A, null)
+      missing: (cus_000008A, 001000000000000008), (cus_000021A, 001000000000000021), (cus_000023A, 001000000000000023)
+```
+
+That report is from a model that matches the emails exactly: 49 customers
+are left without the account they belong to.
+
+Rules for expected rows:
+
+- The query reads each raw file by its table name, such as
+  `billing.customers`, with CSV columns as text. Only files at the top of
+  the raw folder or one folder down can be named.
+- The query runs before the project is built, and its rows are kept in the
+  gate's own working folder, never in the project folder.
+- Only the named columns are compared; the model may hold others. Values
+  are compared as text, so the model's choice of types does not matter, but
+  an identifier that lost its leading zeros does not match.
+- Rows are compared in any order, every copy counts and nulls are equal.
+- Up to three rows are shown each way: rows the model should not hold, and
+  expected rows it lacks.
+
 ### Engineer agent
 
 `python -m tenx.engineer --raw <folder> --goal <file> --checks <file> --out <folder>`
@@ -284,12 +328,16 @@ it. The run passes only if the gate passes.
 
 The goal is a short Markdown file in plain English. It names each model,
 what one row of it means, its key and which source rows to leave out.
-[demo/goal.md](demo/goal.md) is the goal for the demo data.
+[demo/goal.md](demo/goal.md) is the goal for the demo data: a staging model
+for each source table, and a crosswalk that matches each billing customer to
+its company's CRM account, for which the goal says only that the two systems
+share the customer's email address.
 
 The runner prepares a folder for the agent with the goal, a profile of every
 raw table and a dbt project with no models, set to read the raw files from
 the `raw_dir` variable. The agent reads the goal and the profiles, writes the
-sources, the staging models and their key tests, and runs `dbt build`. It is
+sources, the staging models, any model that combines sources (under
+`models/intermediate/`) and their key tests, and runs `dbt build`. It is
 told to count rows with `dbt show` until every model reconciles with its
 source before it stops, but only the gate's verdict counts. The gate's
 declaration is never put in the agent's folder, so the agent cannot read the
@@ -301,24 +349,26 @@ rather than asked about. It is pinned to the Sonnet model and stops after 60
 turns, US$5 of estimated usage or 30 minutes, whichever comes first.
 
 ```
-agent: success after 15 turns (exit 0)
+agent: success after 19 turns (exit 0)
 project: runs/demo/project
 
-gate: PASS (19 passed, 0 failed, 0 not run)
+gate: PASS (24 passed, 0 failed, 0 not run)
 
-PASS  build   project                 dbt build exited 0 after running 12 nodes
+PASS  build     project                            dbt build exited 0 after running 15 nodes
 ...
-PASS  repeat  stg_events__events      the same 1183 rows in both builds
+PASS  expected  int_customers_matched_to_accounts  customer_id, account_id: the 147 expected rows, and no other
+...
+PASS  repeat    int_customers_matched_to_accounts  the same 147 rows in both builds
 
 usage by role (cost is Claude Code's own estimate, not a bill)
 
 role      outcome    turns  refused    time  cost (US$)
-engineer  success       15        0  34.6 s      0.0724
-run       gate PASS     15        0  34.6 s      0.0724
+engineer  success       19        0  43.9 s      0.1170
+run       gate PASS     19        0  43.9 s      0.1170
 
 role      model              input  cache write  cache read  output
 engineer  claude-haiku-5-5   1,177            0           0      18
-engineer  claude-sonnet-5-5     12        9,346      47,283   3,010
+engineer  claude-sonnet-5-5     16       16,897      75,772   4,165
 ```
 
 Everything from the run is kept under the `--out` folder:
@@ -331,9 +381,11 @@ Everything from the run is kept under the `--out` folder:
 | `gate/` | The gate's databases, dbt artifacts and logs |
 | `plugin/` | The copy of the add-on the agent was loaded from |
 
-Today the agent builds staging models only: one model per source table, with
-renames, type conversions and the exclusions the goal asks for, and no joins.
-It runs once; if the gate fails, nothing is retried. Running it needs a clone
+Today the agent builds what the demo goal asks for: one staging model per
+source table, with renames, type conversions and the exclusions the goal
+asks for, and models that combine sources from the staging models, such as
+the crosswalk. It has not been tried on other goals. It runs once; if the
+gate fails, nothing is retried. Running it needs a clone
 of this repository and Claude Code installed and signed in.
 
 ### Usage ledger
