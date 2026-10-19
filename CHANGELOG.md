@@ -6,6 +6,12 @@ Notable changes to this project.
 
 ### Changed
 
+- Demo data: some CRM accounts of paying companies hold another mailbox at
+  the company's domain (`accounts@company0030.example` where billing has
+  `billing@company0030.example`), so matching billing customers to CRM
+  accounts needs the email domain. Every other value is unchanged for a
+  given seed and size. The answer key, the gate's demo declaration and the
+  reference crosswalk now match companies on the email domain.
 - The demo goal asks for a crosswalk, `int_customers_matched_to_accounts`,
   that matches each live billing customer to its company's CRM account, as
   well as the staging models. The gate's demo declaration checks it.

@@ -52,7 +52,8 @@ make engineer    # has the engineer agent build the demo project, then gates it
 
 `demo/generate.py` writes a billing system, a CRM and a product event log for
 the same set of companies. The three only agree on the customer's email
-address and each stores it differently. Ten kinds of defect are planted at
+address and each stores it differently; for some companies the CRM holds
+another mailbox at the same domain. Eleven kinds of defect are planted at
 known rates (duplicate customers, test-mode rows, yen amounts, refunds, junk
 user IDs and others), and an answer key is written to a separate folder.
 Output is deterministic for a given seed, and every defect is present
@@ -112,16 +113,19 @@ source system and across systems, and it writes `overlap.txt` and
 `overlap.json` beside the profiles. On the demo data:
 
 ```
-billing.customers.email ~ crm.accounts.billing_email: 132 shared values
-  billing.customers.email     132 of 150 values found (88.0%), 138 of 157 rows match (89 exactly), many rows per value, not found: billing@company0082.example, ...
-  crm.accounts.billing_email  132 of 180 values found (73.3%), 132 of 180 rows match (86 exactly), one row per value, not found: Billing@company0003.example, ...
+billing.customers.email ~ crm.accounts.billing_email: 119 shared values
+  billing.customers.email     119 of 150 values found (79.3%), 125 of 157 rows match (76 exactly), many rows per value, not found: billing@company0030.example, ...
+  crm.accounts.billing_email  119 of 180 values found (66.1%), 119 of 180 rows match (73 exactly), one row per value, not found: accounts@company0030.example, ...
 ```
 
 That pair is the billing system and the CRM sharing the customer's email.
 Each side is reported separately, because the two directions differ: most
-billing addresses are in the CRM, while a quarter of CRM accounts have no
-billing record (they are prospects). An exact join would match 86 CRM rows;
-comparing in lower case without surrounding spaces matches 132.
+billing addresses are in the CRM, while a third of CRM accounts have no
+billing address (most are prospects). An exact join would match 73 CRM rows;
+comparing in lower case without surrounding spaces matches 119. The values
+not found show why some of the rest do not match: `billing@company0030.example`
+in billing and `accounts@company0030.example` in the CRM are the same
+company with different mailboxes.
 
 Rules:
 
@@ -280,7 +284,7 @@ Rules for the repeat build:
 Some models are right or wrong in a way no count or total shows. A model
 that matches billing customers to CRM accounts on email can have one row per
 customer, a unique key and nothing to add up, and still miss every match
-where the two systems wrote the email differently. For such a model the
+where the two systems hold the email differently. For such a model the
 declaration gives the right answer as a query on the raw files, and the
 `expected` check compares the model with it:
 
@@ -292,19 +296,21 @@ declaration gives the right answer as a query on the raw files, and the
   "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}],
   "expected": {
     "columns": ["customer_id", "account_id"],
-    "query": "SELECT customers.id AS customer_id, accounts.account_id FROM billing.customers AS customers LEFT JOIN crm.accounts AS accounts ON lower(trim(customers.email)) = lower(trim(accounts.billing_email)) WHERE customers.livemode = 'true'"
+    "query": "SELECT customers.id AS customer_id, accounts.account_id FROM billing.customers AS customers LEFT JOIN crm.accounts AS accounts ON split_part(lower(trim(customers.email)), '@', 2) = split_part(lower(trim(accounts.billing_email)), '@', 2) WHERE customers.livemode = 'true'"
   }
 }
 ```
 
 ```
-FAIL  expected  int_customers_matched_to_accounts  customer_id, account_id: 147 rows expected and 147 in the model, of which 49 not expected and 49 expected but missing
-      not expected: (cus_000008A, null), (cus_000021A, null), (cus_000023A, null)
-      missing: (cus_000008A, 001000000000000008), (cus_000021A, 001000000000000021), (cus_000023A, 001000000000000023)
+FAIL  expected  int_customers_matched_to_accounts  customer_id, account_id: 147 rows expected and 147 in the model, of which 13 not expected and 13 expected but missing
+      not expected: (cus_000030A, null), (cus_000059A, null), (cus_000064A, null)
+      missing: (cus_000030A, 001000000000000030), (cus_000059A, 001000000000000059), (cus_000064A, 001000000000000064)
 ```
 
-That report is from a model that matches the emails exactly: 49 customers
-are left without the account they belong to.
+That report is from a model that matches whole email addresses after lower
+case and trimming. The declared query matches on the email's domain, since
+every demo company has a domain of its own, so the 13 customers whose CRM
+account holds another mailbox are left without the account they belong to.
 
 Rules for expected rows:
 
@@ -349,27 +355,36 @@ rather than asked about. It is pinned to the Sonnet model and stops after 60
 turns, US$5 of estimated usage or 30 minutes, whichever comes first.
 
 ```
-agent: success after 19 turns (exit 0)
+agent: success after 20 turns (exit 0)
 project: runs/demo/project
 
-gate: PASS (24 passed, 0 failed, 0 not run)
+gate: FAIL (23 passed, 1 failed, 0 not run)
 
 PASS  build     project                            dbt build exited 0 after running 15 nodes
 ...
-PASS  expected  int_customers_matched_to_accounts  customer_id, account_id: the 147 expected rows, and no other
+PASS  key       int_customers_matched_to_accounts  customer_id: unique and not null over 147 rows
+FAIL  expected  int_customers_matched_to_accounts  customer_id, account_id: 147 rows expected and 147 in the model, of which 13 not expected and 13 expected but missing
+      not expected: (cus_000030A, null), (cus_000059A, null), (cus_000064A, null)
+      missing: (cus_000030A, 001000000000000030), (cus_000059A, 001000000000000059), (cus_000064A, 001000000000000064)
 ...
 PASS  repeat    int_customers_matched_to_accounts  the same 147 rows in both builds
 
 usage by role (cost is Claude Code's own estimate, not a bill)
 
 role      outcome    turns  refused    time  cost (US$)
-engineer  success       19        0  43.9 s      0.1170
-run       gate PASS     19        0  43.9 s      0.1170
+engineer  success       20        0  60.4 s      0.1156
+run       gate FAIL     20        0  60.4 s      0.1156
 
 role      model              input  cache write  cache read  output
 engineer  claude-haiku-5-5   1,177            0           0      18
-engineer  claude-sonnet-5-5     16       16,897      75,772   4,165
+engineer  claude-sonnet-5-5     20       16,056     121,958   3,900
 ```
+
+In that run the agent built every staging model correctly and reported
+success, but matched whole email addresses in the crosswalk, so the 13
+customers whose CRM account holds another mailbox were left unmatched. The
+gate caught it. In other runs the agent notices the mailboxes and matches on
+the domain, and the gate passes.
 
 Everything from the run is kept under the `--out` folder:
 
@@ -384,8 +399,9 @@ Everything from the run is kept under the `--out` folder:
 Today the agent builds what the demo goal asks for: one staging model per
 source table, with renames, type conversions and the exclusions the goal
 asks for, and models that combine sources from the staging models, such as
-the crosswalk. It has not been tried on other goals. It runs once; if the
-gate fails, nothing is retried. Running it needs a clone
+the crosswalk, though not always correctly, as the example shows. It has not
+been tried on other goals. It runs once; if the gate fails, nothing is
+retried. Running it needs a clone
 of this repository and Claude Code installed and signed in.
 
 ### Usage ledger

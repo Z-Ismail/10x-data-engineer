@@ -10,7 +10,7 @@ companies, the way a young SaaS business might hold them:
 | Product | `data/events/events.jsonl` | JSON lines, ISO timestamps |
 
 The three systems agree only on the customer's email address, and they do
-not store it the same way.
+not store it the same way. Every company has a domain of its own.
 
 ## Planted defects
 
@@ -28,6 +28,7 @@ present whatever the seed. The smallest supported dataset is 20 companies.
 | CRM prospects with no billing record | Expected, and not an error |
 | CRM status that disagrees with billing | One system has to win |
 | Emails in mixed case or padded with spaces | Exact matching silently drops records |
+| CRM accounts that hold another mailbox at the company's domain | Only the domain matches billing |
 | Junk user identifiers in events | `null`, `anonymous` and `-1` are not people |
 | Duplicate events | The same event delivered twice |
 
