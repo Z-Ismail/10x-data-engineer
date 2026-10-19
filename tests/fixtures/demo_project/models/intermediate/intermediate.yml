@@ -4,7 +4,7 @@ models:
   - name: int_customers_matched_to_accounts
     description: >
       One row per live billing customer, with the CRM account of the same
-      company, matched on email. A customer with no CRM account has no account_id.
+      company, matched on the email domain. A customer with no CRM account has no account_id.
     columns:
       - name: customer_id
         data_tests: [unique, not_null]

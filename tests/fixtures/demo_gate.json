@@ -31,7 +31,7 @@
       "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}],
       "expected": {
         "columns": ["customer_id", "account_id"],
-        "query": "SELECT customers.id AS customer_id, accounts.account_id FROM billing.customers AS customers LEFT JOIN crm.accounts AS accounts ON lower(trim(customers.email)) = lower(trim(accounts.billing_email)) WHERE customers.livemode = 'true'"
+        "query": "SELECT customers.id AS customer_id, accounts.account_id FROM billing.customers AS customers LEFT JOIN crm.accounts AS accounts ON split_part(lower(trim(customers.email)), '@', 2) = split_part(lower(trim(accounts.billing_email)), '@', 2) WHERE customers.livemode = 'true'"
       }
     }
   ]

@@ -1642,18 +1642,20 @@ class DemoProject(unittest.TestCase):
         self.assertEqual(facts["blank"], 0)
 
         # Each live customer is matched to its own company's account, and the
-        # customers whose company is not in the CRM have none. Matching emails
-        # without regard to case and surrounding spaces finds the same pairs.
+        # customers whose company is not in the CRM have none. Matching on the
+        # email domain, without regard to case and surrounding spaces, finds
+        # the same pairs.
         truth = self.true_matches()
         self.assertTrue(any(account is None for _, account in truth))
         self.assertTrue(any(account is not None for _, account in truth))
-        by_email = {
-            row["billing_email"].strip().lower(): row["account_id"] for row in self.accounts
+        by_domain = {
+            row["billing_email"].strip().lower().split("@")[1]: row["account_id"]
+            for row in self.accounts
         }
         self.assertEqual(
             truth,
             [
-                (row["id"], by_email.get(row["email"].strip().lower()))
+                (row["id"], by_domain.get(row["email"].strip().lower().split("@")[1]))
                 for row in self.customers
                 if row["livemode"] == "true"
             ],
@@ -1969,10 +1971,11 @@ class DemoProject(unittest.TestCase):
             "select\n"
             "    customers.id as CUSTOMER_ID,\n"
             "    accounts.account_id as Account_Id,\n"
-            "    case when accounts.account_id is null then 'none' else 'email' end as match_method\n"
+            "    case when accounts.account_id is null then 'none' else 'domain' end as match_method\n"
             "from {{ source('billing', 'customers') }} as customers\n"
             "left join {{ source('crm', 'accounts') }} as accounts\n"
-            "    on upper(trim(accounts.billing_email)) = upper(trim(customers.email))\n"
+            "    on upper(regexp_extract(trim(accounts.billing_email), '@(.+)$', 1))\n"
+            "        = upper(regexp_extract(trim(customers.email), '@(.+)$', 1))\n"
             "where customers.livemode <> 'false'\n",
         )
         results = self.run_on(project)
