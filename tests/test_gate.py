@@ -1929,6 +1929,45 @@ class DemoProject(unittest.TestCase):
         self.assertRegex(result.detail, r"\nnot expected: \(cus_\w+, null\)")
         self.assertRegex(result.detail, r"\nmissing: \(cus_\w+, 001\d{15}\)")
 
+    def test_matching_whole_emails_fails_the_expected_check_alone(self):
+        # Ignoring case and spaces is not enough: some CRM accounts hold
+        # another mailbox at the company's domain, and those customers are
+        # left with no account.
+        project = self.broken_copy()
+        self.write_crosswalk(
+            project,
+            "select customers.customer_id, accounts.account_id\n"
+            "from {{ ref('stg_billing__customers') }} as customers\n"
+            "left join {{ ref('stg_crm__accounts') }} as accounts\n"
+            "    on customers.email = accounts.billing_email\n",
+        )
+        results = self.run_on(project)
+        self.assert_only_failures(
+            results, {("expected", "int_customers_matched_to_accounts"): FAIL}
+        )
+        crm_email = {
+            company(row["account_id"]): row["billing_email"].strip().lower()
+            for row in self.accounts
+        }
+        missed = [
+            row["id"]
+            for row in self.customers
+            if row["livemode"] == "true"
+            and company(row["id"]) in crm_email
+            and crm_email[company(row["id"])] != row["email"].strip().lower()
+        ]
+        self.assertGreater(len(missed), 0)
+        truth = self.true_matches()
+        self.assertEqual(
+            results[("expected", "int_customers_matched_to_accounts")].facts,
+            {
+                "expected_rows": len(truth),
+                "model_rows": len(truth),
+                "only_model": len(missed),
+                "only_expected": len(missed),
+            },
+        )
+
     def test_leaving_out_customers_with_no_account_fails_the_rows_and_expected_checks(self):
         project = self.broken_copy()
         replace_in(
