@@ -28,6 +28,7 @@ JPY_PER_UNIT = 150
 JUNK_USER_IDS = ["", "null", "anonymous", "-1"]
 EVENT_NAMES = ["login", "report_viewed", "export_run", "invite_sent"]
 SEGMENTS = {"starter": "smb", "team": "mid_market", "scale": "enterprise"}
+OTHER_MAILBOXES = ["accounts", "finance", "ap", "invoices", "admin"]
 
 
 def month_start(month: int) -> datetime:
@@ -114,6 +115,7 @@ def build(seed: int, companies: int) -> dict:
     invoices: list[dict] = []
     accounts: list[dict] = []
     events: list[dict] = []
+    account_of_company: dict[int, dict] = {}
     invoice_n = 0
 
     def add_invoice(customer_id, amount, cur, status, created, live=True):
@@ -181,6 +183,7 @@ def build(seed: int, companies: int) -> dict:
                     "created_date": signup.strftime("%d/%m/%Y"),
                 }
             )
+            account_of_company[i] = accounts[-1]
 
         if i in uses_product:
             for _ in range(rng.randrange(3, 12)):
@@ -221,6 +224,18 @@ def build(seed: int, companies: int) -> dict:
         for month in (0, 1):
             add_invoice(customer_id, 999900, "usd", "paid", month_start(month), live=False)
 
+    # The CRM holds whoever sales deals with, so some accounts carry another
+    # mailbox at the company's domain; only the domain still matches billing.
+    # These are drawn from a stream of their own, so that every other value
+    # stays as it was for a given seed and size.
+    mailbox_rng = random.Random(f"{seed}:crm-mailboxes")
+    clean_in_crm = [i for i in paying_in_crm if i not in messy_in_crm]
+    other_mailbox = pick(mailbox_rng, clean_in_crm, 0.15)
+    for i in sorted(other_mailbox):
+        account = account_of_company[i]
+        mailbox = mailbox_rng.choice(OTHER_MAILBOXES)
+        account["billing_email"] = f"{mailbox}@{email_domain(account['billing_email'])}"
+
     for table in (customers, invoices, accounts, events):
         rng.shuffle(table)
     defects = {
@@ -234,6 +249,7 @@ def build(seed: int, companies: int) -> dict:
         "crm_prospects_without_billing": len(prospects),
         "crm_status_conflicts": len(status_conflict),
         "crm_emails_needing_normalisation": len(messy_in_crm),
+        "crm_accounts_with_other_mailbox": len(other_mailbox),
         "junk_user_events": len(junk_positions),
         "duplicate_events": len(duplicate_positions),
     }

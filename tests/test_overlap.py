@@ -352,6 +352,7 @@ class DemoData(unittest.TestCase):
                 seed=seed, companies=companies, out=root / "data", answers_out=root / "answers"
             )
             answers = json.loads((root / "answers/answers.json").read_text(encoding="utf-8"))
+            defects = json.loads((root / "answers/defects.json").read_text(encoding="utf-8"))
             tables = read_tables(root / "data")
             report = overlap_folder(root / "data")
         for table_a, column_a, table_b, column_b in DEMO_JOINS:
@@ -378,7 +379,8 @@ class DemoData(unittest.TestCase):
         )
         self.assertEqual(invoices["containment"], 1.0)
         # Billing emails of test-mode customers never appear in the CRM, so
-        # the CRM rows with no billing match are the planted prospects.
+        # the CRM rows with no billing match are the planted prospects and the
+        # accounts that hold another mailbox at their company's domain.
         crm = next(
             side
             for pair in report["pairs"]
@@ -387,7 +389,9 @@ class DemoData(unittest.TestCase):
             and {s["column"] for s in pair["sides"]} == {"billing_email", "email"}
         )
         self.assertEqual(
-            crm["rows"] - crm["rows_matched"], answers["crm_accounts_without_live_billing"]
+            crm["rows"] - crm["rows_matched"],
+            answers["crm_accounts_without_live_billing"]
+            + defects["crm_accounts_with_other_mailbox"],
         )
 
     def test_seed_42_with_200_companies(self):
