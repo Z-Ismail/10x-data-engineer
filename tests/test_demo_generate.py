@@ -24,6 +24,10 @@ def read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
+def domain(email: str) -> str:
+    return email.strip().lower().split("@")[1]
+
+
 def file_bytes(root: Path) -> dict:
     return {
         str(path.relative_to(root)): path.read_bytes()
@@ -81,11 +85,11 @@ class DemoGeneratorTest(unittest.TestCase):
                 generate(1, MIN_COMPANIES - 1, root / "data", root / "answers")
 
     def test_status_conflicts_are_paying_customers_marked_as_prospects(self):
-        billing = {row["email"] for row in self.customers if row["livemode"] == "true"}
+        billing = {domain(row["email"]) for row in self.customers if row["livemode"] == "true"}
         conflicts = [
             row
             for row in self.accounts
-            if row["status"] == "prospect" and row["billing_email"].strip().lower() in billing
+            if row["status"] == "prospect" and domain(row["billing_email"]) in billing
         ]
         self.assertEqual(len(conflicts), self.defects["crm_status_conflicts"])
 
@@ -133,10 +137,23 @@ class DemoGeneratorTest(unittest.TestCase):
         crm_raw = {row["billing_email"] for row in self.accounts}
         crm_clean = {email.strip().lower() for email in crm_raw}
         self.assertLess(len(billing & crm_raw), len(billing & crm_clean))
-        self.assertEqual(
-            len(billing - crm_clean), self.defects["paying_customers_missing_from_crm"]
-        )
-        self.assertEqual(len(crm_clean - billing), self.defects["crm_prospects_without_billing"])
+
+    def test_companies_missing_from_either_system_are_counted_by_domain(self):
+        billing = {domain(row["email"]) for row in self.customers if row["livemode"] == "true"}
+        crm = {domain(row["billing_email"]) for row in self.accounts}
+        missing = len(billing - crm)
+        prospects = len(crm - billing)
+        self.assertEqual(missing, self.defects["paying_customers_missing_from_crm"])
+        email = {row["id"]: row["email"] for row in self.customers}
+        paying = {
+            domain(email[row["customer_id"]])
+            for row in self.invoices
+            if row["livemode"] == "true" and row["status"] == "paid"
+            and int(row["amount_minor"]) > 0
+        }
+        self.assertEqual(len(paying - crm), self.answers["paying_customers_missing_from_crm"])
+        self.assertEqual(prospects, self.defects["crm_prospects_without_billing"])
+        self.assertEqual(prospects, self.answers["crm_accounts_without_live_billing"])
 
     def test_refunds_are_negative_paid_invoices(self):
         refunds = [row for row in self.invoices if int(row["amount_minor"]) < 0]

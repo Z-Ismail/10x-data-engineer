@@ -49,6 +49,11 @@ def normalise_email(value: str) -> str:
     return value.strip().lower()
 
 
+def email_domain(value: str) -> str:
+    """The company an address belongs to: every demo company has its own domain."""
+    return normalise_email(value).rpartition("@")[2]
+
+
 def messy_email(rng: random.Random, email: str) -> str:
     """Return the email as a careless system might have stored it."""
     roll = rng.random()
@@ -257,9 +262,13 @@ def answer_key(data: dict) -> dict:
         for row in live_paid
         if row["amount_minor"] > 0
     }
-    crm_emails = {normalise_email(row["billing_email"]) for row in data["accounts"]}
+    # Companies are matched across systems on the email domain, which is
+    # theirs alone, rather than on the whole address.
+    paying_domains = {email_domain(email) for email in paying_emails}
+    crm_domains = {email_domain(row["billing_email"]) for row in data["accounts"]}
     live_customers = [row for row in data["customers"] if row["livemode"] == "true"]
     live_emails = [normalise_email(row["email"]) for row in live_customers]
+    live_domains = {email_domain(email) for email in live_emails}
     unique_events = {row["event_id"]: row for row in data["events"]}
 
     return {
@@ -269,9 +278,9 @@ def answer_key(data: dict) -> dict:
         "paying_customers": len(paying_emails),
         "live_billing_customer_rows": len(live_customers),
         "live_billing_emails_with_duplicates": len(live_emails) - len(set(live_emails)),
-        "paying_customers_missing_from_crm": len(paying_emails - crm_emails),
+        "paying_customers_missing_from_crm": len(paying_domains - crm_domains),
         "crm_accounts": len(data["accounts"]),
-        "crm_accounts_without_live_billing": len(crm_emails - set(live_emails)),
+        "crm_accounts_without_live_billing": len(crm_domains - live_domains),
         "event_rows": len(data["events"]),
         "unique_events": len(unique_events),
         "unique_events_with_junk_user": sum(
