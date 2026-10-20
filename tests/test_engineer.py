@@ -34,6 +34,7 @@ from tenx.engineer import (
     SOURCE_PROFILES_DIR,
     USAGE_FILE,
     EngineerError,
+    Role,
     agent_command,
     main,
     prepare_project,
@@ -236,6 +237,25 @@ class AgentCommandTest(unittest.TestCase):
                 "--no-session-persistence",
             ],
         )
+
+    def test_a_role_with_no_allowed_tools_is_given_none(self):
+        role = Role("reader", "tenx:reader", "Read it.", (), 3)
+        command = agent_command("claude", Path("/p"), role)
+        self.assertNotIn("--allowedTools", command)
+        self.assertEqual(
+            command[1:9],
+            [
+                "-p",
+                "Read it.",
+                "--plugin-dir",
+                str(Path("/p")),
+                "--agent",
+                "tenx:reader",
+                "--permission-mode",
+                "dontAsk",
+            ],
+        )
+        self.assertEqual(command[9:11], ["--max-turns", "3"])
 
     def test_the_plugin_folder_holds_the_engineer_agent(self):
         self.assertTrue((PLUGIN_DIR / ".claude-plugin" / "plugin.json").is_file())

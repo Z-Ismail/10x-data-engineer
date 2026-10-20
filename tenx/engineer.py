@@ -44,11 +44,6 @@ from tenx.ledger import render as render_usage
 from tenx.profile import ProfileError, profile_folder
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-AGENT = "tenx:engineer"
-ROLE = "engineer"
-PROMPT = "Build what GOAL.md asks for."
-ALLOWED_TOOLS = ("Edit", "Write", "Bash(dbt *)")
-MAX_TURNS = 60
 MAX_BUDGET_USD = 5
 TIMEOUT_MINUTES = 30
 STOP_GRACE_SECONDS = 30
@@ -66,6 +61,26 @@ DEV_DATABASE = "dev.duckdb"
 
 class EngineerError(Exception):
     """The run could not start or its inputs are unusable."""
+
+
+@dataclass(frozen=True)
+class Role:
+    """One agent of the add-on, and how the runner starts it."""
+
+    name: str
+    agent: str
+    prompt: str
+    allowed_tools: tuple[str, ...]
+    max_turns: int
+
+
+ENGINEER = Role(
+    name="engineer",
+    agent="tenx:engineer",
+    prompt="Build what GOAL.md asks for.",
+    allowed_tools=("Edit", "Write", "Bash(dbt *)"),
+    max_turns=60,
+)
 
 
 def dbt_project_yml(raw: Path) -> str:
@@ -163,22 +178,22 @@ def stage_plugin(destination: Path) -> Path:
     return destination
 
 
-def agent_command(claude: str, plugin_dir: Path) -> list[str]:
-    """The Claude Code command line that runs the engineer agent headless."""
+def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[str]:
+    """The Claude Code command line that runs one of the agents headless."""
+    allowed = ["--allowedTools", *role.allowed_tools] if role.allowed_tools else []
     return [
         claude,
         "-p",
-        PROMPT,
+        role.prompt,
         "--plugin-dir",
         str(plugin_dir),
         "--agent",
-        AGENT,
+        role.agent,
         "--permission-mode",
         "dontAsk",
-        "--allowedTools",
-        *ALLOWED_TOOLS,
+        *allowed,
         "--max-turns",
-        str(MAX_TURNS),
+        str(role.max_turns),
         "--max-budget-usd",
         str(MAX_BUDGET_USD),
         "--output-format",
@@ -230,7 +245,9 @@ def run_agent(project: Path, command: list[str], report_file: Path, timeout: flo
 def usage(agent: AgentRun, results: list[Result]) -> Ledger:
     """The run's usage by role, with the gate's verdict."""
     missing = "timed out" if agent.timed_out_after is not None else "no report"
-    return Ledger((role_usage(ROLE, agent.report, missing),), "PASS" if passed(results) else "FAIL")
+    return Ledger(
+        (role_usage(ENGINEER.name, agent.report, missing),), "PASS" if passed(results) else "FAIL"
+    )
 
 
 def run(
