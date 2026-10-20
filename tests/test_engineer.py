@@ -23,8 +23,12 @@ from unittest import mock
 import yaml
 
 from demo.generate import generate
+from tenx.cross_source import render as render_notes
 from tenx.engineer import (
     AGENT_FILE,
+    CROSS_SOURCE,
+    CROSS_SOURCE_DIR,
+    CROSS_SOURCE_FILE,
     DEV_DATABASE,
     GOAL_FILE,
     PLUGIN_COPY_DIR,
@@ -48,14 +52,38 @@ DECLARATION = FIXTURES / "demo_gate.json"
 DEMO_GOAL = Path(__file__).resolve().parent.parent / "demo" / "goal.md"
 
 # Stands in for the claude command. It records how it was started and what
-# the project held, copies STUB_MODELS into the project and reports like
-# `claude -p --output-format json` does.
+# its folder held, and reports like `claude -p --output-format json` does.
+# Started as the engineer, it copies STUB_MODELS into the project. Started as
+# the cross-source agent, it records to STUB_RECORD with ".cross-source"
+# added, and answers with STUB_ANSWER, or with no answer if that is empty.
 STUB = """
 import json, os, shutil, sys, time
 from pathlib import Path
 
 here = Path.cwd()
-Path(os.environ["STUB_RECORD"]).write_text(json.dumps({
+agent = sys.argv[sys.argv.index("--agent") + 1]
+record = os.environ["STUB_RECORD"]
+if agent == "tenx:cross-source":
+    Path(record + ".cross-source").write_text(json.dumps({
+        "argv": sys.argv[1:],
+        "cwd": str(here),
+        "files": sorted(str(path.relative_to(here)) for path in here.rglob("*")),
+    }))
+    if os.environ.get("STUB_PASS_MODE") == "crash":
+        sys.exit(1)
+    report = {
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 9,
+        "duration_ms": 52000, "duration_api_ms": 50000, "total_cost_usd": 0.1204,
+        "modelUsage": {"claude-sonnet-5-5": {
+            "inputTokens": 12, "cacheCreationInputTokens": 15000,
+            "cacheReadInputTokens": 60000, "outputTokens": 3000, "costBasis": "list"}},
+        "permission_denials": [],
+    }
+    if os.environ.get("STUB_ANSWER"):
+        report["structured_output"] = json.loads(os.environ["STUB_ANSWER"])
+    print(json.dumps(report))
+    sys.exit(0)
+Path(record).write_text(json.dumps({
     "argv": sys.argv[1:],
     "cwd": str(here),
     "files": sorted(str(path.relative_to(here)) for path in here.rglob("*")),
@@ -90,6 +118,21 @@ ORDERS = """id,mode,amount
 5,live,3
 6,live,12
 """
+
+# A cross-source answer that names real columns of the demo data.
+ANSWER = {
+    "joins": [
+        {
+            "left": "billing.customers.email",
+            "right": "crm.accounts.billing_email",
+            "prepare": "Trim and lower-case both sides, then compare the domain.",
+            "cardinality": "many-to-one",
+            "unmatched": "Test-mode customers.",
+            "evidence": "overlap.txt.",
+        }
+    ],
+    "cautions": ["Check that no two accounts share a domain."],
+}
 
 GOAL = "Build stg_shop__orders: one row per order, keyed on order_id.\n"
 
@@ -295,11 +338,19 @@ class RunTest(unittest.TestCase):
         self.out = self.root / "run"
         self.record = self.root / "record.json"
 
-    def stub(self, models: Path | None = None, mode: str = "success"):
+    def stub(
+        self,
+        models: Path | None = None,
+        mode: str = "success",
+        answer: dict | None = None,
+        pass_mode: str = "success",
+    ):
         environment = {
             "STUB_RECORD": str(self.record),
             "STUB_MODELS": str(models) if models else "",
             "STUB_MODE": mode,
+            "STUB_ANSWER": json.dumps(answer) if answer is not None else "",
+            "STUB_PASS_MODE": pass_mode,
             "DBT_PROFILES_DIR": str(self.root / "elsewhere"),
             "PATH": f"{self.claude.parent}{os.pathsep}{os.environ['PATH']}",
         }
@@ -349,6 +400,9 @@ class RunTest(unittest.TestCase):
         )
         reported = json.loads((self.out / AGENT_FILE).read_text(encoding="utf-8"))
         self.assertEqual(reported["result"], "Built four models.")
+        # Without --cross-source only the engineer runs.
+        self.assertFalse((self.out / CROSS_SOURCE_DIR).exists())
+        self.assertFalse(Path(f"{self.record}.cross-source").exists())
 
         # The stand-in reported 7 turns, 1 refused call, 41.3 s and US$0.0812.
         self.assertTrue(
@@ -371,12 +425,127 @@ class RunTest(unittest.TestCase):
             [("engineer", "success", 7)],
         )
 
+    def run_with_cross_source(self, answer: dict | None, pass_mode: str = "success") -> str:
+        with (
+            self.stub(REFERENCE_MODELS, answer=answer, pass_mode=pass_mode),
+            redirect_stdout(io.StringIO()) as printed,
+        ):
+            code = main(
+                [
+                    "--raw",
+                    str(self.raw),
+                    "--goal",
+                    str(DEMO_GOAL),
+                    "--checks",
+                    str(DECLARATION),
+                    "--out",
+                    str(self.out),
+                    "--cross-source",
+                ]
+            )
+        self.assertEqual(code, 0, printed.getvalue())
+        return printed.getvalue()
+
+    def test_cross_source_notes_reach_the_engineer(self):
+        report = self.run_with_cross_source(ANSWER)
+        self.assertTrue(
+            report.startswith(
+                "cross-source: success after 9 turns (exit 0); JOINS.md: 1 join, 1 caution\n"
+                "agent: success after 7 turns (exit 0)\n"
+            ),
+            report,
+        )
+        passed_to = json.loads(Path(f"{self.record}.cross-source").read_text(encoding="utf-8"))
+        folder = (self.out / CROSS_SOURCE_DIR).resolve()
+        self.assertEqual(Path(passed_to["cwd"]), folder)
+        plugin = (self.out / PLUGIN_COPY_DIR).resolve()
+        self.assertEqual(passed_to["argv"], agent_command("claude", plugin, CROSS_SOURCE)[1:])
+        self.assertNotIn("--allowedTools", passed_to["argv"])
+        self.assertIn("--json-schema", passed_to["argv"])
+        tables = ["billing.customers", "billing.invoices", "crm.accounts", "events.events"]
+        profiles = [f"{SOURCE_PROFILES_DIR}/{t}.{kind}" for t in tables for kind in ("json", "txt")]
+        overlap = [f"{SOURCE_PROFILES_DIR}/overlap.{kind}" for kind in ("json", "txt")]
+        self.assertEqual(
+            passed_to["files"], sorted([GOAL_FILE, SOURCE_PROFILES_DIR] + profiles + overlap)
+        )
+        self.assertEqual((folder / GOAL_FILE).read_bytes(), DEMO_GOAL.read_bytes())
+        overlap_text = (folder / SOURCE_PROFILES_DIR / "overlap.txt").read_text(encoding="utf-8")
+        self.assertTrue(overlap_text.startswith("overlap: 4 tables, 24 columns\n"), overlap_text)
+        self.assertEqual(
+            json.loads((self.out / CROSS_SOURCE_FILE).read_text(encoding="utf-8"))[
+                "structured_output"
+            ],
+            ANSWER,
+        )
+
+        # The engineer finds the notes in its project, and nothing else new.
+        engineer = self.recorded()
+        self.assertIn("JOINS.md", engineer["files"])
+        self.assertNotIn(f"{SOURCE_PROFILES_DIR}/overlap.txt", engineer["files"])
+        notes = (self.out / PROJECT_DIR / "JOINS.md").read_text(encoding="utf-8")
+        self.assertEqual(notes, render_notes(ANSWER))
+
+        # 9 + 7 turns, 0 + 1 refused, 52.0 + 41.3 s, 0.1204 + 0.0812 US$.
+        self.assertTrue(
+            report.endswith(
+                "role          outcome    turns  refused    time  cost (US$)\n"
+                "cross-source  success        9        0  52.0 s      0.1204\n"
+                "engineer      success        7        1  41.3 s      0.0812\n"
+                "run           gate PASS     16        1  93.3 s      0.2016\n"
+                "\n"
+                "role          model              input  cache write  cache read  output\n"
+                "cross-source  claude-sonnet-5-5     12       15,000      60,000   3,000\n"
+                "engineer      claude-sonnet-5-5     20       12,000      50,000   2,500\n"
+            ),
+            report,
+        )
+        ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(
+            [(r["role"], r["turns"]) for r in ledger["roles"]],
+            [("cross-source", 9), ("engineer", 7)],
+        )
+
+    def test_an_answer_naming_an_unknown_column_is_not_passed_on(self):
+        wrong = json.loads(json.dumps(ANSWER))
+        wrong["joins"][0]["right"] = "crm.accounts.email"
+        report = self.run_with_cross_source(wrong)
+        self.assertTrue(
+            report.startswith(
+                "cross-source: success after 9 turns (exit 0); no notes for the engineer: "
+                "join 1 names 'crm.accounts.email', which is not a column in the profiles\n"
+            ),
+            report,
+        )
+        self.assertNotIn("JOINS.md", self.recorded()["files"])
+        self.assertFalse((self.out / PROJECT_DIR / "JOINS.md").exists())
+        self.assertIn("gate: PASS", report)
+
+    def test_a_pass_with_no_answer_or_no_report_is_not_passed_on(self):
+        report = self.run_with_cross_source(None)
+        self.assertIn(
+            "cross-source: success after 9 turns (exit 0); no notes for the engineer: "
+            "the cross-source pass ended success without an answer\n",
+            report,
+        )
+        self.assertNotIn("JOINS.md", self.recorded()["files"])
+        shutil.rmtree(self.out)
+        report = self.run_with_cross_source(ANSWER, pass_mode="crash")
+        self.assertIn(
+            "cross-source: exited 1 without a report; no notes for the engineer: "
+            "the cross-source pass gave no report\n",
+            report,
+        )
+        self.assertNotIn("JOINS.md", self.recorded()["files"])
+        # The run row is not added up when a role reported nothing.
+        self.assertIn("run           gate PASS      -        -       -           -\n", report)
+
     def test_models_that_keep_test_mode_invoices_fail_on_those_invoices(self):
         with (self.raw / "billing" / "invoices.csv").open(newline="", encoding="utf-8") as handle:
             test_mode = [row for row in csv.DictReader(handle) if row["livemode"] == "false"]
         self.assertGreater(len(test_mode), 0)
         with self.stub(self.broken):
-            agent, results = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
+            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
+        agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.report["subtype"], "success")
         self.assertFalse(passed(results))
         failed = {(result.check, result.subject) for result in results if result.status == FAIL}
@@ -391,7 +560,8 @@ class RunTest(unittest.TestCase):
 
     def test_an_agent_that_fails_to_run_leaves_nothing_to_pass(self):
         with self.stub(mode="crash"):
-            agent, results = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
+            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
+        agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.describe(), "exited 1 without a report: Error: not signed in")
         self.assertFalse(passed(results))
         ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
@@ -404,7 +574,8 @@ class RunTest(unittest.TestCase):
 
     def test_an_agent_that_does_not_finish_is_stopped(self):
         with self.stub(REFERENCE_MODELS, mode="hang"):
-            agent, results = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=5)
+            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=5)
+        agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.describe(), "stopped: did not finish within 5 seconds")
         self.assertFalse((self.out / AGENT_FILE).exists())
         # What the agent wrote before it was stopped is still checked.

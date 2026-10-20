@@ -14,7 +14,11 @@ be read or edited by the agent.
             dbt_project.yml     reads the raw files from the variable raw_dir
             profiles.yml        builds into dev.duckdb inside the folder
             models/             empty; the agent writes the models here
+        cross_source/           with --cross-source: the cross-source agent's folder
+            GOAL.md
+            source_profiles/    the profiles, with overlap.txt and overlap.json
         plugin/                 the add-on's manifest and agents, as loaded for the run
+        cross_source.json       with --cross-source: what Claude Code reported for that agent
         agent.json              what Claude Code reported when the agent stopped
         usage.json              tokens, turns, time and cost by role, and the gate verdict
         gate/                   the gate's databases, dbt artifacts and logs
@@ -25,6 +29,12 @@ other action is refused rather than asked about. Once it stops, the gate
 builds the project from an empty database and checks it against the raw
 files. The run passes only if the gate passes. Last, the run's usage is
 recorded and printed by role.
+
+With --cross-source, the cross-source agent runs first. It reads the goal,
+the profiles and the overlap report in a folder of its own, changes nothing,
+and answers how the tables the goal needs join. Its answer is checked, and
+written as JOINS.md in the project folder for the engineer. An answer that
+fails the check is not passed on; the engineer then works without it.
 """
 
 from __future__ import annotations
@@ -38,9 +48,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from tenx.cross_source import NOTES_FILE, SCHEMA, NotesError, notes_from_report
+from tenx.cross_source import render as render_notes
 from tenx.gate import GateError, Result, load_declaration, passed, render, run_gate
 from tenx.ledger import Ledger, role_usage
 from tenx.ledger import render as render_usage
+from tenx.overlap import overlap_folder, write_report
 from tenx.profile import ProfileError, profile_folder
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
@@ -51,6 +64,8 @@ STOP_GRACE_SECONDS = 30
 PROJECT_DIR = "project"
 PLUGIN_COPY_DIR = "plugin"
 AGENT_FILE = "agent.json"
+CROSS_SOURCE_DIR = "cross_source"
+CROSS_SOURCE_FILE = "cross_source.json"
 USAGE_FILE = "usage.json"
 GATE_DIR = "gate"
 PROJECT_NAME = "tenx_project"
@@ -72,6 +87,7 @@ class Role:
     prompt: str
     allowed_tools: tuple[str, ...]
     max_turns: int
+    json_schema: dict | None = None
 
 
 ENGINEER = Role(
@@ -80,6 +96,16 @@ ENGINEER = Role(
     prompt="Build what GOAL.md asks for.",
     allowed_tools=("Edit", "Write", "Bash(dbt *)"),
     max_turns=60,
+)
+
+# Reads inside its own folder need no approval, so it is allowed nothing more.
+CROSS_SOURCE = Role(
+    name="cross-source",
+    agent="tenx:cross-source",
+    prompt="Work out the joins GOAL.md needs.",
+    allowed_tools=(),
+    max_turns=20,
+    json_schema=SCHEMA,
 )
 
 
@@ -181,6 +207,7 @@ def stage_plugin(destination: Path) -> Path:
 def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[str]:
     """The Claude Code command line that runs one of the agents headless."""
     allowed = ["--allowedTools", *role.allowed_tools] if role.allowed_tools else []
+    schema = ["--json-schema", json.dumps(role.json_schema)] if role.json_schema else []
     return [
         claude,
         "-p",
@@ -199,6 +226,7 @@ def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[
         "--output-format",
         "json",
         "--no-session-persistence",
+        *schema,
     ]
 
 
@@ -242,12 +270,77 @@ def run_agent(project: Path, command: list[str], report_file: Path, timeout: flo
     return AgentRun(process.returncode, report, message=lines[-1] if lines else "")
 
 
-def usage(agent: AgentRun, results: list[Result]) -> Ledger:
-    """The run's usage by role, with the gate's verdict."""
+@dataclass(frozen=True)
+class Notes:
+    """What became of the cross-source agent's answer."""
+
+    agent: AgentRun
+    joins: int | None = None
+    cautions: int | None = None
+    problem: str = ""
+
+    def describe(self) -> str:
+        if self.joins is None:
+            return f"{self.agent.describe()}; no notes for the engineer: {self.problem}"
+        return (
+            f"{self.agent.describe()}; {NOTES_FILE}: {self.joins} "
+            f"join{'s' if self.joins != 1 else ''}, {self.cautions} "
+            f"caution{'s' if self.cautions != 1 else ''}"
+        )
+
+
+@dataclass(frozen=True)
+class Run:
+    engineer: AgentRun
+    results: list[Result]
+    notes: Notes | None = None
+
+
+def _role_usage(role: Role, agent: AgentRun):
     missing = "timed out" if agent.timed_out_after is not None else "no report"
-    return Ledger(
-        (role_usage(ENGINEER.name, agent.report, missing),), "PASS" if passed(results) else "FAIL"
-    )
+    return role_usage(role.name, agent.report, missing)
+
+
+def usage(run: Run) -> Ledger:
+    """The run's usage by role, in the order they ran, with the gate's verdict."""
+    roles = []
+    if run.notes is not None:
+        roles.append(_role_usage(CROSS_SOURCE, run.notes.agent))
+    roles.append(_role_usage(ENGINEER, run.engineer))
+    return Ledger(tuple(roles), "PASS" if passed(run.results) else "FAIL")
+
+
+def prepare_cross_source(folder: Path, project: Path, raw: Path) -> None:
+    """Give the cross-source agent the goal, the profiles and the overlap report."""
+    folder.mkdir()
+    shutil.copyfile(project / GOAL_FILE, folder / GOAL_FILE)
+    shutil.copytree(project / SOURCE_PROFILES_DIR, folder / SOURCE_PROFILES_DIR)
+    try:
+        write_report(overlap_folder(raw), folder / SOURCE_PROFILES_DIR)
+    except ProfileError as error:
+        raise EngineerError(str(error)) from error
+
+
+def run_cross_source(
+    out: Path,
+    project: Path,
+    raw: Path,
+    profiles: list[dict],
+    plugin: Path,
+    claude: str,
+    timeout: float,
+) -> Notes:
+    """Run the cross-source agent and write its checked answer for the engineer."""
+    folder = out / CROSS_SOURCE_DIR
+    prepare_cross_source(folder, project, raw)
+    command = agent_command(claude, plugin, CROSS_SOURCE)
+    agent = run_agent(folder.resolve(), command, out / CROSS_SOURCE_FILE, timeout)
+    try:
+        notes = notes_from_report(agent.report, profiles)
+    except NotesError as error:
+        return Notes(agent, problem=str(error))
+    (project / NOTES_FILE).write_text(render_notes(notes), encoding="utf-8")
+    return Notes(agent, len(notes["joins"]), len(notes["cautions"]))
 
 
 def run(
@@ -257,8 +350,13 @@ def run(
     out: Path,
     claude: str = "claude",
     timeout: float = TIMEOUT_MINUTES * 60,
-) -> tuple[AgentRun, list[Result]]:
-    """Prepare the project, let the agent build it, then run the gate on it."""
+    cross_source: bool = False,
+) -> Run:
+    """Prepare the project, let the agent build it, then run the gate on it.
+
+    With cross_source, the cross-source agent runs first and its checked
+    answer is put in the project as JOINS.md.
+    """
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise EngineerError(
             f"the agent definitions are not in {PLUGIN_DIR}; run from a clone of the repository"
@@ -268,13 +366,17 @@ def run(
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise EngineerError(f"{out} must be empty")
     project = out / PROJECT_DIR
-    prepare_project(project, raw, goal)
+    profiles = prepare_project(project, raw, goal)
     plugin = stage_plugin(out.resolve() / PLUGIN_COPY_DIR)
+    notes = None
+    if cross_source:
+        notes = run_cross_source(out, project, Path(raw), profiles, plugin, claude, timeout)
     command = agent_command(claude, plugin)
     agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout)
     results = run_gate(project, raw, checks, out / GATE_DIR)
-    usage(agent, results).write(out / USAGE_FILE)
-    return agent, results
+    outcome = Run(agent, results, notes)
+    usage(outcome).write(out / USAGE_FILE)
+    return outcome
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -287,19 +389,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out", type=Path, required=True, help="empty folder for the project and the run"
     )
+    parser.add_argument(
+        "--cross-source",
+        action="store_true",
+        help="run the cross-source agent first and give its notes to the engineer",
+    )
     args = parser.parse_args(argv)
     try:
-        agent, results = run(args.raw, args.goal, args.checks, args.out)
+        outcome = run(args.raw, args.goal, args.checks, args.out, cross_source=args.cross_source)
     except (EngineerError, GateError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    print(f"agent: {agent.describe()}")
+    if outcome.notes is not None:
+        print(f"cross-source: {outcome.notes.describe()}")
+    print(f"agent: {outcome.engineer.describe()}")
     print(f"project: {args.out / PROJECT_DIR}")
     print()
-    print(render(results), end="")
+    print(render(outcome.results), end="")
     print()
-    print(render_usage(usage(agent, results)), end="")
-    return 0 if passed(results) else 1
+    print(render_usage(usage(outcome)), end="")
+    return 0 if passed(outcome.results) else 1
 
 
 if __name__ == "__main__":
