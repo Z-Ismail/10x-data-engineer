@@ -22,14 +22,15 @@ The current folder holds:
   to three values that were not found, as written in the file.
 
 Read `GOAL.md`, every profile and `overlap.txt`, then answer with one entry
-for each join the goal's models need:
+in `joins` for each join the goal's models need:
 
 - `left` and `right`: the two columns, as `source.table.column`, named as
   in the profiles.
 - `prepare`: what to do to the values on each side so that the ones that
   belong together are equal. Compare the values not found on the two sides:
   when they differ in a regular way, say how, and how to match them.
-- `cardinality`: how many rows on each side one row on the other matches.
+- `cardinality`: from `left` to `right`, for example `many-to-one` when
+  several `left` rows match one `right` row.
 - `unmatched`: which rows on each side are left without a match after
   that, and why, as far as the files show.
 - `evidence`: the figures from the profiles and the overlap report that
