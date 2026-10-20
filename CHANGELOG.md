@@ -6,6 +6,8 @@ Notable changes to this project.
 
 ### Changed
 
+- The engineer agent reads `JOINS.md` before writing a model that combines
+  sources, when a run provides it.
 - Demo data: some CRM accounts of paying companies hold another mailbox at
   the company's domain (`accounts@company0030.example` where billing has
   `billing@company0030.example`), so matching billing customers to CRM
@@ -29,6 +31,12 @@ Notable changes to this project.
 
 ### Added
 
+- Cross-source agent (`python -m tenx.engineer --cross-source`,
+  `make engineer-cross-source`): before the engineer starts, an agent that
+  may only read files works out from the goal, the profiles and the overlap
+  report how the tables join, and answers in a fixed JSON shape. The answer
+  is checked, every column it names must exist, and it is given to the
+  engineer as `JOINS.md`. Its usage has its own row in the ledger.
 - Gate: a sixth check, `expected`. A model can declare the rows it must hold
   in named columns, as a query on the raw files, and the gate compares the
   model with them, showing rows the model should not hold and expected rows

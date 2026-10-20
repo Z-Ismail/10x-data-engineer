@@ -18,6 +18,7 @@ use.
 | Overlap report: values shared between columns of different tables | Available |
 | Gate: build, row count, key, money total, expected rows and repeat build checks | Available |
 | Engineer agent: one agent that builds the models a goal asks for | Available |
+| Cross-source agent: notes on how the tables join, given to the engineer | Available as an option; not yet shown to help |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
 | The rest of the crew | Planned |
 
@@ -46,6 +47,7 @@ make profile     # writes one profile per source table to profiles/
 make overlap     # writes a report of columns that share values to profiles/
 make test
 make engineer    # has the engineer agent build the demo project, then gates it
+make engineer-cross-source   # the same, with the cross-source agent first
 ```
 
 ### Demo data
@@ -145,7 +147,7 @@ Rules:
 The report gives facts, not joins. Two columns of currency codes, or two
 timestamp columns, can share values without being related, and the distinct
 counts are shown so that such pairs are easy to recognise. The engineer
-agent is not given this report yet.
+agent is not given this report; the cross-source agent reads it.
 
 ### Gate
 
@@ -395,6 +397,7 @@ Everything from the run is kept under the `--out` folder:
 | `usage.json` | The usage ledger: each role's figures and the gate verdict |
 | `gate/` | The gate's databases, dbt artifacts and logs |
 | `plugin/` | The copy of the add-on the agent was loaded from |
+| `cross_source/`, `cross_source.json` | With `--cross-source`: the cross-source agent's folder, and what Claude Code reported when it stopped |
 
 Today the agent builds what the demo goal asks for: one staging model per
 source table, with renames, type conversions and the exclusions the goal
@@ -404,12 +407,60 @@ been tried on other goals. It runs once; if the gate fails, nothing is
 retried. Running it needs a clone
 of this repository and Claude Code installed and signed in.
 
+### Cross-source agent
+
+With `--cross-source`, a second agent runs before the engineer and works
+out how the tables the goal needs join. It reads the goal, the profiles and
+the overlap report in a folder of its own, and changes nothing: it may only
+read files, and it answers in a fixed JSON shape that Claude Code checks.
+For each join it gives the two columns, what to do to the values so that the
+ones that belong together are equal, how many rows on one side match a row
+on the other, which rows will find no match and why, and the figures it
+relied on, with cautions for the engineer at the end.
+
+The runner checks the answer again before using it. Every column it names
+must exist in the profiles. A checked answer is written as `JOINS.md` in the
+engineer's folder, and the engineer is told to read it before writing a
+model that combines sources. An answer that fails the check is not passed
+on, the engineer works without it, and the run says why. The agent is
+pinned to the Sonnet model and stops after 20 turns.
+
+```
+cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 7 cautions
+agent: success after 18 turns (exit 0)
+project: runs/demo-cross-source/project
+
+gate: PASS (24 passed, 0 failed, 0 not run)
+...
+role          outcome    turns  refused    time  cost (US$)
+cross-source  success        9        0  33.7 s      0.0729
+engineer      success       18        0  29.7 s      0.1086
+run           gate PASS     27        0  63.4 s      0.1815
+```
+
+In that run the notes said that trimming and lower case leave some
+customers unmatched, quoted `billing@company0030.example` in billing against
+`accounts@company0030.example` in the CRM, and proposed matching on the part
+after the `@`, with a caution to check that no two CRM accounts share a
+domain. The engineer matched on the domain and the gate passed.
+
+Whether the engineer does better with the notes than without them has not
+been measured yet, and the notes can be wrong. On two 20-company demo
+datasets the agent advised matching whole addresses, the engineer followed
+it, and the gate failed. On one, the three values not found on each side did
+not show the other mailbox. On the other they did (`billing@company0009.example`
+against `admin@company0009.example`), but the agent took the goal's sentence
+that the two systems share only the email address to rule out the domain.
+In the first eight runs on the demo data the option added 9 to 10 turns, 27
+to 43 seconds and US$0.06 to 0.08 of estimated usage to each run.
+
 ### Usage ledger
 
 Every run ends with its usage by role, printed and saved as `usage.json`.
 Each role runs as its own Claude Code session, and the figures are read from
-the report Claude Code prints when that session ends. Today the engineer is
-the only role.
+the report Claude Code prints when that session ends. The engineer is always
+a role; with `--cross-source` the cross-source agent has a row of its own,
+before the engineer's.
 
 | Column | Meaning |
 | --- | --- |
@@ -478,7 +529,7 @@ installed and signed in. It runs on your own Claude subscription or API key.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate and the engineer agent's runner |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and the check of the cross-source agent's answer |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
 ## Licence
