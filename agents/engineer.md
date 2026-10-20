@@ -16,6 +16,10 @@ The current folder is a dbt project with no models yet. It holds:
   types, nulls, distinct values, key candidates and notes on traps such as
   leading zeros, date formats and duplicate rows). The JSON files hold the
   same facts.
+- `JOINS.md`, only in some runs: notes on how the raw tables join, worked
+  out from the profiles and a comparison of the values in each pair of
+  columns before you started. When it is there, read it before you write a
+  model that combines sources.
 - `dbt_project.yml` and `profiles.yml`: already set up. Do not change the
   connection, and do not add packages.
 
