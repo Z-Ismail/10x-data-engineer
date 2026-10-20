@@ -70,5 +70,40 @@ class EngineerAgentTest(unittest.TestCase):
         self.assertIn("all_varchar=true", self.body)
 
 
+class CrossSourceAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.fields, self.body = read_agent(AGENTS / "cross-source.md")
+
+    def test_sets_only_fields_a_plugin_agent_may_set(self):
+        self.assertLessEqual(set(self.fields), SUPPORTED)
+        self.assertEqual(self.fields["name"], "cross-source")
+        self.assertTrue(self.fields["description"].strip())
+
+    def test_pins_the_model(self):
+        self.assertEqual(self.fields["model"], "sonnet")
+
+    def test_can_only_read_files_and_give_its_answer(self):
+        # Run with --agent, Claude Code offers only the tools listed here, so
+        # the answer tool for --json-schema must be listed as well.
+        tools = {tool.strip() for tool in self.fields["tools"].split(",")}
+        self.assertEqual(tools, {"Read", "Glob", "Grep", "StructuredOutput"})
+
+    def test_starts_without_claude_md_files(self):
+        self.assertIs(self.fields["omitClaudeMd"], True)
+
+    def test_asks_for_every_field_of_the_answer(self):
+        for field in (
+            "left",
+            "right",
+            "prepare",
+            "cardinality",
+            "unmatched",
+            "evidence",
+            "cautions",
+        ):
+            with self.subTest(field):
+                self.assertIn(f"`{field}`", self.body)
+
+
 if __name__ == "__main__":
     unittest.main()
