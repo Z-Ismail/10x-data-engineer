@@ -142,6 +142,12 @@ class ScoutAgentTest(unittest.TestCase):
             with self.subTest(field):
                 self.assertIn(f"`{field}`", self.body)
 
+    def test_says_csv_values_are_shown_as_text(self):
+        self.assertIn("every value of a CSV table is shown in quotes", self.body)
+
+    def test_keeps_the_notes_short(self):
+        self.assertIn("at most 8 findings", self.body)
+
     def test_leaves_joins_to_the_cross_source_agent(self):
         self.assertIn("do not advise how to join it to other tables", self.body)
 

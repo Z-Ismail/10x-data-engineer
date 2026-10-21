@@ -16,7 +16,10 @@ The current folder holds:
   columns, types, nulls, blanks, distinct values, most common values, key
   candidates and notes on traps.
 - `SAMPLE.jsonl`: up to 20 rows of the table picked at random, one per
-  line, with the values as they are written in the file.
+  line, with the values as they are written in the file. A CSV file holds
+  only text, so every value of a CSV table is shown in quotes; that says
+  nothing about its type. The profile gives the type each column converts
+  to.
 
 Read all three, then answer with one entry in `findings` for each thing in
 this table the engineer must handle to build the goal's models correctly,
@@ -38,3 +41,8 @@ in the join columns, and leave the join to that agent.
 
 Use `questions` for anything the files cannot settle. State only what the
 files show, and give the figures.
+
+Keep the notes short, because the engineer reads every table's notes before
+starting: at most 8 findings, the ones that most affect the goal's models
+first, and one or two sentences for each field. Leave out what needs no
+action.
