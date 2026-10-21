@@ -19,6 +19,7 @@ use.
 | Gate: build, row count, key, money total, expected rows and repeat build checks | Available |
 | Engineer agent: one agent that builds the models a goal asks for | Available |
 | Cross-source agent: notes on how the tables join, given to the engineer | Available as an option; not yet shown to help |
+| Scouts: notes on each raw table, given to the engineer | Available as an option; not yet shown to help |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
 | The rest of the crew | Planned |
 
@@ -48,6 +49,7 @@ make overlap     # writes a report of columns that share values to profiles/
 make test
 make engineer    # has the engineer agent build the demo project, then gates it
 make engineer-cross-source   # the same, with the cross-source agent first
+make engineer-scouts         # the same, with a scout for each raw table first
 ```
 
 ### Demo data
@@ -398,6 +400,7 @@ Everything from the run is kept under the `--out` folder:
 | `gate/` | The gate's databases, dbt artifacts and logs |
 | `plugin/` | The copy of the add-on the agent was loaded from |
 | `cross_source/`, `cross_source.json` | With `--cross-source`: the cross-source agent's folder, and what Claude Code reported when it stopped |
+| `scouts/<table>/`, `scouts/<table>.json` | With `--scouts`: each scout's folder, and what Claude Code reported when it stopped |
 
 Today the agent builds what the demo goal asks for: one staging model per
 source table, with renames, type conversions and the exclusions the goal
@@ -454,13 +457,73 @@ that the two systems share only the email address to rule out the domain.
 In the first eight runs on the demo data the option added 9 to 10 turns, 27
 to 43 seconds and US$0.06 to 0.08 of estimated usage to each run.
 
+### Scouts
+
+With `--scouts`, a scout runs for each raw table before the engineer, four
+at a time. A scout looks at one table: it reads the goal, the table's
+profile and up to 20 of its rows in a folder of its own, and changes
+nothing. It may only read files, and it answers in a fixed JSON shape that
+Claude Code checks: what the engineer must handle in that table, with the
+columns concerned, the figures and values that show it and what to do about
+it, and questions the files cannot settle. It is told not to advise how its
+table joins to others, since it sees only one.
+
+The profile gives exact figures for the whole table, but not what the
+values look like side by side; the rows are there for that, such as an
+address written in capitals or a timestamp written two ways. They are
+picked at random from the file, and the same file always gives the same
+rows. Values are shown as they are written in the file: CSV values as text
+(a blank one as `null`), and JSON lines exactly as they are.
+
+The runner checks each answer before using it. Every column it names must
+be a column of that table. The answers that pass are written together as
+`TABLE_NOTES.md` in the engineer's folder, and the engineer is told to read
+it before writing the staging models. An answer that fails its check is
+left out, and the run says why. Scouts are pinned to the Haiku model and
+stop after 8 turns. Scouts and the cross-source agent can run in the same
+run; the scouts run first, and neither sees the other's notes.
+
+```
+scout billing.customers: success after 5 turns (exit 0); 6 findings, 4 questions
+scout billing.invoices: success after 5 turns (exit 0); 6 findings, 3 questions
+scout crm.accounts: success after 5 turns (exit 0); 5 findings, 3 questions
+scout events.events: success after 5 turns (exit 0); 5 findings, 3 questions
+agent: success after 25 turns (exit 0)
+project: runs/demo-scouts/project
+
+gate: PASS (24 passed, 0 failed, 0 not run)
+...
+role                     outcome    turns  refused     time  cost (US$)
+scout billing.customers  success        5        0   24.6 s      0.0032
+scout billing.invoices   success        5        0   20.1 s      0.0029
+scout crm.accounts       success        5        0   14.6 s      0.0024
+scout events.events      success        5        0   18.3 s      0.0028
+engineer                 success       25        0   76.5 s      0.1539
+run                      gate PASS     45        0  154.2 s      0.1652
+```
+
+The scouts run at the same time, so the run took less than the `run` row's
+time, which adds up each session's time.
+
+Whether the engineer does better with the notes than without them has not
+been measured yet. In eight runs on the demo data, the engineer with scouts
+passed the gate three times; the engineer alone, in seven runs on the same
+data on the same day, passed twice. Every failure was a crosswalk that
+matched whole addresses. That is too few runs to tell the two apart. The
+notes can also mislead: the CRM scout sees the email address but not the
+billing table, and in one of the failed runs it advised matching whole
+addresses despite being told to leave joins alone. In those eight runs the
+scouts added 25 to 34 seconds to each run, the time the slowest scout took,
+and US$0.011 to 0.014 of estimated usage.
+
 ### Usage ledger
 
 Every run ends with its usage by role, printed and saved as `usage.json`.
 Each role runs as its own Claude Code session, and the figures are read from
 the report Claude Code prints when that session ends. The engineer is always
-a role; with `--cross-source` the cross-source agent has a row of its own,
-before the engineer's.
+a role; with `--scouts` each scout has a row of its own, named after its
+table, and with `--cross-source` so does the cross-source agent, in the
+order they ran.
 
 | Column | Meaning |
 | --- | --- |
@@ -488,7 +551,7 @@ showing how the result ties back to the sources.
 | Role | Responsibility |
 | --- | --- |
 | Lead | Breaks the goal into tasks and decides how many roles the job needs |
-| Scouts | Profile the source tables, one table each, in parallel |
+| Scouts | Look at the source tables, one table each, in parallel, and note what each needs |
 | Architect | Writes the spec, including the grain of every model |
 | QA | Writes acceptance checks from the spec before anything is built |
 | Staging engineers | One per source system: renames, casts, no joins |
@@ -529,7 +592,7 @@ installed and signed in. It runs on your own Claude subscription or API key.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and the check of the cross-source agent's answer |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner, the row sample and the checks of the cross-source agent's and scouts' answers |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
 ## Licence

@@ -6,6 +6,8 @@ Notable changes to this project.
 
 ### Changed
 
+- The engineer agent reads `TABLE_NOTES.md` before writing the staging
+  models, when a run provides it.
 - The engineer agent reads `JOINS.md` before writing a model that combines
   sources, when a run provides it.
 - Demo data: some CRM accounts of paying companies hold another mailbox at
@@ -31,6 +33,15 @@ Notable changes to this project.
 
 ### Added
 
+- Scouts (`python -m tenx.engineer --scouts`, `make engineer-scouts`):
+  before the engineer starts, a scout for each raw table, four at a time,
+  reads the goal, the table's profile and up to 20 of its rows, and answers
+  in a fixed JSON shape what the engineer must handle in that table. Each
+  answer is checked, every column it names must be a column of its table,
+  and the answers are given to the engineer together as `TABLE_NOTES.md`.
+  Each scout's usage has its own row in the ledger.
+- `tenx.sample`: picks up to 20 rows of a raw file, as written, the same
+  rows every time for the same file.
 - Cross-source agent (`python -m tenx.engineer --cross-source`,
   `make engineer-cross-source`): before the engineer starts, an agent that
   may only read files works out from the goal, the profiles and the overlap

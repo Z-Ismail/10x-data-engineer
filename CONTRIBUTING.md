@@ -15,8 +15,9 @@ take a few minutes.
 
 The tests do not run the agents themselves: they replace the `claude`
 command with a stand-in that writes a known project, or gives a known answer
-for the cross-source agent. To run the real agents on the demo data, install
-Claude Code, sign in and run `make engineer` or `make engineer-cross-source`.
+for the cross-source agent and the scouts. To run the real agents on the
+demo data, install Claude Code, sign in and run `make engineer`,
+`make engineer-cross-source` or `make engineer-scouts`.
 
 ## Guidelines
 
@@ -32,5 +33,5 @@ Claude Code, sign in and run `make engineer` or `make engineer-cross-source`.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Generator for the three demo source systems, and their goal |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and the check of the cross-source agent's answer |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner, the row sample and the checks of the cross-source agent's and scouts' answers |
 | `tests/` | Tests, and the dbt project the gate is tested against |
