@@ -69,6 +69,10 @@ class EngineerAgentTest(unittest.TestCase):
         self.assertIn("`JOINS.md`, only in some runs", self.body)
         self.assertIn("When it is there, read it", self.body)
 
+    def test_reads_the_table_notes_only_when_they_are_there(self):
+        self.assertIn("`TABLE_NOTES.md`, only in some runs", self.body)
+        self.assertIn("When it is there, read it before you write the staging models", self.body)
+
     def test_reads_raw_files_through_raw_dir(self):
         self.assertIn("{{ var('raw_dir') }}", self.body)
         self.assertIn("all_varchar=true", self.body)

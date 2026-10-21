@@ -20,6 +20,9 @@ The current folder is a dbt project with no models yet. It holds:
   out from the profiles and a comparison of the values in each pair of
   columns before you started. When it is there, read it before you write a
   model that combines sources.
+- `TABLE_NOTES.md`, only in some runs: notes on what to handle in each raw
+  table, worked out from its profile and a few of its rows before you
+  started. When it is there, read it before you write the staging models.
 - `dbt_project.yml` and `profiles.yml`: already set up. Do not change the
   connection, and do not add packages.
 
