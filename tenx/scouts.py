@@ -1,13 +1,18 @@
-"""Read and check each scout's answer.
+"""Read and check each scout's answer, and write the notes for the engineer.
 
 A scout looks at one raw table, from its profile and a sample of its rows,
 and answers, as JSON that Claude Code checks against SCHEMA, what the
 engineer must handle in that table. Nothing it says is taken on trust here
 either: the answer is checked again, and every column it names must be a
-column of its table.
+column of its table. The checked answers are written together as
+TABLE_NOTES.md in the engineer's project folder.
 """
 
 from __future__ import annotations
+
+import re
+
+NOTES_FILE = "TABLE_NOTES.md"
 
 FINDING_FIELDS = ("columns", "issue", "evidence", "handling")
 
@@ -81,3 +86,47 @@ def notes_from_report(report: dict | None, profile: dict) -> dict:
         raise ScoutError(f"the scout ended {report.get('subtype') or 'unknown'} without an answer")
     columns = {column["name"] for column in profile["columns"]}
     return check_answer(report["structured_output"], columns)
+
+
+def _line(text: str) -> str:
+    # One list item per field: runs of spaces and line breaks become one space.
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def render(tables: list[tuple[str, dict | None]]) -> str:
+    """The notes as the Markdown file the engineer reads.
+
+    tables holds each table's name with its checked notes, or None when the
+    scout gave none that passed the check.
+    """
+    lines = [
+        "# Notes on each raw table",
+        "",
+        "Notes from the scouts, one per table, worked out from each table's profile",
+        "and up to 20 of its rows before any model was built. A pattern seen only",
+        "in those rows is not proven for the whole table.",
+    ]
+    missing = []
+    for table, notes in tables:
+        if notes is None:
+            missing.append(table)
+            continue
+        lines += ["", f"## `{table}`"]
+        if not notes["findings"]:
+            lines += ["", "No findings."]
+        for finding in notes["findings"]:
+            columns = ", ".join(f"`{name}`" for name in finding["columns"]) or "Whole table"
+            lines += [
+                "",
+                f"### {columns}: {_line(finding['issue'])}",
+                "",
+                f"- Evidence: {_line(finding['evidence'])}",
+                f"- Handling: {_line(finding['handling'])}",
+            ]
+        if notes["questions"]:
+            lines += ["", "### Questions", ""]
+            lines += [f"- {_line(question)}" for question in notes["questions"]]
+    if missing:
+        lines += ["", "## Tables without notes", ""]
+        lines += [f"- `{table}`" for table in missing]
+    return "\n".join(lines) + "\n"

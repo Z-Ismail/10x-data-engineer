@@ -1,6 +1,7 @@
 """Tests for reading and checking the scouts' answers.
 
-The profiles are handmade, holding only the fields the check reads.
+The profiles are handmade, holding only the fields the check reads, and the
+expected TABLE_NOTES.md text is written out by hand.
 """
 
 import copy
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import jsonschema
 
-from tenx.scouts import SCHEMA, ScoutError, check_answer, notes_from_report
+from tenx.scouts import SCHEMA, ScoutError, check_answer, notes_from_report, render
 
 AGENT = Path(__file__).resolve().parent.parent / "agents" / "scout.md"
 
@@ -43,6 +44,42 @@ ANSWER = {
     ],
     "questions": ["Is a prospect an account the goal wants?"],
 }
+
+RENDERED = """# Notes on each raw table
+
+Notes from the scouts, one per table, worked out from each table's profile
+and up to 20 of its rows before any model was built. A pattern seen only
+in those rows is not proven for the whole table.
+
+## `crm.accounts`
+
+### `billing_email`: Addresses written in capitals and padded.
+
+- Evidence: PROFILE.txt: 13 values with spaces. SAMPLE.jsonl: 'BILLING@COMPANY0034.EXAMPLE'.
+- Handling: Trim and lower-case it in staging.
+
+### Whole table: No repeated rows.
+
+- Evidence: PROFILE.txt: 180 rows, 180 distinct account_id.
+- Handling: Nothing to remove.
+
+### `account_id`, `created_date`: Text that must be converted with care.
+
+- Evidence: PROFILE.txt: leading zeros; dates day/month/year.
+- Handling: Keep account_id as text; parse dates as %d/%m/%Y.
+
+### Questions
+
+- Is a prospect an account the goal wants?
+
+## `events.events`
+
+No findings.
+
+## Tables without notes
+
+- `billing.invoices`
+"""
 
 
 class Schema(unittest.TestCase):
@@ -145,6 +182,25 @@ class FromReport(unittest.TestCase):
         report = {"structured_output": copy.deepcopy(ANSWER)}
         with self.assertRaisesRegex(ScoutError, "names 'billing_email'"):
             notes_from_report(report, other)
+
+
+class Render(unittest.TestCase):
+    def test_exact_text(self):
+        self.assertEqual(
+            render(
+                [
+                    ("crm.accounts", ANSWER),
+                    ("events.events", {"findings": [], "questions": []}),
+                    ("billing.invoices", None),
+                ]
+            ),
+            RENDERED,
+        )
+
+    def test_every_table_with_notes(self):
+        text = render([("crm.accounts", ANSWER)])
+        self.assertNotIn("Tables without notes", text)
+        self.assertTrue(text.endswith("- Is a prospect an account the goal wants?\n"))
 
 
 if __name__ == "__main__":
