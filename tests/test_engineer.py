@@ -35,6 +35,8 @@ from tenx.engineer import (
     PLUGIN_DIR,
     PROJECT_DIR,
     PROJECT_NAME,
+    SCOUT,
+    SCOUTS_DIR,
     SOURCE_PROFILES_DIR,
     USAGE_FILE,
     EngineerError,
@@ -46,6 +48,7 @@ from tenx.engineer import (
     run,
 )
 from tenx.gate import FAIL, GateError, load_declaration, passed
+from tenx.scouts import render as render_table_notes
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REFERENCE_MODELS = FIXTURES / "demo_project" / "models"
@@ -57,6 +60,10 @@ DEMO_GOAL = Path(__file__).resolve().parent.parent / "demo" / "goal.md"
 # Started as the engineer, it copies STUB_MODELS into the project. Started as
 # the cross-source agent, it records to STUB_RECORD with ".cross-source"
 # added, and answers with STUB_ANSWER, or with no answer if that is empty.
+# Started as a scout, it records to STUB_RECORD with ".scout." and its folder's
+# name added, waits a second so that scouts started together overlap, and
+# answers with its table's entry in STUB_SCOUT_ANSWERS: no answer if there is
+# none, and no report at all if the entry is "crash".
 STUB = """
 import json, os, shutil, sys, time
 from pathlib import Path
@@ -64,6 +71,31 @@ from pathlib import Path
 here = Path.cwd()
 agent = sys.argv[sys.argv.index("--agent") + 1]
 record = os.environ["STUB_RECORD"]
+if agent == "tenx:scout":
+    started = time.time()
+    time.sleep(1)
+    Path(f"{record}.scout.{here.name}").write_text(json.dumps({
+        "argv": sys.argv[1:],
+        "cwd": str(here),
+        "files": sorted(str(path.relative_to(here)) for path in here.rglob("*")),
+        "started": started,
+        "ended": time.time(),
+    }))
+    answer = json.loads(os.environ.get("STUB_SCOUT_ANSWERS") or "{}").get(here.name)
+    if answer == "crash":
+        sys.exit(1)
+    report = {
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 5,
+        "duration_ms": 20000, "duration_api_ms": 19000, "total_cost_usd": 0.003,
+        "modelUsage": {"claude-haiku-5-5": {
+            "inputTokens": 10, "cacheCreationInputTokens": 3000,
+            "cacheReadInputTokens": 9000, "outputTokens": 800, "costBasis": "list"}},
+        "permission_denials": [],
+    }
+    if answer is not None:
+        report["structured_output"] = answer
+    print(json.dumps(report))
+    sys.exit(0)
 if agent == "tenx:cross-source":
     Path(record + ".cross-source").write_text(json.dumps({
         "argv": sys.argv[1:],
@@ -133,6 +165,36 @@ ANSWER = {
         }
     ],
     "cautions": ["Check that no two accounts share a domain."],
+}
+
+# Scout answers that name real columns of their demo tables.
+CUSTOMERS_NOTES = {
+    "findings": [
+        {
+            "columns": ["livemode"],
+            "issue": "Test-mode customers.",
+            "evidence": "PROFILE.txt: livemode false.",
+            "handling": "Leave them out.",
+        }
+    ],
+    "questions": [],
+}
+EVENTS_NOTES = {
+    "findings": [
+        {
+            "columns": [],
+            "issue": "Exact duplicate rows.",
+            "evidence": "PROFILE.txt.",
+            "handling": "Keep one copy.",
+        },
+        {
+            "columns": ["user_email"],
+            "issue": "Placeholders.",
+            "evidence": "PROFILE.txt.",
+            "handling": "Treat them as missing.",
+        },
+    ],
+    "questions": ["Are later timestamps real?"],
 }
 
 GOAL = "Build stg_shop__orders: one row per order, keyed on order_id.\n"
@@ -390,6 +452,7 @@ class RunTest(unittest.TestCase):
         mode: str = "success",
         answer: dict | None = None,
         pass_mode: str = "success",
+        scout_answers: dict | None = None,
     ):
         environment = {
             "STUB_RECORD": str(self.record),
@@ -397,6 +460,7 @@ class RunTest(unittest.TestCase):
             "STUB_MODE": mode,
             "STUB_ANSWER": json.dumps(answer) if answer is not None else "",
             "STUB_PASS_MODE": pass_mode,
+            "STUB_SCOUT_ANSWERS": json.dumps(scout_answers or {}),
             "DBT_PROFILES_DIR": str(self.root / "elsewhere"),
             "PATH": f"{self.claude.parent}{os.pathsep}{os.environ['PATH']}",
         }
@@ -449,6 +513,8 @@ class RunTest(unittest.TestCase):
         # Without --cross-source only the engineer runs.
         self.assertFalse((self.out / CROSS_SOURCE_DIR).exists())
         self.assertFalse(Path(f"{self.record}.cross-source").exists())
+        self.assertFalse((self.out / SCOUTS_DIR).exists())
+        self.assertEqual(list(self.root.glob("record.json.scout.*")), [])
 
         # The stand-in reported 7 turns, 1 refused call, 41.3 s and US$0.0812.
         self.assertTrue(
@@ -549,6 +615,209 @@ class RunTest(unittest.TestCase):
         self.assertEqual(
             [(r["role"], r["turns"]) for r in ledger["roles"]],
             [("cross-source", 9), ("engineer", 7)],
+        )
+
+    def run_with_scouts(self, scout_answers: dict, *flags: str) -> str:
+        with (
+            self.stub(REFERENCE_MODELS, answer=ANSWER, scout_answers=scout_answers),
+            redirect_stdout(io.StringIO()) as printed,
+        ):
+            code = main(
+                [
+                    "--raw",
+                    str(self.raw),
+                    "--goal",
+                    str(DEMO_GOAL),
+                    "--checks",
+                    str(DECLARATION),
+                    "--out",
+                    str(self.out),
+                    "--scouts",
+                    *flags,
+                ]
+            )
+        self.assertEqual(code, 0, printed.getvalue())
+        return printed.getvalue()
+
+    def scout_record(self, table: str) -> dict:
+        return json.loads(Path(f"{self.record}.scout.{table}").read_text(encoding="utf-8"))
+
+    def test_scout_notes_reach_the_engineer(self):
+        crm = {
+            "findings": [
+                {
+                    "columns": ["account_id", "billing_email"],
+                    "issue": "Leading zeros and padded addresses.",
+                    "evidence": "PROFILE.txt and SAMPLE.jsonl.",
+                    "handling": "Keep the ID as text; trim the address.",
+                }
+            ],
+            "questions": ["Are prospects accounts?", "Is the date day first?"],
+        }
+        empty = {"findings": [], "questions": []}
+        report = self.run_with_scouts(
+            {
+                "billing.customers": CUSTOMERS_NOTES,
+                "billing.invoices": empty,
+                "crm.accounts": crm,
+                "events.events": EVENTS_NOTES,
+            }
+        )
+        self.assertTrue(
+            report.startswith(
+                "scout billing.customers: success after 5 turns (exit 0); "
+                "1 finding, 0 questions\n"
+                "scout billing.invoices: success after 5 turns (exit 0); "
+                "0 findings, 0 questions\n"
+                "scout crm.accounts: success after 5 turns (exit 0); "
+                "1 finding, 2 questions\n"
+                "scout events.events: success after 5 turns (exit 0); "
+                "2 findings, 1 question\n"
+                "agent: success after 7 turns (exit 0)\n"
+            ),
+            report,
+        )
+        self.assertIn("gate: PASS", report)
+
+        plugin = (self.out / PLUGIN_COPY_DIR).resolve()
+        tables = ["billing.customers", "billing.invoices", "crm.accounts", "events.events"]
+        records = {table: self.scout_record(table) for table in tables}
+        for table in tables:
+            with self.subTest(table):
+                record = records[table]
+                folder = (self.out / SCOUTS_DIR / table).resolve()
+                self.assertEqual(Path(record["cwd"]), folder)
+                self.assertEqual(record["argv"], agent_command("claude", plugin, SCOUT)[1:])
+                argv = record["argv"]
+                self.assertEqual(argv[argv.index("--agent") + 1], "tenx:scout")
+                self.assertEqual(argv[argv.index("--max-turns") + 1], "8")
+                self.assertNotIn("--allowedTools", record["argv"])
+                self.assertIn("--json-schema", record["argv"])
+                self.assertEqual(record["files"], [GOAL_FILE, "PROFILE.txt", "SAMPLE.jsonl"])
+                reported = json.loads(
+                    (self.out / SCOUTS_DIR / f"{table}.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(reported["num_turns"], 5)
+        # Up to four scouts run at once, so all four overlap.
+        self.assertLess(
+            max(record["started"] for record in records.values()),
+            min(record["ended"] for record in records.values()),
+        )
+
+        engineer = self.recorded()
+        self.assertIn("TABLE_NOTES.md", engineer["files"])
+        self.assertNotIn("JOINS.md", engineer["files"])
+        self.assertEqual(
+            (self.out / PROJECT_DIR / "TABLE_NOTES.md").read_text(encoding="utf-8"),
+            render_table_notes(
+                [
+                    ("billing.customers", CUSTOMERS_NOTES),
+                    ("billing.invoices", empty),
+                    ("crm.accounts", crm),
+                    ("events.events", EVENTS_NOTES),
+                ]
+            ),
+        )
+
+        # 4 x 5 + 7 = 27 turns, 0 + 1 refused, 4 x 20.0 + 41.3 = 121.3 s and
+        # 4 x 0.0030 + 0.0812 = 0.0932 US$.
+        self.assertTrue(
+            report.endswith(
+                "role                     outcome    turns  refused     time  cost (US$)\n"
+                "scout billing.customers  success        5        0   20.0 s      0.0030\n"
+                "scout billing.invoices   success        5        0   20.0 s      0.0030\n"
+                "scout crm.accounts       success        5        0   20.0 s      0.0030\n"
+                "scout events.events      success        5        0   20.0 s      0.0030\n"
+                "engineer                 success        7        1   41.3 s      0.0812\n"
+                "run                      gate PASS     27        1  121.3 s      0.0932\n"
+                "\n"
+                "role                     model              input  cache write  cache read  output\n"
+                "scout billing.customers  claude-haiku-5-5      10        3,000       9,000     800\n"
+                "scout billing.invoices   claude-haiku-5-5      10        3,000       9,000     800\n"
+                "scout crm.accounts       claude-haiku-5-5      10        3,000       9,000     800\n"
+                "scout events.events      claude-haiku-5-5      10        3,000       9,000     800\n"
+                "engineer                 claude-sonnet-5-5     20       12,000      50,000   2,500\n"
+            ),
+            report,
+        )
+        ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(
+            [r["role"] for r in ledger["roles"]],
+            [f"scout {table}" for table in tables] + ["engineer"],
+        )
+
+    def test_scout_answers_that_fail_their_check_are_left_out(self):
+        wrong = json.loads(json.dumps(CUSTOMERS_NOTES))
+        wrong["findings"][0]["columns"] = ["email", "status"]
+        report = self.run_with_scouts(
+            {"billing.invoices": "crash", "crm.accounts": wrong, "events.events": EVENTS_NOTES}
+        )
+        self.assertTrue(
+            report.startswith(
+                "scout billing.customers: success after 5 turns (exit 0); no notes for the "
+                "engineer: the scout ended success without an answer\n"
+                "scout billing.invoices: exited 1 without a report; no notes for the engineer: "
+                "the scout gave no report\n"
+                "scout crm.accounts: success after 5 turns (exit 0); no notes for the engineer: "
+                "finding 1 names 'email', which is not a column of the table\n"
+                "scout events.events: success after 5 turns (exit 0); 2 findings, 1 question\n"
+            ),
+            report,
+        )
+        self.assertEqual(
+            (self.out / PROJECT_DIR / "TABLE_NOTES.md").read_text(encoding="utf-8"),
+            render_table_notes(
+                [
+                    ("billing.customers", None),
+                    ("billing.invoices", None),
+                    ("crm.accounts", None),
+                    ("events.events", EVENTS_NOTES),
+                ]
+            ),
+        )
+        # The run row is not added up when a role reported nothing.
+        self.assertIn(
+            "scout billing.invoices   no report      -        -       -           -\n", report
+        )
+        self.assertIn(
+            "run                      gate PASS      -        -       -           -\n", report
+        )
+
+    def test_no_notes_file_when_no_scout_answer_passes(self):
+        report = self.run_with_scouts({"events.events": "crash"})
+        self.assertIn("scout events.events: exited 1 without a report", report)
+        self.assertNotIn("TABLE_NOTES.md", self.recorded()["files"])
+        self.assertFalse((self.out / PROJECT_DIR / "TABLE_NOTES.md").exists())
+
+    def test_scouts_run_before_the_cross_source_agent(self):
+        report = self.run_with_scouts({"events.events": EVENTS_NOTES}, "--cross-source")
+        self.assertIn(
+            "scout events.events: success after 5 turns (exit 0); 2 findings, 1 question\n"
+            "cross-source: success after 9 turns (exit 0); JOINS.md: 1 join, 1 caution\n"
+            "agent: success after 7 turns (exit 0)\n",
+            report,
+        )
+        engineer = self.recorded()
+        self.assertIn("TABLE_NOTES.md", engineer["files"])
+        self.assertIn("JOINS.md", engineer["files"])
+        # The cross-source agent is not given the scouts' notes.
+        passed_to = json.loads(Path(f"{self.record}.cross-source").read_text(encoding="utf-8"))
+        self.assertNotIn("TABLE_NOTES.md", passed_to["files"])
+        self.assertLess(
+            self.scout_record("events.events")["ended"],
+            (self.out / CROSS_SOURCE_FILE).stat().st_mtime,
+        )
+        ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(
+            [r["role"] for r in ledger["roles"]],
+            [
+                "scout billing.customers",
+                "scout billing.invoices",
+                "scout crm.accounts",
+                "scout events.events",
+                "cross-source",
+                "engineer",
+            ],
         )
 
     def test_an_answer_naming_an_unknown_column_is_not_passed_on(self):

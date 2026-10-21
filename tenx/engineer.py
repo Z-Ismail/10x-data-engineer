@@ -14,6 +14,9 @@ be read or edited by the agent.
             dbt_project.yml     reads the raw files from the variable raw_dir
             profiles.yml        builds into dev.duckdb inside the folder
             models/             empty; the agent writes the models here
+        scouts/                 with --scouts: one folder per raw table for its scout
+            <table>/            GOAL.md, PROFILE.txt and SAMPLE.jsonl
+            <table>.json        what Claude Code reported for that scout
         cross_source/           with --cross-source: the cross-source agent's folder
             GOAL.md
             source_profiles/    the profiles, with overlap.txt and overlap.json
@@ -35,6 +38,12 @@ the profiles and the overlap report in a folder of its own, changes nothing,
 and answers how the tables the goal needs join. Its answer is checked, and
 written as JOINS.md in the project folder for the engineer. An answer that
 fails the check is not passed on; the engineer then works without it.
+
+With --scouts, a scout runs for each raw table first, several at a time. Each
+reads the goal, its table's profile and a sample of the table's rows in a
+folder of its own, changes nothing, and answers what the engineer must
+handle in that table. The answers that pass their check are written
+together as TABLE_NOTES.md in the project folder.
 """
 
 from __future__ import annotations
@@ -45,7 +54,8 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from tenx.cross_source import NOTES_FILE, SCHEMA, NotesError, notes_from_report
@@ -56,6 +66,11 @@ from tenx.ledger import render as render_usage
 from tenx.overlap import overlap_folder, write_report
 from tenx.profile import ProfileError, profile_folder
 from tenx.sample import sample
+from tenx.scouts import NOTES_FILE as TABLE_NOTES_FILE
+from tenx.scouts import SCHEMA as SCOUT_SCHEMA
+from tenx.scouts import ScoutError
+from tenx.scouts import notes_from_report as scout_notes_from_report
+from tenx.scouts import render as render_table_notes
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 MAX_BUDGET_USD = 5
@@ -67,8 +82,10 @@ PLUGIN_COPY_DIR = "plugin"
 AGENT_FILE = "agent.json"
 CROSS_SOURCE_DIR = "cross_source"
 CROSS_SOURCE_FILE = "cross_source.json"
+SCOUTS_DIR = "scouts"
 PROFILE_FILE = "PROFILE.txt"
 SAMPLE_FILE = "SAMPLE.jsonl"
+PARALLEL_SCOUTS = 4
 USAGE_FILE = "usage.json"
 GATE_DIR = "gate"
 PROJECT_NAME = "tenx_project"
@@ -109,6 +126,17 @@ CROSS_SOURCE = Role(
     allowed_tools=(),
     max_turns=20,
     json_schema=SCHEMA,
+)
+
+
+# One scout per raw table; the runner names each after its table.
+SCOUT = Role(
+    name="scout",
+    agent="tenx:scout",
+    prompt="Note what the engineer must handle in this table.",
+    allowed_tools=(),
+    max_turns=8,
+    json_schema=SCOUT_SCHEMA,
 )
 
 
@@ -293,10 +321,35 @@ class Notes:
 
 
 @dataclass(frozen=True)
+class ScoutNotes:
+    """What became of one scout's answer."""
+
+    table: str
+    agent: AgentRun
+    findings: int | None = None
+    questions: int | None = None
+    problem: str = ""
+
+    def describe(self) -> str:
+        if self.findings is None:
+            return f"{self.agent.describe()}; no notes for the engineer: {self.problem}"
+        return (
+            f"{self.agent.describe()}; {self.findings} "
+            f"finding{'s' if self.findings != 1 else ''}, {self.questions} "
+            f"question{'s' if self.questions != 1 else ''}"
+        )
+
+
+@dataclass(frozen=True)
 class Run:
     engineer: AgentRun
     results: list[Result]
     notes: Notes | None = None
+    scouts: tuple[ScoutNotes, ...] = ()
+
+
+def scout_role(table: str) -> Role:
+    return replace(SCOUT, name=f"scout {table}")
 
 
 def _role_usage(role: Role, agent: AgentRun):
@@ -306,7 +359,7 @@ def _role_usage(role: Role, agent: AgentRun):
 
 def usage(run: Run) -> Ledger:
     """The run's usage by role, in the order they ran, with the gate's verdict."""
-    roles = []
+    roles = [_role_usage(scout_role(scout.table), scout.agent) for scout in run.scouts]
     if run.notes is not None:
         roles.append(_role_usage(CROSS_SOURCE, run.notes.agent))
     roles.append(_role_usage(ENGINEER, run.engineer))
@@ -355,6 +408,44 @@ def prepare_scout(folder: Path, project: Path, raw: Path, profile: dict) -> None
     (folder / SAMPLE_FILE).write_text(sample(raw / profile["file"], table), encoding="utf-8")
 
 
+def run_scouts(
+    out: Path,
+    project: Path,
+    raw: Path,
+    profiles: list[dict],
+    plugin: Path,
+    claude: str,
+    timeout: float,
+) -> tuple[ScoutNotes, ...]:
+    """Run a scout for every raw table, several at a time, and write their notes."""
+    folders = out / SCOUTS_DIR
+    for profile in profiles:
+        prepare_scout(folders / profile["table"], project, raw, profile)
+    command = agent_command(claude, plugin, SCOUT)
+
+    def scout(profile: dict) -> AgentRun:
+        table = profile["table"]
+        report = folders / f"{table}.json"
+        return run_agent((folders / table).resolve(), command, report, timeout)
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_SCOUTS) as pool:
+        agents = list(pool.map(scout, profiles))
+    outcomes, tables = [], []
+    for profile, agent in zip(profiles, agents):
+        table = profile["table"]
+        try:
+            notes = scout_notes_from_report(agent.report, profile)
+        except ScoutError as error:
+            outcomes.append(ScoutNotes(table, agent, problem=str(error)))
+            tables.append((table, None))
+            continue
+        outcomes.append(ScoutNotes(table, agent, len(notes["findings"]), len(notes["questions"])))
+        tables.append((table, notes))
+    if any(notes is not None for _, notes in tables):
+        (project / TABLE_NOTES_FILE).write_text(render_table_notes(tables), encoding="utf-8")
+    return tuple(outcomes)
+
+
 def run(
     raw: Path,
     goal: Path,
@@ -363,11 +454,14 @@ def run(
     claude: str = "claude",
     timeout: float = TIMEOUT_MINUTES * 60,
     cross_source: bool = False,
+    scouts: bool = False,
 ) -> Run:
     """Prepare the project, let the agent build it, then run the gate on it.
 
-    With cross_source, the cross-source agent runs first and its checked
-    answer is put in the project as JOINS.md.
+    With scouts, a scout runs for each raw table first, and the checked
+    answers are put in the project as TABLE_NOTES.md. With cross_source, the
+    cross-source agent runs next and its checked answer is put in the
+    project as JOINS.md.
     """
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise EngineerError(
@@ -380,13 +474,16 @@ def run(
     project = out / PROJECT_DIR
     profiles = prepare_project(project, raw, goal)
     plugin = stage_plugin(out.resolve() / PLUGIN_COPY_DIR)
+    scout_notes: tuple[ScoutNotes, ...] = ()
+    if scouts:
+        scout_notes = run_scouts(out, project, Path(raw), profiles, plugin, claude, timeout)
     notes = None
     if cross_source:
         notes = run_cross_source(out, project, Path(raw), profiles, plugin, claude, timeout)
     command = agent_command(claude, plugin)
     agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout)
     results = run_gate(project, raw, checks, out / GATE_DIR)
-    outcome = Run(agent, results, notes)
+    outcome = Run(agent, results, notes, scout_notes)
     usage(outcome).write(out / USAGE_FILE)
     return outcome
 
@@ -406,12 +503,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run the cross-source agent first and give its notes to the engineer",
     )
+    parser.add_argument(
+        "--scouts",
+        action="store_true",
+        help="run a scout for each raw table first and give their notes to the engineer",
+    )
     args = parser.parse_args(argv)
     try:
-        outcome = run(args.raw, args.goal, args.checks, args.out, cross_source=args.cross_source)
+        outcome = run(
+            args.raw,
+            args.goal,
+            args.checks,
+            args.out,
+            cross_source=args.cross_source,
+            scouts=args.scouts,
+        )
     except (EngineerError, GateError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    for scout in outcome.scouts:
+        print(f"scout {scout.table}: {scout.describe()}")
     if outcome.notes is not None:
         print(f"cross-source: {outcome.notes.describe()}")
     print(f"agent: {outcome.engineer.describe()}")
