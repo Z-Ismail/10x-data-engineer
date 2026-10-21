@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test demo-data profile overlap engineer engineer-cross-source clean
+.PHONY: install test demo-data profile overlap engineer engineer-cross-source engineer-scouts clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline]"
@@ -28,6 +28,12 @@ engineer-cross-source: demo-data
 	rm -rf runs/demo-cross-source
 	$(PYTHON) -m tenx.engineer --raw demo/data --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/demo-cross-source --cross-source
+
+# The same run with a scout for each raw table first. Needs Claude Code, signed in.
+engineer-scouts: demo-data
+	rm -rf runs/demo-scouts
+	$(PYTHON) -m tenx.engineer --raw demo/data --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/demo-scouts --scouts
 
 clean:
 	rm -rf demo/data demo/answers profiles runs
