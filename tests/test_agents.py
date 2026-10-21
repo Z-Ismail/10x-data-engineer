@@ -109,5 +109,38 @@ class CrossSourceAgentTest(unittest.TestCase):
                 self.assertIn(f"`{field}`", self.body)
 
 
+class ScoutAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.fields, self.body = read_agent(AGENTS / "scout.md")
+
+    def test_sets_only_fields_a_plugin_agent_may_set(self):
+        self.assertLessEqual(set(self.fields), SUPPORTED)
+        self.assertEqual(self.fields["name"], "scout")
+        self.assertTrue(self.fields["description"].strip())
+
+    def test_pins_the_model(self):
+        self.assertEqual(self.fields["model"], "haiku")
+
+    def test_can_only_read_files_and_give_its_answer(self):
+        tools = {tool.strip() for tool in self.fields["tools"].split(",")}
+        self.assertEqual(tools, {"Read", "Glob", "Grep", "StructuredOutput"})
+
+    def test_starts_without_claude_md_files(self):
+        self.assertIs(self.fields["omitClaudeMd"], True)
+
+    def test_reads_the_files_its_folder_holds(self):
+        for name in ("GOAL.md", "PROFILE.txt", "SAMPLE.jsonl"):
+            with self.subTest(name):
+                self.assertIn(f"`{name}`", self.body)
+
+    def test_asks_for_every_field_of_the_answer(self):
+        for field in ("findings", "columns", "issue", "evidence", "handling", "questions"):
+            with self.subTest(field):
+                self.assertIn(f"`{field}`", self.body)
+
+    def test_leaves_joins_to_the_cross_source_agent(self):
+        self.assertIn("do not advise how to join it to other tables", self.body)
+
+
 if __name__ == "__main__":
     unittest.main()
