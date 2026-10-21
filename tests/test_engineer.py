@@ -42,6 +42,7 @@ from tenx.engineer import (
     agent_command,
     main,
     prepare_project,
+    prepare_scout,
     run,
 )
 from tenx.gate import FAIL, GateError, load_declaration, passed
@@ -241,6 +242,51 @@ class PrepareProjectTest(unittest.TestCase):
         empty.mkdir()
         with self.assertRaisesRegex(EngineerError, "no CSV, JSON or Parquet"):
             prepare_project(self.project, empty, self.goal)
+
+
+class PrepareScoutTest(unittest.TestCase):
+    def test_each_scout_gets_the_goal_its_profile_and_rows_of_its_table(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        raw = root / "data"
+        generate(11, 20, raw, root / "answers")
+        project = root / "project"
+        profiles = prepare_project(project, raw, DEMO_GOAL)
+        files = {
+            "billing.customers": "billing/customers.csv",
+            "billing.invoices": "billing/invoices.csv",
+            "crm.accounts": "crm/accounts.csv",
+            "events.events": "events/events.jsonl",
+        }
+        self.assertEqual([profile["table"] for profile in profiles], list(files))
+        for profile in profiles:
+            table = profile["table"]
+            with self.subTest(table):
+                folder = root / "scouts" / table
+                prepare_scout(folder, project, raw, profile)
+                self.assertEqual(
+                    sorted(path.name for path in folder.iterdir()),
+                    [GOAL_FILE, "PROFILE.txt", "SAMPLE.jsonl"],
+                )
+                self.assertEqual((folder / GOAL_FILE).read_bytes(), DEMO_GOAL.read_bytes())
+                self.assertEqual(
+                    (folder / "PROFILE.txt").read_bytes(),
+                    (project / SOURCE_PROFILES_DIR / f"{table}.txt").read_bytes(),
+                )
+                # Every sampled row is a row of the raw file, as written, and
+                # a file of fewer than 20 rows is given whole.
+                lines = (folder / "SAMPLE.jsonl").read_text(encoding="utf-8").splitlines()
+                raw_text = (raw / files[table]).read_text(encoding="utf-8")
+                if files[table].endswith(".jsonl"):
+                    raw_rows = raw_text.splitlines()
+                    sampled = lines
+                else:
+                    raw_rows = list(csv.DictReader(io.StringIO(raw_text)))
+                    sampled = [json.loads(line) for line in lines]
+                self.assertEqual(len(sampled), min(20, len(raw_rows)))
+                for row in sampled:
+                    self.assertIn(row, raw_rows)
 
 
 class DemoGoalTest(unittest.TestCase):

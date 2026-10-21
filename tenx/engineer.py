@@ -55,6 +55,7 @@ from tenx.ledger import Ledger, role_usage
 from tenx.ledger import render as render_usage
 from tenx.overlap import overlap_folder, write_report
 from tenx.profile import ProfileError, profile_folder
+from tenx.sample import sample
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 MAX_BUDGET_USD = 5
@@ -66,6 +67,8 @@ PLUGIN_COPY_DIR = "plugin"
 AGENT_FILE = "agent.json"
 CROSS_SOURCE_DIR = "cross_source"
 CROSS_SOURCE_FILE = "cross_source.json"
+PROFILE_FILE = "PROFILE.txt"
+SAMPLE_FILE = "SAMPLE.jsonl"
 USAGE_FILE = "usage.json"
 GATE_DIR = "gate"
 PROJECT_NAME = "tenx_project"
@@ -341,6 +344,15 @@ def run_cross_source(
         return Notes(agent, problem=str(error))
     (project / NOTES_FILE).write_text(render_notes(notes), encoding="utf-8")
     return Notes(agent, len(notes["joins"]), len(notes["cautions"]))
+
+
+def prepare_scout(folder: Path, project: Path, raw: Path, profile: dict) -> None:
+    """Give one scout the goal, its table's profile and a sample of its rows."""
+    folder.mkdir(parents=True)
+    shutil.copyfile(project / GOAL_FILE, folder / GOAL_FILE)
+    table = profile["table"]
+    shutil.copyfile(project / SOURCE_PROFILES_DIR / f"{table}.txt", folder / PROFILE_FILE)
+    (folder / SAMPLE_FILE).write_text(sample(raw / profile["file"], table), encoding="utf-8")
 
 
 def run(
