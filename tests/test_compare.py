@@ -5,10 +5,24 @@ densities, or by numerical integration written here, not by the code under
 test.
 """
 
+import json
 import math
+import tempfile
 import unittest
+from pathlib import Path
 
-from tenx.compare import ARMS, Tally, Trial, interval, plan, prob_better
+from tenx.compare import (
+    ARMS,
+    PLAN_FILE,
+    Tally,
+    Trial,
+    interval,
+    plan,
+    prob_better,
+    read_plan,
+    summarise,
+    write_plan,
+)
 
 
 def beta_pdf(x: float, a: int, b: int) -> float:
@@ -173,6 +187,163 @@ class PlanTest(unittest.TestCase):
                 self.assertRaises(ValueError),
             ):
                 plan(datasets, arms, trials)
+
+
+def write_usage(out: Path, folder: str, gate: str, costs: list) -> None:
+    """A usage.json as the engineer runner writes it, one role per cost."""
+    roles = [
+        {
+            "role": f"role {i}",
+            "outcome": "success",
+            "turns": 5,
+            "cost_usd": cost,
+            "cost_known": cost is not None and cost != "unknown",
+        }
+        for i, cost in enumerate(costs)
+    ]
+    for role in roles:
+        if role["cost_usd"] == "unknown":
+            role["cost_usd"] = 0.01
+    path = out / "runs" / folder
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "usage.json").write_text(json.dumps({"gate": gate, "roles": roles}), encoding="utf-8")
+
+
+class SummaryTest(unittest.TestCase):
+    ARMS = ("alone", "scouts", "cross-source", "both")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.out = Path(tmp.name)
+
+    def comparison(self) -> None:
+        """Two datasets, two trials, with results chosen by hand.
+
+        alone         a: PASS FAIL   b: FAIL FAIL     1 of 4, US$0.10 a run
+        scouts        a: PASS PASS   b: PASS PASS     4 of 4, US$0.12 a run
+        cross-source  a: FAIL FAIL   b: FAIL (none)   0 of 3, US$0.15 a run
+        both          a: PASS PASS   b: PASS FAIL     3 of 4, one cost unknown
+        """
+        write_plan(self.out, ["a", "b"], self.ARMS, trials=2, seed=0)
+        results = {
+            "alone": ["PASS", "FAIL", "FAIL", "FAIL"],
+            "scouts": ["PASS", "PASS", "PASS", "PASS"],
+            "cross-source": ["FAIL", "FAIL", "FAIL", None],
+            "both": ["PASS", "PASS", "PASS", "FAIL"],
+        }
+        costs = {
+            "alone": [0.1],
+            "scouts": [0.02, 0.1],
+            "cross-source": [0.05, 0.1],
+            "both": [0.02, 0.05, 0.1],
+        }
+        folders = ["a/{}/1", "a/{}/2", "b/{}/1", "b/{}/2"]
+        for arm, gates in results.items():
+            for folder, gate in zip(folders, gates):
+                if gate is None:
+                    continue
+                arm_costs = costs[arm]
+                if arm == "both" and folder == "b/{}/2":
+                    arm_costs = [0.02, "unknown", 0.1]
+                write_usage(self.out, folder.format(arm), gate, arm_costs)
+
+    def test_counts_passes_by_arm_and_dataset(self):
+        self.comparison()
+        summary = summarise(self.out)
+        arms = {arm.arm: arm for arm in summary.arms}
+        self.assertEqual([arm.arm for arm in summary.arms], list(self.ARMS))
+        self.assertEqual(arms["alone"].tally, Tally(1, 3))
+        self.assertEqual(arms["scouts"].tally, Tally(4, 0))
+        self.assertEqual(arms["cross-source"].tally, Tally(0, 3))
+        self.assertEqual(arms["both"].tally, Tally(3, 1))
+        self.assertEqual(summary.by_dataset["a"]["alone"], Tally(1, 1))
+        self.assertEqual(summary.by_dataset["b"]["cross-source"], Tally(0, 1))
+        self.assertEqual([t.folder for t in summary.without_verdict], ["b/cross-source/2"])
+        self.assertEqual(arms["cross-source"].no_verdict, 1)
+        self.assertEqual(summary.planned, 16)
+
+    def test_compares_each_arm_with_the_engineer_alone(self):
+        self.comparison()
+        arms = {arm.arm: arm for arm in summarise(self.out).arms}
+        # Beta(5, 1) against Beta(2, 4): 1 - 5 B(5, 6) - 25 B(6, 5), and
+        # B(5, 6) = B(6, 5) = 4! 5! / 10! = 1/1260, so 1 - 30/1260 = 41/42.
+        self.assertAlmostEqual(arms["scouts"].better, 41 / 42, places=10)
+        self.assertAlmostEqual(arms["scouts"].worse, 1 / 42, places=10)
+        # 41/42 is about 0.976, short of 0.98: four passes in four is not
+        # enough to say the arm helps.
+        self.assertEqual(arms["scouts"].verdict, "not shown")
+        self.assertIsNone(arms["alone"].better)
+        self.assertEqual(arms["alone"].verdict, "baseline")
+        self.assertAlmostEqual(
+            arms["both"].better, integrated_prob_better(Tally(1, 3), Tally(3, 1)), places=5
+        )
+
+    def test_cost_per_run_and_per_pass(self):
+        self.comparison()
+        arms = {arm.arm: arm for arm in summarise(self.out).arms}
+        self.assertAlmostEqual(arms["alone"].cost_usd, 0.4)
+        self.assertAlmostEqual(arms["alone"].cost_per_pass, 0.4)
+        self.assertAlmostEqual(arms["scouts"].cost_usd, 0.48)
+        self.assertAlmostEqual(arms["scouts"].cost_per_pass, 0.12)
+        self.assertAlmostEqual(arms["cross-source"].cost_usd, 0.45)
+        self.assertIsNone(arms["cross-source"].cost_per_pass)
+        self.assertIsNone(arms["both"].cost_usd)
+        self.assertIsNone(arms["both"].cost_per_pass)
+
+    def runs(self, arms: tuple[str, ...], gates: dict[str, str]) -> dict:
+        datasets = [f"d{i}" for i in range(6)]
+        write_plan(self.out, datasets, arms, trials=1, seed=0)
+        for arm, gate in gates.items():
+            for dataset in datasets:
+                write_usage(self.out, f"{dataset}/{arm}/1", gate, [0.1])
+        return {arm.arm: arm for arm in summarise(self.out).arms}
+
+    def test_six_of_six_against_none_helps(self):
+        # Beta(7, 1) against Beta(1, 7): 1 - 7 B(7, 8) = 1 - 7 * 6! 7! / 14!.
+        expected = 1 - 7 * math.factorial(6) * math.factorial(7) / math.factorial(14)
+        arms = self.runs(("alone", "scouts", "both"), {"alone": "FAIL", "scouts": "PASS"})
+        self.assertAlmostEqual(arms["scouts"].better, expected, places=10)
+        self.assertEqual(arms["scouts"].verdict, "helps")
+        self.assertEqual(arms["both"].verdict, "no runs")
+
+    def test_six_of_six_against_none_the_other_way_hurts(self):
+        arms = self.runs(
+            ("alone", "scouts", "both"), {"alone": "PASS", "scouts": "FAIL", "both": "PASS"}
+        )
+        self.assertEqual(arms["scouts"].verdict, "hurts")
+        self.assertEqual(arms["both"].verdict, "not shown")
+        self.assertAlmostEqual(arms["both"].better, 0.5, places=10)
+
+    def test_a_run_without_a_usable_verdict_is_not_counted(self):
+        write_plan(self.out, ["d"], ("alone", "scouts"), trials=1, seed=0)
+        folder = self.out / "runs" / "d" / "scouts" / "1"
+        folder.mkdir(parents=True)
+        (folder / "usage.json").write_text('{"gate": "maybe", "roles": []}', encoding="utf-8")
+        (self.out / "runs" / "d" / "alone" / "1").mkdir(parents=True)
+        (self.out / "runs" / "d" / "alone" / "1" / "usage.json").write_text("{", encoding="utf-8")
+        summary = summarise(self.out)
+        self.assertEqual(
+            sorted(t.folder for t in summary.without_verdict), ["d/alone/1", "d/scouts/1"]
+        )
+        self.assertEqual([arm.verdict for arm in summary.arms], ["baseline", "no runs"])
+
+    def test_the_plan_is_kept_and_read_back(self):
+        order = write_plan(self.out, ["a", "b"], self.ARMS, trials=3, seed=9)
+        document, read = read_plan(self.out)
+        self.assertEqual(read, order)
+        self.assertEqual(order, plan(["a", "b"], self.ARMS, 3, 9))
+        self.assertEqual(
+            (document["datasets"], document["arms"], document["trials"], document["seed"]),
+            (["a", "b"], list(self.ARMS), 3, 9),
+        )
+
+    def test_refuses_a_folder_without_a_plan(self):
+        with self.assertRaises(ValueError):
+            summarise(self.out)
+        (self.out / PLAN_FILE).write_text("[]", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            summarise(self.out)
 
 
 if __name__ == "__main__":

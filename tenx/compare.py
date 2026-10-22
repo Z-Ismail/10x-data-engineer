@@ -12,11 +12,13 @@ same figures.
 
 from __future__ import annotations
 
+import json
 import random
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from math import comb, exp, lgamma, log
+from pathlib import Path
 
 # Each arm and how the engineer is run in it: (scouts, cross_source).
 ARMS = {
@@ -26,6 +28,14 @@ ARMS = {
     "both": (True, True),
 }
 BASELINE = "alone"
+# An arm is said to help (or hurt) when the probability that its pass rate
+# is higher (or lower) than the baseline's reaches this. With three arms
+# compared with one baseline, 0.98 keeps the chance of wrongly keeping any
+# of them near 5%.
+DECISION = 0.98
+PLAN_FILE = "plan.json"
+RUNS_DIR = "runs"
+USAGE_FILE = "usage.json"
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
@@ -146,3 +156,185 @@ def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 
             rng.shuffle(block)
             order += [Trial(dataset, arm, trial) for arm in block]
     return order
+
+
+def write_plan(
+    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+) -> list[Trial]:
+    """Plan the runs and keep the plan in out, so the comparison can resume."""
+    order = plan(datasets, arms, trials, seed)
+    document = {
+        "datasets": list(datasets),
+        "arms": list(arms),
+        "trials": trials,
+        "seed": seed,
+        "order": [{"dataset": t.dataset, "arm": t.arm, "trial": t.trial} for t in order],
+    }
+    (Path(out) / PLAN_FILE).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return order
+
+
+def read_plan(out: Path) -> tuple[dict, list[Trial]]:
+    path = Path(out) / PLAN_FILE
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        order = [Trial(t["dataset"], t["arm"], t["trial"]) for t in document["order"]]
+        document["datasets"], document["arms"], document["trials"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ValueError(f"{path} is not a comparison plan: {error}") from error
+    return document, order
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What one finished run left: the gate verdict and what the run cost."""
+
+    trial: Trial
+    gate: str | None
+    cost_usd: float | None = None
+
+
+def _cost(role) -> float | None:
+    cost = role.get("cost_usd") if isinstance(role, dict) else None
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    return cost if role.get("cost_known") is True else None
+
+
+def outcome(out: Path, trial: Trial) -> Outcome:
+    """The run's verdict from its usage.json, or no verdict if it left none.
+
+    The run's cost is known only when every role's cost is.
+    """
+    path = Path(out) / RUNS_DIR / trial.folder / USAGE_FILE
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return Outcome(trial, None)
+    gate = ledger.get("gate") if isinstance(ledger, dict) else None
+    if gate not in ("PASS", "FAIL"):
+        return Outcome(trial, None)
+    roles = ledger.get("roles")
+    costs = [_cost(role) for role in roles] if isinstance(roles, list) else []
+    known = bool(costs) and all(cost is not None for cost in costs)
+    return Outcome(trial, gate, sum(costs) if known else None)
+
+
+@dataclass(frozen=True)
+class ArmSummary:
+    arm: str
+    tally: Tally
+    low: float
+    high: float
+    better: float | None
+    worse: float | None
+    verdict: str
+    cost_usd: float | None
+    cost_per_pass: float | None
+    no_verdict: int
+
+    def to_dict(self) -> dict:
+        return {
+            "arm": self.arm,
+            "runs": self.tally.runs,
+            "passes": self.tally.passes,
+            "pass_rate": self.tally.passes / self.tally.runs if self.tally.runs else None,
+            "interval_95": [self.low, self.high],
+            "prob_better_than_baseline": self.better,
+            "prob_worse_than_baseline": self.worse,
+            "verdict": self.verdict,
+            "cost_usd": self.cost_usd,
+            "cost_per_pass_usd": self.cost_per_pass,
+            "runs_without_verdict": self.no_verdict,
+        }
+
+
+@dataclass(frozen=True)
+class Summary:
+    datasets: list[str]
+    trials: int
+    arms: tuple[ArmSummary, ...]
+    by_dataset: dict[str, dict[str, Tally]]
+    without_verdict: tuple[Trial, ...]
+    planned: int
+
+    def to_dict(self) -> dict:
+        return {
+            "baseline": BASELINE,
+            "decision": DECISION,
+            "datasets": self.datasets,
+            "trials": self.trials,
+            "planned_runs": self.planned,
+            "arms": [arm.to_dict() for arm in self.arms],
+            "by_dataset": {
+                dataset: {arm: [t.passes, t.runs] for arm, t in arms.items()}
+                for dataset, arms in self.by_dataset.items()
+            },
+            "runs_without_verdict": [t.folder for t in self.without_verdict],
+        }
+
+
+def _verdict(arm: str, better: float | None, worse: float | None) -> str:
+    if arm == BASELINE:
+        return "baseline"
+    if better is None or worse is None:
+        return "no runs"
+    if better >= DECISION:
+        return "helps"
+    if worse >= DECISION:
+        return "hurts"
+    return "not shown"
+
+
+def _tally(outcomes: list[Outcome]) -> Tally:
+    return Tally(sum(o.gate == "PASS" for o in outcomes), sum(o.gate == "FAIL" for o in outcomes))
+
+
+def summarise(out: Path) -> Summary:
+    """Every arm's passes, its pass rate and how it compares with the baseline."""
+    document, order = read_plan(out)
+    outcomes = [outcome(out, trial) for trial in order]
+    done = [o for o in outcomes if o.gate is not None]
+    datasets = document["datasets"]
+    arms = document["arms"]
+    base = _tally([o for o in done if o.trial.arm == BASELINE])
+    summaries = []
+    for arm in arms:
+        mine = [o for o in done if o.trial.arm == arm]
+        tally = _tally(mine)
+        better = worse = None
+        if arm != BASELINE and tally.runs and base.runs:
+            better = prob_better(base, tally)
+            worse = prob_better(tally, base)
+        costs = [o.cost_usd for o in mine]
+        cost = sum(costs) if costs and all(c is not None for c in costs) else None
+        low, high = interval(tally)
+        summaries.append(
+            ArmSummary(
+                arm=arm,
+                tally=tally,
+                low=low,
+                high=high,
+                better=better,
+                worse=worse,
+                verdict=_verdict(arm, better, worse),
+                cost_usd=cost,
+                cost_per_pass=cost / tally.passes if cost is not None and tally.passes else None,
+                no_verdict=sum(o.trial.arm == arm and o.gate is None for o in outcomes),
+            )
+        )
+    by_dataset = {
+        dataset: {
+            arm: _tally([o for o in done if o.trial.arm == arm and o.trial.dataset == dataset])
+            for arm in arms
+        }
+        for dataset in datasets
+    }
+    return Summary(
+        datasets=datasets,
+        trials=document["trials"],
+        arms=tuple(summaries),
+        by_dataset=by_dataset,
+        without_verdict=tuple(o.trial for o in outcomes if o.gate is None),
+        planned=len(order),
+    )
