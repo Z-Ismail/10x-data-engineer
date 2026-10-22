@@ -14,12 +14,15 @@ from pathlib import Path
 from tenx.compare import (
     ARMS,
     PLAN_FILE,
+    REPORT_JSON,
+    REPORT_TEXT,
     Tally,
     Trial,
     interval,
     plan,
     prob_better,
     read_plan,
+    report,
     summarise,
     write_plan,
 )
@@ -189,6 +192,18 @@ class PlanTest(unittest.TestCase):
                 plan(datasets, arms, trials)
 
 
+def bisect(cdf, p: float) -> float:
+    low, high = 0.0, 1.0
+    for _ in range(60):
+        middle = (low + high) / 2
+        low, high = (middle, high) if cdf(middle) < p else (low, middle)
+    return (low + high) / 2
+
+
+def percent_interval(cdf) -> str:
+    return f"{100 * bisect(cdf, 0.025):.0f}% to {100 * bisect(cdf, 0.975):.0f}%"
+
+
 def write_usage(out: Path, folder: str, gate: str, costs: list) -> None:
     """A usage.json as the engineer runner writes it, one role per cost."""
     roles = [
@@ -290,6 +305,58 @@ class SummaryTest(unittest.TestCase):
         self.assertIsNone(arms["cross-source"].cost_per_pass)
         self.assertIsNone(arms["both"].cost_usd)
         self.assertIsNone(arms["both"].cost_per_pass)
+
+    def test_report_text(self):
+        self.comparison()
+        text = report(self.out)
+        self.assertEqual((self.out / REPORT_TEXT).read_text(encoding="utf-8"), text)
+        # Intervals from the Beta CDFs written out by hand:
+        # Beta(2, 4): 1 - (1-x)^5 - 5x(1-x)^4; Beta(5, 1): x^5;
+        # Beta(1, 4): 1 - (1-x)^4; Beta(4, 2): x^5 + 5x^4(1-x).
+        alone = percent_interval(lambda x: 1 - (1 - x) ** 5 - 5 * x * (1 - x) ** 4)
+        scouts = percent_interval(lambda x: x**5)
+        cross = percent_interval(lambda x: 1 - (1 - x) ** 4)
+        both = percent_interval(lambda x: x**5 + 5 * x**4 * (1 - x))
+        self.assertEqual(
+            (alone, scouts, cross, both),
+            ("5% to 72%", "48% to 99%", "1% to 60%", "28% to 95%"),
+        )
+        cross_p = integrated_prob_better(Tally(1, 3), Tally(0, 3))
+        both_p = integrated_prob_better(Tally(1, 3), Tally(3, 1))
+        self.assertEqual((f"{cross_p:.3f}", f"{both_p:.3f}"), ("0.278", "0.897"))
+        self.assertEqual(
+            text,
+            "comparison: 2 datasets, 2 trials each, 15 of 16 runs have a gate verdict\n"
+            "an arm helps (or hurts) when the chance that its pass rate is higher "
+            "(or lower) than alone's is at least 0.98\n"
+            "\n"
+            "arm           verdict    runs  passes  rate  95% interval  P(> alone)"
+            "  US$ per run  US$ per pass\n"
+            "alone         baseline      4       1   25%     5% to 72%           -"
+            "       0.1000        0.4000\n"
+            "scouts        not shown     4       4  100%    48% to 99%       0.976"
+            "       0.1200        0.1200\n"
+            "cross-source  not shown     3       0    0%     1% to 60%       0.278"
+            "       0.1500             -\n"
+            "both          not shown     4       3   75%    28% to 95%       0.897"
+            "            -             -\n"
+            "\n"
+            "passes by dataset\n"
+            "\n"
+            "dataset  alone  scouts  cross-source  both\n"
+            "a          1/2     2/2           0/2   2/2\n"
+            "b          0/2     2/2           0/1   1/2\n"
+            "\n"
+            "runs with no gate verdict, not counted:\n"
+            "  b/cross-source/2\n"
+            "\n"
+            "cost is Claude Code's own estimate, not a bill\n",
+        )
+        written = json.loads((self.out / REPORT_JSON).read_text(encoding="utf-8"))
+        self.assertEqual(written["runs_without_verdict"], ["b/cross-source/2"])
+        self.assertEqual(written["by_dataset"]["b"]["cross-source"], [0, 1])
+        self.assertEqual(written["arms"][1]["verdict"], "not shown")
+        self.assertEqual(written["arms"][1]["passes"], 4)
 
     def runs(self, arms: tuple[str, ...], gates: dict[str, str]) -> dict:
         datasets = [f"d{i}" for i in range(6)]

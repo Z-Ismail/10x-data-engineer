@@ -36,6 +36,8 @@ DECISION = 0.98
 PLAN_FILE = "plan.json"
 RUNS_DIR = "runs"
 USAGE_FILE = "usage.json"
+REPORT_TEXT = "comparison.txt"
+REPORT_JSON = "comparison.json"
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
@@ -338,3 +340,89 @@ def summarise(out: Path) -> Summary:
         without_verdict=tuple(o.trial for o in outcomes if o.gate is None),
         planned=len(order),
     )
+
+
+def _percent(value: float) -> str:
+    return f"{100 * value:.0f}%"
+
+
+def _money(value: float | None) -> str:
+    return "-" if value is None else f"{value:.4f}"
+
+
+def render(summary: Summary) -> str:
+    """The comparison as plain text tables."""
+    counted = summary.planned - len(summary.without_verdict)
+    trials = f"{summary.trials} trial{'s' if summary.trials != 1 else ''}"
+    heading = (
+        f"comparison: {len(summary.datasets)} datasets, {trials} each, "
+        f"{counted} of {summary.planned} runs have a gate verdict"
+    )
+    rule = (
+        f"an arm helps (or hurts) when the chance that its pass rate is higher "
+        f"(or lower) than {BASELINE}'s is at least {DECISION}"
+    )
+    lines = [heading, rule, ""]
+    rows = []
+    for arm in summary.arms:
+        tally = arm.tally
+        rows.append(
+            [
+                arm.arm,
+                arm.verdict,
+                str(tally.runs),
+                str(tally.passes),
+                _percent(tally.passes / tally.runs) if tally.runs else "-",
+                f"{_percent(arm.low)} to {_percent(arm.high)}",
+                "-" if arm.better is None else f"{arm.better:.3f}",
+                _money(arm.cost_usd / tally.runs if arm.cost_usd is not None else None),
+                _money(arm.cost_per_pass),
+            ]
+        )
+    header = [
+        "arm",
+        "verdict",
+        "runs",
+        "passes",
+        "rate",
+        "95% interval",
+        f"P(> {BASELINE})",
+        "US$ per run",
+        "US$ per pass",
+    ]
+    lines += _table(header, rows, left=2)
+    lines += ["", "passes by dataset", ""]
+    names = [arm.arm for arm in summary.arms]
+    rows = [
+        [dataset]
+        + [f"{t.passes}/{t.runs}" for t in (summary.by_dataset[dataset][n] for n in names)]
+        for dataset in summary.datasets
+    ]
+    lines += _table(["dataset", *names], rows, left=1)
+    if summary.without_verdict:
+        lines += ["", "runs with no gate verdict, not counted:"]
+        lines += [f"  {trial.folder}" for trial in summary.without_verdict]
+    lines += ["", "cost is Claude Code's own estimate, not a bill"]
+    return "\n".join(lines) + "\n"
+
+
+def _table(header: list[str], rows: list[list[str]], left: int) -> list[str]:
+    widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
+    return [
+        "  ".join(
+            cell.ljust(width) if i < left else cell.rjust(width)
+            for i, (cell, width) in enumerate(zip(row, widths))
+        ).rstrip()
+        for row in [header, *rows]
+    ]
+
+
+def report(out: Path) -> str:
+    """Summarise the comparison in out, and write it there as text and JSON."""
+    summary = summarise(out)
+    text = render(summary)
+    (Path(out) / REPORT_TEXT).write_text(text, encoding="utf-8")
+    (Path(out) / REPORT_JSON).write_text(
+        json.dumps(summary.to_dict(), indent=2) + "\n", encoding="utf-8"
+    )
+    return text
