@@ -33,6 +33,14 @@ Notable changes to this project.
 
 ### Added
 
+- Comparison (`python -m tenx.compare`, `make compare`): runs the engineer
+  alone, with scouts, with the cross-source agent and with both, the same
+  number of times on every dataset, in shuffled blocks, and reports each
+  arm's pass rate with a 95% interval, the chance that it beats the engineer
+  alone, and the estimated cost per run and per passing run. A comparison
+  that stops part way resumes. On the demo data the cross-source agent
+  raised the pass rate from 17 of 32 runs to 31 of 32, and the scouts
+  lowered it to 8 of 32.
 - Scouts (`python -m tenx.engineer --scouts`, `make engineer-scouts`):
   before the engineer starts, a scout for each raw table, four at a time,
   reads the goal, the table's profile and up to 20 of its rows, and answers

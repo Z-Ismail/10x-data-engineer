@@ -18,8 +18,9 @@ use.
 | Overlap report: values shared between columns of different tables | Available |
 | Gate: build, row count, key, money total, expected rows and repeat build checks | Available |
 | Engineer agent: one agent that builds the models a goal asks for | Available |
-| Cross-source agent: notes on how the tables join, given to the engineer | Available as an option; not yet shown to help |
-| Scouts: notes on each raw table, given to the engineer | Available as an option; not yet shown to help |
+| Cross-source agent: notes on how the tables join, given to the engineer | Available as an option; raised the engineer's pass rate in a measured comparison |
+| Scouts: notes on each raw table, given to the engineer | Available as an option; lowered the engineer's pass rate in a measured comparison |
+| Comparison: how often the engineer passes with and without the other agents | Available |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
 | The rest of the crew | Planned |
 
@@ -50,6 +51,7 @@ make test
 make engineer    # has the engineer agent build the demo project, then gates it
 make engineer-cross-source   # the same, with the cross-source agent first
 make engineer-scouts         # the same, with a scout for each raw table first
+make compare     # runs the engineer with and without the other agents, 128 runs
 ```
 
 ### Demo data
@@ -447,15 +449,16 @@ customers unmatched, quoted `billing@company0030.example` in billing against
 after the `@`, with a caution to check that no two CRM accounts share a
 domain. The engineer matched on the domain and the gate passed.
 
-Whether the engineer does better with the notes than without them has not
-been measured yet, and the notes can be wrong. On two 20-company demo
-datasets the agent advised matching whole addresses, the engineer followed
-it, and the gate failed. On one, the three values not found on each side did
-not show the other mailbox. On the other they did (`billing@company0009.example`
+In the comparison below, the engineer with these notes passed the gate in
+31 of 32 runs, against 17 of 32 for the engineer alone on the same data.
+The notes can still be wrong. On two 20-company demo datasets, in earlier
+runs, the agent advised matching whole addresses, the engineer followed it,
+and the gate failed. On one, the three values not found on each side did not
+show the other mailbox. On the other they did (`billing@company0009.example`
 against `admin@company0009.example`), but the agent took the goal's sentence
 that the two systems share only the email address to rule out the domain.
-In the first eight runs on the demo data the option added 9 to 10 turns, 27
-to 43 seconds and US$0.06 to 0.08 of estimated usage to each run.
+In the comparison the option added US$0.06 of estimated usage to an average
+run, and lowered the estimated cost per passing run.
 
 ### Scouts
 
@@ -505,16 +508,77 @@ run                      gate PASS     45        0  154.2 s      0.1652
 The scouts run at the same time, so the run took less than the `run` row's
 time, which adds up each session's time.
 
-Whether the engineer does better with the notes than without them has not
-been measured yet. In eight runs on the demo data, the engineer with scouts
-passed the gate three times; the engineer alone, in seven runs on the same
-data on the same day, passed twice. Every failure was a crosswalk that
-matched whole addresses. That is too few runs to tell the two apart. The
-notes can also mislead: the CRM scout sees the email address but not the
-billing table, and in one of the failed runs it advised matching whole
-addresses despite being told to leave joins alone. In those eight runs the
-scouts added 25 to 34 seconds to each run, the time the slowest scout took,
-and US$0.011 to 0.014 of estimated usage.
+In the comparison below, the engineer with scouts passed the gate in 8 of 32
+runs, against 17 of 32 for the engineer alone on the same data: the notes
+made it worse. Every failure was a crosswalk that matched whole addresses.
+The CRM scout sees the email address but not the billing table, and in at
+least 9 of those 32 runs it advised matching the whole address despite being
+told to leave joins alone, often quoting the goal's sentence that the email
+is the only field the two systems share. The scouts add 21 to 38 seconds to
+each run, the time the slowest scout takes, and US$0.011 to 0.016 of
+estimated usage.
+
+### Comparison
+
+`python -m tenx.compare run` measures whether an agent helps. It runs the
+engineer in four ways, called arms: alone, with scouts, with the
+cross-source agent, and with both. Every arm runs the same number of times
+on every dataset, and the gate decides each run. `make compare` does this
+on eight demo datasets (seeds 1, 7, 42 and 2026, each with 200 and 1,000
+companies), four times each: 128 runs, three at a time.
+
+The runs are taken in blocks of one dataset and one trial number, and the
+four arms of a block start in a random order, so a change in the service
+during the run affects every arm alike. The order is saved in `plan.json`
+before the first run. If the comparison stops part way, running the same
+command again keeps every run that has a gate verdict and repeats the
+others.
+
+A pass rate from 32 runs is uncertain, so the report gives each arm's rate
+with a 95% interval, and the chance that its true rate is higher than the
+engineer alone's. Both come from a Beta distribution over the rate, worked
+out exactly from the counts, so the same runs always give the same report.
+An arm is said to help when that chance is at least 0.98, and to hurt when
+the chance that it is lower is at least 0.98; otherwise the report says the
+difference is not shown. With three arms compared with one baseline, the
+0.98 threshold keeps the chance of wrongly calling any of them helpful near
+5%. Cost per pass is all the estimated cost of an arm's runs divided by its
+passes.
+
+A comparison on the demo data, all 128 runs on one day with Claude Code
+2.1.308:
+
+```
+comparison: 8 datasets, 4 trials each, 128 of 128 runs have a gate verdict
+an arm helps (or hurts) when the chance that its pass rate is higher (or lower) than alone's is at least 0.98
+
+arm           verdict   runs  passes  rate  95% interval  P(> alone)  US$ per run  US$ per pass
+alone         baseline    32      17   53%    36% to 69%           -       0.1055        0.1985
+scouts        hurts       32       8   25%    13% to 42%       0.011       0.1375        0.5499
+cross-source  helps       32      31   97%    84% to 99%       1.000       0.1665        0.1719
+both          helps       32      30   94%    80% to 98%       1.000       0.2074        0.2212
+
+passes by dataset
+
+dataset     alone  scouts  cross-source  both
+s1-200        3/4     0/4           4/4   4/4
+s1-1000       3/4     1/4           4/4   4/4
+s7-200        3/4     2/4           4/4   4/4
+s7-1000       2/4     0/4           3/4   3/4
+s42-200       2/4     2/4           4/4   4/4
+s42-1000      0/4     0/4           4/4   4/4
+s2026-200     2/4     1/4           4/4   4/4
+s2026-1000    2/4     2/4           4/4   3/4
+
+cost is Claude Code's own estimate, not a bill
+```
+
+All 44 failures failed the gate on the crosswalk alone. These figures hold
+for the demo goal and data, the Claude Code version and the day they were
+measured; agent pass rates change from one day to the next, so a comparison
+is only fair when every arm runs on the same day, as here. The report is
+written to `comparison.txt` and `comparison.json`, and
+`python -m tenx.compare report <folder>` prints it again.
 
 ### Usage ledger
 
@@ -592,7 +656,7 @@ installed and signed in. It runs on your own Claude subscription or API key.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner, the row sample and the checks of the cross-source agent's and scouts' answers |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner, the row sample, the checks of the cross-source agent's and scouts' answers, and the comparison |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
 ## Licence
