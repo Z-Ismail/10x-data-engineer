@@ -12,8 +12,21 @@ same figures.
 
 from __future__ import annotations
 
+import random
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import comb, exp, lgamma, log
+
+# Each arm and how the engineer is run in it: (scouts, cross_source).
+ARMS = {
+    "alone": (False, False),
+    "scouts": (True, False),
+    "cross-source": (False, True),
+    "both": (True, True),
+}
+BASELINE = "alone"
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 @dataclass(frozen=True)
@@ -88,3 +101,48 @@ def interval(tally: Tally, level: float = 0.95) -> tuple[float, float]:
         return (low + high) / 2
 
     return quantile(tail), quantile(1 - tail)
+
+
+@dataclass(frozen=True)
+class Trial:
+    """One run of one arm on one dataset."""
+
+    dataset: str
+    arm: str
+    trial: int
+
+    @property
+    def folder(self) -> str:
+        return f"{self.dataset}/{self.arm}/{self.trial}"
+
+
+def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order to run every arm on every dataset, trials times.
+
+    A block is one dataset and one trial number, and holds each arm once, in
+    a random order drawn from the seed. Blocks run trial by trial, so a
+    comparison cut short still has every arm on nearly the same datasets.
+    """
+    if not isinstance(trials, int) or isinstance(trials, bool) or trials < 1:
+        raise ValueError(f"trials must be a whole number of at least 1, not {trials!r}")
+    for kind, names in (("dataset", datasets), ("arm", arms)):
+        if not names:
+            raise ValueError(f"at least one {kind} is needed")
+        if len(set(names)) != len(names):
+            raise ValueError(f"each {kind} may be named only once")
+        for name in names:
+            if not isinstance(name, str) or not _NAME.fullmatch(name):
+                raise ValueError(f"{kind} name {name!r} must be letters, digits, '_', '.' or '-'")
+    unknown = [arm for arm in arms if arm not in ARMS]
+    if unknown:
+        raise ValueError(f"unknown arm {unknown[0]!r}; the arms are {', '.join(ARMS)}")
+    if BASELINE not in arms:
+        raise ValueError(f"the arms must include {BASELINE!r}, which the others are compared with")
+    rng = random.Random(f"{seed}:compare")
+    order = []
+    for trial in range(1, trials + 1):
+        for dataset in datasets:
+            block = list(arms)
+            rng.shuffle(block)
+            order += [Trial(dataset, arm, trial) for arm in block]
+    return order

@@ -8,7 +8,7 @@ test.
 import math
 import unittest
 
-from tenx.compare import Tally, interval, prob_better
+from tenx.compare import ARMS, Tally, Trial, interval, plan, prob_better
 
 
 def beta_pdf(x: float, a: int, b: int) -> float:
@@ -106,6 +106,73 @@ class TallyTest(unittest.TestCase):
 
     def test_runs(self):
         self.assertEqual(Tally(3, 5).runs, 8)
+
+
+class PlanTest(unittest.TestCase):
+    DATASETS = ("s1-200", "s7-200", "s1-1000")
+    ARMS = ("alone", "scouts", "cross-source", "both")
+
+    def test_runs_every_arm_on_every_dataset_once_per_trial(self):
+        order = plan(self.DATASETS, self.ARMS, trials=2)
+        self.assertEqual(len(order), 3 * 4 * 2)
+        self.assertEqual(
+            sorted((t.dataset, t.arm, t.trial) for t in order),
+            sorted((d, a, n) for d in self.DATASETS for a in self.ARMS for n in (1, 2)),
+        )
+
+    def test_each_block_is_one_dataset_and_trial_holding_every_arm(self):
+        order = plan(self.DATASETS, self.ARMS, trials=2)
+        blocks = [order[i : i + 4] for i in range(0, len(order), 4)]
+        self.assertEqual(
+            [(b[0].dataset, b[0].trial) for b in blocks],
+            [(d, n) for n in (1, 2) for d in self.DATASETS],
+        )
+        for block in blocks:
+            self.assertEqual({t.dataset for t in block}, {block[0].dataset})
+            self.assertEqual({t.trial for t in block}, {block[0].trial})
+            self.assertEqual(sorted(t.arm for t in block), sorted(self.ARMS))
+
+    def test_the_order_within_blocks_varies_and_repeats_for_a_seed(self):
+        datasets = [f"d{i}" for i in range(25)]
+        order = plan(datasets, self.ARMS, trials=4, seed=3)
+        self.assertEqual(order, plan(datasets, self.ARMS, trials=4, seed=3))
+        self.assertNotEqual(order, plan(datasets, self.ARMS, trials=4, seed=4))
+        firsts = [order[i].arm for i in range(0, len(order), 4)]
+        self.assertEqual(set(firsts), set(self.ARMS))
+
+    def test_folder_names_the_dataset_arm_and_trial(self):
+        self.assertEqual(Trial("s42-200", "cross-source", 3).folder, "s42-200/cross-source/3")
+
+    def test_known_arms(self):
+        self.assertEqual(
+            ARMS,
+            {
+                "alone": (False, False),
+                "scouts": (True, False),
+                "cross-source": (False, True),
+                "both": (True, True),
+            },
+        )
+
+    def test_refuses_an_unusable_plan(self):
+        cases = [
+            (["d"], ["alone"], 0),
+            (["d"], ["alone"], True),
+            ([], ["alone"], 1),
+            (["d"], [], 1),
+            (["d", "d"], ["alone"], 1),
+            (["d"], ["alone", "alone"], 1),
+            (["d"], ["alone", "reviewer"], 1),
+            (["d"], ["scouts"], 1),
+            (["a/b"], ["alone"], 1),
+            ([".."], ["alone"], 1),
+        ]
+        for datasets, arms, trials in cases:
+            with (
+                self.subTest(datasets=datasets, arms=arms, trials=trials),
+                self.assertRaises(ValueError),
+            ):
+                plan(datasets, arms, trials)
 
 
 if __name__ == "__main__":
