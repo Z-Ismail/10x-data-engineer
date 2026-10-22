@@ -573,7 +573,7 @@ s2026-1000    2/4     2/4           4/4   3/4
 cost is Claude Code's own estimate, not a bill
 ```
 
-All 44 failures failed the gate on the crosswalk alone. These figures hold
+All 42 failures failed the gate on the crosswalk alone. These figures hold
 for the demo goal and data, the Claude Code version and the day they were
 measured; agent pass rates change from one day to the next, so a comparison
 is only fair when every arm runs on the same day, as here. The report is
