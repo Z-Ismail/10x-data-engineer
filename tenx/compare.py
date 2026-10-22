@@ -8,17 +8,42 @@ uniform prior, Beta(1 + passes, 1 + failures). The arm is then compared with
 the engineer alone by the probability that its pass rate is the higher one,
 worked out exactly rather than by sampling, so the same runs always give the
 same figures.
+
+    python -m tenx.compare run --raw NAME=FOLDER [--raw NAME=FOLDER ...]
+        --goal <file> --checks <file> --out <folder> [--trials 4] [--parallel 3]
+    python -m tenx.compare report <folder>
+
+Each run is an ordinary engineer run, in its own folder:
+
+    <out>/
+        plan.json                       the datasets, arms, trials and run order
+        runs/<dataset>/<arm>/<trial>/   one engineer run, with its usage.json
+        comparison.txt                  the report
+        comparison.json                 the same figures as JSON
+
+A comparison that stops part way can be started again with the same
+command: runs that already have a gate verdict are kept, and the others are
+run again from an empty folder.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import re
+import shutil
+import sys
+import threading
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from math import comb, exp, lgamma, log
 from pathlib import Path
+
+from tenx.engineer import EngineerError
+from tenx.engineer import run as engineer_run
+from tenx.gate import GateError, load_declaration
 
 # Each arm and how the engineer is run in it: (scouts, cross_source).
 ARMS = {
@@ -426,3 +451,148 @@ def report(out: Path) -> str:
         json.dumps(summary.to_dict(), indent=2) + "\n", encoding="utf-8"
     )
     return text
+
+
+def _start(
+    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+) -> list[Trial]:
+    if (out / PLAN_FILE).is_file():
+        document, order = read_plan(out)
+        asked = (list(datasets), list(arms), trials, seed)
+        kept = (document["datasets"], document["arms"], document["trials"], document.get("seed"))
+        if asked != kept:
+            raise ValueError(
+                f"{out} holds a comparison of other datasets, arms, trials or seed; "
+                "use another folder"
+            )
+        return order
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise ValueError(f"{out} must be empty or hold a comparison to resume")
+    out.mkdir(parents=True, exist_ok=True)
+    return write_plan(out, datasets, arms, trials, seed)
+
+
+def run_comparison(
+    datasets: dict[str, Path],
+    goal: Path,
+    checks: Path,
+    out: Path,
+    arms: Sequence[str] = tuple(ARMS),
+    trials: int = 4,
+    seed: int = 0,
+    parallel: int = 3,
+    claude: str = "claude",
+    runner=None,
+    progress=print,
+) -> str:
+    """Run every arm on every dataset, then report the comparison.
+
+    Runs start in the planned order, at most `parallel` at a time. A run
+    that cannot start, or stops with an error, is reported and left without
+    a verdict; the comparison carries on. `runner` stands in for the
+    engineer runner in tests.
+    """
+    runner = runner or engineer_run
+    if not isinstance(parallel, int) or isinstance(parallel, bool) or parallel < 1:
+        raise ValueError(f"parallel must be a whole number of at least 1, not {parallel!r}")
+    for name, folder in datasets.items():
+        if not Path(folder).is_dir():
+            raise ValueError(f"the raw folder for {name}, {folder}, is not a folder")
+    if not Path(goal).is_file():
+        raise ValueError(f"the goal {goal} is not a file")
+    load_declaration(checks)
+    out = Path(out)
+    order = _start(out, list(datasets), arms, trials, seed)
+    pending = [trial for trial in order if outcome(out, trial).gate is None]
+    lock = threading.Lock()
+    finished = [len(order) - len(pending)]
+
+    def one(trial: Trial) -> None:
+        folder = out / RUNS_DIR / trial.folder
+        if folder.exists():
+            shutil.rmtree(folder)
+        scouts, cross_source = ARMS[trial.arm]
+        try:
+            runner(
+                datasets[trial.dataset],
+                goal,
+                checks,
+                folder,
+                claude=claude,
+                scouts=scouts,
+                cross_source=cross_source,
+            )
+            gate = outcome(out, trial).gate
+            note = f"gate {gate}" if gate else "no gate verdict"
+        except (EngineerError, GateError, OSError) as error:
+            note = f"error: {error}"
+        with lock:
+            finished[0] += 1
+            progress(f"[{finished[0]}/{len(order)}] {trial.folder}: {note}")
+
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        for future in [pool.submit(one, trial) for trial in pending]:
+            future.result()
+    return report(out)
+
+
+def _dataset(text: str) -> tuple[str, Path]:
+    name, sep, folder = text.partition("=")
+    if not sep or not name or not folder:
+        raise argparse.ArgumentTypeError(f"expected NAME=FOLDER, not {text!r}")
+    return name, Path(folder)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    start = commands.add_parser("run", help="run the comparison, or resume it, then report it")
+    start.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; give one --raw per dataset",
+    )
+    start.add_argument("--goal", type=Path, required=True, help="what to build, in plain English")
+    start.add_argument(
+        "--checks", type=Path, required=True, help="the gate's JSON declaration of what to expect"
+    )
+    start.add_argument("--out", type=Path, required=True, help="folder for the comparison")
+    start.add_argument(
+        "--arms", nargs="+", default=list(ARMS), choices=list(ARMS), help="arms to compare"
+    )
+    start.add_argument("--trials", type=int, default=4, help="runs of each arm on each dataset")
+    start.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
+    start.add_argument("--parallel", type=int, default=3, help="runs at the same time")
+    show = commands.add_parser("report", help="report a comparison from its runs so far")
+    show.add_argument("out", type=Path, help="the comparison's folder")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "report":
+            print(report(args.out), end="")
+            return 0
+        datasets = dict(args.raw)
+        if len(datasets) != len(args.raw):
+            raise ValueError("each dataset may be named only once")
+        text = run_comparison(
+            datasets,
+            args.goal,
+            args.checks,
+            args.out,
+            arms=args.arms,
+            trials=args.trials,
+            seed=args.seed,
+            parallel=args.parallel,
+        )
+    except (ValueError, EngineerError, GateError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print()
+    print(text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

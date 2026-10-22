@@ -5,27 +5,36 @@ densities, or by numerical integration written here, not by the code under
 test.
 """
 
+import io
 import json
 import math
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from tenx.compare import (
     ARMS,
     PLAN_FILE,
     REPORT_JSON,
     REPORT_TEXT,
+    RUNS_DIR,
     Tally,
     Trial,
     interval,
+    main,
     plan,
     prob_better,
     read_plan,
     report,
+    run_comparison,
     summarise,
     write_plan,
 )
+from tenx.engineer import EngineerError
 
 
 def beta_pdf(x: float, a: int, b: int) -> float:
@@ -411,6 +420,204 @@ class SummaryTest(unittest.TestCase):
         (self.out / PLAN_FILE).write_text("[]", encoding="utf-8")
         with self.assertRaises(ValueError):
             summarise(self.out)
+
+
+DECLARATION = Path(__file__).parent / "fixtures" / "demo_gate.json"
+DEMO_GOAL = Path(__file__).resolve().parent.parent / "demo" / "goal.md"
+
+
+class FakeEngineer:
+    """Stands in for the engineer runner: records each call and writes a
+    usage.json with the verdict that `gates` gives for the run's folder.
+
+    A verdict of "error" raises the runner's own error instead, and "none"
+    leaves the folder without a usage.json, as a run stopped part way does.
+    """
+
+    def __init__(self, gates=None, pause: float = 0.0):
+        self.gates = gates or {}
+        self.pause = pause
+        self.calls = []
+        self.running = 0
+        self.most = 0
+        self.lock = threading.Lock()
+
+    def __call__(self, raw, goal, checks, out, claude, scouts, cross_source):
+        with self.lock:
+            self.calls.append((Path(out), Path(raw), scouts, cross_source, claude))
+            self.running += 1
+            self.most = max(self.most, self.running)
+        try:
+            time.sleep(self.pause)
+            Path(out).mkdir(parents=True)
+            parts = Path(out).parts
+            gate = self.gates.get("/".join(parts[-3:]), "PASS")
+            if gate == "error":
+                raise EngineerError("claude was not found")
+            if gate == "none":
+                (Path(out) / "agent.json").write_text("{}", encoding="utf-8")
+                return
+            roles = [{"role": "engineer", "cost_usd": 0.1, "cost_known": True}]
+            (Path(out) / "usage.json").write_text(
+                json.dumps({"gate": gate, "roles": roles}), encoding="utf-8"
+            )
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+class ComparisonFolders(unittest.TestCase):
+    """Two empty raw folders and a folder for the comparison."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.out = root / "comparison"
+        self.datasets = {}
+        for name in ("s1-200", "s7-1000"):
+            folder = root / "data" / name
+            folder.mkdir(parents=True)
+            self.datasets[name] = folder
+        self.lines = []
+
+    def compare(self, engineer, **options) -> str:
+        options.setdefault("trials", 2)
+        return run_comparison(
+            self.datasets,
+            DEMO_GOAL,
+            DECLARATION,
+            self.out,
+            runner=engineer,
+            progress=self.lines.append,
+            **options,
+        )
+
+
+class RunComparisonTest(ComparisonFolders):
+    def test_runs_every_planned_run_with_its_arm_and_dataset(self):
+        engineer = FakeEngineer({"s1-200/alone/1": "FAIL"})
+        text = self.compare(engineer, parallel=1)
+        _, order = read_plan(self.out)
+        self.assertEqual(len(order), 2 * 4 * 2)
+        self.assertEqual(
+            [call[0] for call in engineer.calls],
+            [self.out / RUNS_DIR / t.folder for t in order],
+        )
+        flags = {
+            "alone": (False, False),
+            "scouts": (True, False),
+            "cross-source": (False, True),
+            "both": (True, True),
+        }
+        for (folder, raw, scouts, cross_source, claude), trial in zip(engineer.calls, order):
+            self.assertEqual(raw, self.datasets[trial.dataset])
+            self.assertEqual((scouts, cross_source), flags[trial.arm])
+            self.assertEqual(claude, "claude")
+        self.assertIn("comparison: 2 datasets, 2 trials each, 16 of 16 runs", text)
+        self.assertIn("alone         baseline      4       3   75%", text)
+        self.assertEqual((self.out / "comparison.txt").read_text(encoding="utf-8"), text)
+        self.assertEqual(len(self.lines), 16)
+        self.assertIn("s1-200/alone/1: gate FAIL", "\n".join(self.lines))
+        self.assertTrue(self.lines[-1].startswith("[16/16] "), self.lines[-1])
+
+    def test_runs_at_most_parallel_runs_at_a_time(self):
+        engineer = FakeEngineer(pause=0.2)
+        self.compare(engineer, trials=1, parallel=3)
+        self.assertEqual(engineer.most, 3)
+
+    def test_an_error_or_a_run_without_a_verdict_is_reported_and_the_rest_carry_on(self):
+        engineer = FakeEngineer({"s1-200/scouts/1": "error", "s7-1000/both/2": "none"})
+        text = self.compare(engineer)
+        self.assertEqual(len(engineer.calls), 16)
+        printed = "\n".join(self.lines)
+        self.assertIn("s1-200/scouts/1: error: claude was not found", printed)
+        self.assertIn("s7-1000/both/2: no gate verdict", printed)
+        self.assertIn("14 of 16 runs have a gate verdict", text)
+        self.assertIn("runs with no gate verdict, not counted:\n  s1-200/scouts/1\n", text)
+
+    def test_resumes_only_the_runs_without_a_verdict(self):
+        first = FakeEngineer({"s1-200/scouts/1": "error", "s7-1000/both/2": "none"})
+        self.compare(first)
+        leftover = self.out / RUNS_DIR / "s7-1000" / "both" / "2" / "agent.json"
+        self.assertTrue(leftover.exists())
+        second = FakeEngineer()
+        text = self.compare(second)
+        self.assertEqual(
+            sorted(str(call[0].relative_to(self.out / RUNS_DIR)) for call in second.calls),
+            ["s1-200/scouts/1", "s7-1000/both/2"],
+        )
+        # The stopped run started again from an empty folder.
+        self.assertFalse(leftover.exists())
+        self.assertIn("16 of 16 runs have a gate verdict", text)
+        self.assertTrue(self.lines[-1].startswith("[16/16] "), self.lines[-1])
+
+    def test_refuses_to_resume_a_different_comparison(self):
+        self.compare(FakeEngineer())
+        for change in ({"trials": 3}, {"seed": 1}, {"arms": ("alone", "scouts")}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.compare(FakeEngineer(), **change)
+
+    def test_refuses_a_folder_holding_something_else(self):
+        self.out.mkdir()
+        (self.out / "notes.txt").write_text("x", encoding="utf-8")
+        engineer = FakeEngineer()
+        with self.assertRaises(ValueError):
+            self.compare(engineer)
+        self.assertEqual(engineer.calls, [])
+
+    def test_refuses_unusable_inputs_before_any_run(self):
+        engineer = FakeEngineer()
+        self.datasets["missing"] = self.out.parent / "nowhere"
+        with self.assertRaises(ValueError):
+            self.compare(engineer)
+        del self.datasets["missing"]
+        with self.assertRaises(ValueError):
+            self.compare(engineer, parallel=0)
+        self.assertEqual(engineer.calls, [])
+        self.assertFalse(self.out.exists())
+
+
+class CommandLineTest(ComparisonFolders):
+    def test_run_then_report(self):
+        engineer = FakeEngineer({"s7-1000/scouts/1": "FAIL"})
+        argv = ["run", "--goal", str(DEMO_GOAL), "--checks", str(DECLARATION)]
+        for name, folder in self.datasets.items():
+            argv += ["--raw", f"{name}={folder}"]
+        argv += ["--out", str(self.out), "--trials", "1", "--arms", "alone", "scouts"]
+        with (
+            mock.patch("tenx.compare.engineer_run", engineer),
+            redirect_stdout(io.StringIO()) as printed,
+        ):
+            code = main(argv)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(engineer.calls), 4)
+        text = (self.out / "comparison.txt").read_text(encoding="utf-8")
+        self.assertTrue(printed.getvalue().endswith("\n" + text))
+        with redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(main(["report", str(self.out)]), 0)
+        self.assertEqual(printed.getvalue(), text)
+
+    def test_reports_an_unusable_request(self):
+        for argv in (
+            ["report", str(self.out)],
+            [
+                "run",
+                "--raw",
+                "a=x",
+                "--raw",
+                "a=y",
+                "--goal",
+                str(DEMO_GOAL),
+                "--checks",
+                str(DECLARATION),
+                "--out",
+                str(self.out),
+            ],
+        ):
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(main(argv), 2)
+                self.assertTrue(errors.getvalue().startswith("error: "), errors.getvalue())
 
 
 if __name__ == "__main__":
