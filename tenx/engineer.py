@@ -17,11 +17,11 @@ be read or edited by the agent.
         scouts/                 with --scouts: one folder per raw table for its scout
             <table>/            GOAL.md, PROFILE.txt and SAMPLE.jsonl
             <table>.json        what Claude Code reported for that scout
-        cross_source/           with --cross-source: the cross-source agent's folder
+        cross_source/           unless --no-cross-source: the cross-source agent's folder
             GOAL.md
             source_profiles/    the profiles, with overlap.txt and overlap.json
         plugin/                 the add-on's manifest and agents, as loaded for the run
-        cross_source.json       with --cross-source: what Claude Code reported for that agent
+        cross_source.json       unless --no-cross-source: what Claude Code reported for that agent
         agent.json              what Claude Code reported when the agent stopped
         usage.json              tokens, turns, time and cost by role, and the gate verdict
         gate/                   the gate's databases, dbt artifacts and logs
@@ -33,11 +33,12 @@ builds the project from an empty database and checks it against the raw
 files. The run passes only if the gate passes. Last, the run's usage is
 recorded and printed by role.
 
-With --cross-source, the cross-source agent runs first. It reads the goal,
-the profiles and the overlap report in a folder of its own, changes nothing,
-and answers how the tables the goal needs join. Its answer is checked, and
-written as JOINS.md in the project folder for the engineer. An answer that
-fails the check is not passed on; the engineer then works without it.
+Unless --no-cross-source is given, the cross-source agent runs first. It
+reads the goal, the profiles and the overlap report in a folder of its own,
+changes nothing, and answers how the tables the goal needs join. Its answer
+is checked, and written as JOINS.md in the project folder for the engineer.
+An answer that fails the check is not passed on; the engineer then works
+without it.
 
 With --scouts, a scout runs for each raw table first, several at a time. Each
 reads the goal, its table's profile and a sample of the table's rows in a
@@ -461,7 +462,8 @@ def run(
     With scouts, a scout runs for each raw table first, and the checked
     answers are put in the project as TABLE_NOTES.md. With cross_source, the
     cross-source agent runs next and its checked answer is put in the
-    project as JOINS.md.
+    project as JOINS.md. The command line runs the cross-source agent unless
+    told not to; here it runs only when asked for.
     """
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise EngineerError(
@@ -500,8 +502,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--cross-source",
-        action="store_true",
-        help="run the cross-source agent first and give its notes to the engineer",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="run the cross-source agent first and give its notes to the engineer "
+        "(on unless --no-cross-source is given)",
     )
     parser.add_argument(
         "--scouts",

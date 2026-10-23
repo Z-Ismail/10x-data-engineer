@@ -481,6 +481,7 @@ class RunTest(unittest.TestCase):
                     str(DECLARATION),
                     "--out",
                     str(self.out),
+                    "--no-cross-source",
                 ]
             )
         self.assertEqual(code, 0, printed.getvalue())
@@ -510,7 +511,7 @@ class RunTest(unittest.TestCase):
         )
         reported = json.loads((self.out / AGENT_FILE).read_text(encoding="utf-8"))
         self.assertEqual(reported["result"], "Built four models.")
-        # Without --cross-source only the engineer runs.
+        # With --no-cross-source only the engineer runs.
         self.assertFalse((self.out / CROSS_SOURCE_DIR).exists())
         self.assertFalse(Path(f"{self.record}.cross-source").exists())
         self.assertFalse((self.out / SCOUTS_DIR).exists())
@@ -537,7 +538,9 @@ class RunTest(unittest.TestCase):
             [("engineer", "success", 7)],
         )
 
-    def run_with_cross_source(self, answer: dict | None, pass_mode: str = "success") -> str:
+    def run_with_cross_source(
+        self, answer: dict | None, pass_mode: str = "success", *flags: str
+    ) -> str:
         with (
             self.stub(REFERENCE_MODELS, answer=answer, pass_mode=pass_mode),
             redirect_stdout(io.StringIO()) as printed,
@@ -552,13 +555,14 @@ class RunTest(unittest.TestCase):
                     str(DECLARATION),
                     "--out",
                     str(self.out),
-                    "--cross-source",
+                    *flags,
                 ]
             )
         self.assertEqual(code, 0, printed.getvalue())
         return printed.getvalue()
 
     def test_cross_source_notes_reach_the_engineer(self):
+        # The cross-source agent runs unless it is turned off.
         report = self.run_with_cross_source(ANSWER)
         self.assertTrue(
             report.startswith(
@@ -617,6 +621,16 @@ class RunTest(unittest.TestCase):
             [("cross-source", 9), ("engineer", 7)],
         )
 
+    def test_the_cross_source_flag_gives_the_default_run(self):
+        default = self.run_with_cross_source(ANSWER)
+        self.out = self.root / "flagged"
+        flagged = self.run_with_cross_source(ANSWER, "success", "--cross-source")
+        self.assertIn("cross-source: success after 9 turns", flagged)
+        self.assertEqual(
+            flagged.replace(str(self.out), "<out>"),
+            default.replace(str(self.root / "run"), "<out>"),
+        )
+
     def run_with_scouts(self, scout_answers: dict, *flags: str) -> str:
         with (
             self.stub(REFERENCE_MODELS, answer=ANSWER, scout_answers=scout_answers),
@@ -661,7 +675,8 @@ class RunTest(unittest.TestCase):
                 "billing.invoices": empty,
                 "crm.accounts": crm,
                 "events.events": EVENTS_NOTES,
-            }
+            },
+            "--no-cross-source",
         )
         self.assertTrue(
             report.startswith(
@@ -750,7 +765,8 @@ class RunTest(unittest.TestCase):
         wrong = json.loads(json.dumps(CUSTOMERS_NOTES))
         wrong["findings"][0]["columns"] = ["email", "status"]
         report = self.run_with_scouts(
-            {"billing.invoices": "crash", "crm.accounts": wrong, "events.events": EVENTS_NOTES}
+            {"billing.invoices": "crash", "crm.accounts": wrong, "events.events": EVENTS_NOTES},
+            "--no-cross-source",
         )
         self.assertTrue(
             report.startswith(
@@ -784,7 +800,7 @@ class RunTest(unittest.TestCase):
         )
 
     def test_no_notes_file_when_no_scout_answer_passes(self):
-        report = self.run_with_scouts({"events.events": "crash"})
+        report = self.run_with_scouts({"events.events": "crash"}, "--no-cross-source")
         self.assertIn("scout events.events: exited 1 without a report", report)
         self.assertNotIn("TABLE_NOTES.md", self.recorded()["files"])
         self.assertFalse((self.out / PROJECT_DIR / "TABLE_NOTES.md").exists())
