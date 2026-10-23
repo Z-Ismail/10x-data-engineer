@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test demo-data profile overlap engineer engineer-cross-source engineer-scouts compare clean
+.PHONY: install test demo-data profile overlap engineer engineer-alone engineer-scouts compare clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline]"
@@ -17,19 +17,20 @@ profile:
 overlap:
 	$(PYTHON) -m tenx.overlap demo/data --out profiles
 
-# Needs Claude Code, signed in. Each run starts from an empty runs/demo.
+# The cross-source agent, then the engineer. Needs Claude Code, signed in.
+# Each run starts from an empty runs/demo.
 engineer: demo-data
 	rm -rf runs/demo
 	$(PYTHON) -m tenx.engineer --raw demo/data --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/demo
 
-# The same run with the cross-source agent first. Needs Claude Code, signed in.
-engineer-cross-source: demo-data
-	rm -rf runs/demo-cross-source
+# The engineer alone, without the cross-source agent. Needs Claude Code, signed in.
+engineer-alone: demo-data
+	rm -rf runs/demo-alone
 	$(PYTHON) -m tenx.engineer --raw demo/data --goal demo/goal.md \
-		--checks tests/fixtures/demo_gate.json --out runs/demo-cross-source --cross-source
+		--checks tests/fixtures/demo_gate.json --out runs/demo-alone --no-cross-source
 
-# The same run with a scout for each raw table first. Needs Claude Code, signed in.
+# The default run with a scout for each raw table first. Needs Claude Code, signed in.
 engineer-scouts: demo-data
 	rm -rf runs/demo-scouts
 	$(PYTHON) -m tenx.engineer --raw demo/data --goal demo/goal.md \
