@@ -6,6 +6,12 @@ Notable changes to this project.
 
 ### Changed
 
+- `python -m tenx.engineer` and `make engineer` run the cross-source agent
+  before the engineer unless `--no-cross-source` is given, since it raised
+  the engineer's pass rate in the comparison. `make engineer-alone` runs the
+  engineer without it. With the change, `make engineer` costs about US$0.06
+  more per run by Claude Code's estimate, and writes `cross_source/` and
+  `cross_source.json` beside the project.
 - The engineer agent reads `TABLE_NOTES.md` before writing the staging
   models, when a run provides it.
 - The engineer agent reads `JOINS.md` before writing a model that combines
@@ -50,8 +56,8 @@ Notable changes to this project.
   Each scout's usage has its own row in the ledger.
 - `tenx.sample`: picks up to 20 rows of a raw file, as written, the same
   rows every time for the same file.
-- Cross-source agent (`python -m tenx.engineer --cross-source`,
-  `make engineer-cross-source`): before the engineer starts, an agent that
+- Cross-source agent (on by default; `--no-cross-source` and
+  `make engineer-alone` turn it off): before the engineer starts, an agent that
   may only read files works out from the goal, the profiles and the overlap
   report how the tables join, and answers in a fixed JSON shape. The answer
   is checked, every column it names must exist, and it is given to the

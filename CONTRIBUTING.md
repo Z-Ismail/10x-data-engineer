@@ -17,7 +17,7 @@ The tests do not run the agents themselves: they replace the `claude`
 command with a stand-in that writes a known project, or gives a known answer
 for the cross-source agent and the scouts. To run the real agents on the
 demo data, install Claude Code, sign in and run `make engineer`,
-`make engineer-cross-source` or `make engineer-scouts`. `make compare` runs
+`make engineer-alone` or `make engineer-scouts`. `make compare` runs
 all of them 128 times and takes one to two hours.
 
 ## Guidelines

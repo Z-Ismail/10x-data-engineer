@@ -18,8 +18,8 @@ use.
 | Overlap report: values shared between columns of different tables | Available |
 | Gate: build, row count, key, money total, expected rows and repeat build checks | Available |
 | Engineer agent: one agent that builds the models a goal asks for | Available |
-| Cross-source agent: notes on how the tables join, given to the engineer | Available as an option; raised the engineer's pass rate in a measured comparison |
-| Scouts: notes on each raw table, given to the engineer | Available as an option; lowered the engineer's pass rate in a measured comparison |
+| Cross-source agent: notes on how the tables join, given to the engineer | Available, and runs by default: it raised the engineer's pass rate in a measured comparison |
+| Scouts: notes on each raw table, given to the engineer | Available as an option; in a measured comparison they lowered the engineer's pass rate, and added nothing with the cross-source agent |
 | Comparison: how often the engineer passes with and without the other agents | Available |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
 | The rest of the crew | Planned |
@@ -48,9 +48,9 @@ make demo-data   # writes three source systems to demo/data
 make profile     # writes one profile per source table to profiles/
 make overlap     # writes a report of columns that share values to profiles/
 make test
-make engineer    # has the engineer agent build the demo project, then gates it
-make engineer-cross-source   # the same, with the cross-source agent first
-make engineer-scouts         # the same, with a scout for each raw table first
+make engineer    # the cross-source agent, then the engineer builds the demo project; then the gate
+make engineer-alone    # the same without the cross-source agent
+make engineer-scouts   # the same as make engineer, with a scout for each raw table first
 make compare     # runs the engineer with and without the other agents, 128 runs
 ```
 
@@ -335,8 +335,11 @@ Rules for expected rows:
 ### Engineer agent
 
 `python -m tenx.engineer --raw <folder> --goal <file> --checks <file> --out <folder>`
-has one agent build a dbt project from raw files and then runs the gate on
-it. The run passes only if the gate passes.
+has the engineer agent build a dbt project from raw files and then runs the
+gate on it. The run passes only if the gate passes. By default the
+cross-source agent (below) runs first and gives the engineer notes on how
+the tables join; with `--no-cross-source` (`make engineer-alone`) the
+engineer works alone.
 
 The goal is a short Markdown file in plain English. It names each model,
 what one row of it means, its key and which source rows to leave out.
@@ -359,6 +362,9 @@ The agent runs in Claude Code without anyone at the keyboard. It may write
 files in its own folder and run `dbt`, and every other action is refused
 rather than asked about. It is pinned to the Sonnet model and stops after 60
 turns, US$5 of estimated usage or 30 minutes, whichever comes first.
+
+An earlier run of the engineer alone, before the cross-source agent ran by
+default:
 
 ```
 agent: success after 20 turns (exit 0)
@@ -390,7 +396,9 @@ In that run the agent built every staging model correctly and reported
 success, but matched whole email addresses in the crosswalk, so the 13
 customers whose CRM account holds another mailbox were left unmatched. The
 gate caught it. In other runs the agent notices the mailboxes and matches on
-the domain, and the gate passes.
+the domain, and the gate passes. Working alone, it passed in 17 of 32 runs
+in the comparison below; with the cross-source agent's notes, in 31 of 32.
+That is why the cross-source agent runs by default.
 
 Everything from the run is kept under the `--out` folder:
 
@@ -401,7 +409,7 @@ Everything from the run is kept under the `--out` folder:
 | `usage.json` | The usage ledger: each role's figures and the gate verdict |
 | `gate/` | The gate's databases, dbt artifacts and logs |
 | `plugin/` | The copy of the add-on the agent was loaded from |
-| `cross_source/`, `cross_source.json` | With `--cross-source`: the cross-source agent's folder, and what Claude Code reported when it stopped |
+| `cross_source/`, `cross_source.json` | Unless `--no-cross-source` is given: the cross-source agent's folder, and what Claude Code reported when it stopped |
 | `scouts/<table>/`, `scouts/<table>.json` | With `--scouts`: each scout's folder, and what Claude Code reported when it stopped |
 
 Today the agent builds what the demo goal asks for: one staging model per
@@ -414,10 +422,11 @@ of this repository and Claude Code installed and signed in.
 
 ### Cross-source agent
 
-With `--cross-source`, a second agent runs before the engineer and works
-out how the tables the goal needs join. It reads the goal, the profiles and
-the overlap report in a folder of its own, and changes nothing: it may only
-read files, and it answers in a fixed JSON shape that Claude Code checks.
+Unless `--no-cross-source` is given, a second agent runs before the
+engineer and works out how the tables the goal needs join. It reads the
+goal, the profiles and the overlap report in a folder of its own, and
+changes nothing: it may only read files, and it answers in a fixed JSON
+shape that Claude Code checks.
 For each join it gives the two columns, what to do to the values so that the
 ones that belong together are equal, how many rows on one side match a row
 on the other, which rows will find no match and why, and the figures it
@@ -431,16 +440,16 @@ on, the engineer works without it, and the run says why. The agent is
 pinned to the Sonnet model and stops after 20 turns.
 
 ```
-cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 7 cautions
+cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 8 cautions
 agent: success after 18 turns (exit 0)
-project: runs/demo-cross-source/project
+project: runs/demo/project
 
 gate: PASS (24 passed, 0 failed, 0 not run)
 ...
 role          outcome    turns  refused    time  cost (US$)
-cross-source  success        9        0  33.7 s      0.0729
-engineer      success       18        0  29.7 s      0.1086
-run           gate PASS     27        0  63.4 s      0.1815
+cross-source  success        9        0  26.7 s      0.0729
+engineer      success       18        0  33.7 s      0.0829
+run           gate PASS     27        0  60.4 s      0.1558
 ```
 
 In that run the notes said that trimming and lower case leave some
@@ -457,7 +466,7 @@ and the gate failed. On one, the three values not found on each side did not
 show the other mailbox. On the other they did (`billing@company0009.example`
 against `admin@company0009.example`), but the agent took the goal's sentence
 that the two systems share only the email address to rule out the domain.
-In the comparison the option added US$0.06 of estimated usage to an average
+In the comparison the agent added US$0.06 of estimated usage to an average
 run, and lowered the estimated cost per passing run.
 
 ### Scouts
@@ -483,26 +492,29 @@ be a column of that table. The answers that pass are written together as
 `TABLE_NOTES.md` in the engineer's folder, and the engineer is told to read
 it before writing the staging models. An answer that fails its check is
 left out, and the run says why. Scouts are pinned to the Haiku model and
-stop after 8 turns. Scouts and the cross-source agent can run in the same
-run; the scouts run first, and neither sees the other's notes.
+stop after 8 turns. The cross-source agent still runs unless
+`--no-cross-source` is given; the scouts run first, and neither sees the
+other's notes.
 
 ```
-scout billing.customers: success after 5 turns (exit 0); 6 findings, 4 questions
-scout billing.invoices: success after 5 turns (exit 0); 6 findings, 3 questions
+scout billing.customers: success after 5 turns (exit 0); 7 findings, 4 questions
+scout billing.invoices: success after 5 turns (exit 0); 6 findings, 4 questions
 scout crm.accounts: success after 5 turns (exit 0); 5 findings, 3 questions
-scout events.events: success after 5 turns (exit 0); 5 findings, 3 questions
-agent: success after 25 turns (exit 0)
+scout events.events: success after 5 turns (exit 0); 6 findings, 4 questions
+cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 8 cautions
+agent: success after 18 turns (exit 0)
 project: runs/demo-scouts/project
 
 gate: PASS (24 passed, 0 failed, 0 not run)
 ...
 role                     outcome    turns  refused     time  cost (US$)
-scout billing.customers  success        5        0   24.6 s      0.0032
-scout billing.invoices   success        5        0   20.1 s      0.0029
-scout crm.accounts       success        5        0   14.6 s      0.0024
-scout events.events      success        5        0   18.3 s      0.0028
-engineer                 success       25        0   76.5 s      0.1539
-run                      gate PASS     45        0  154.2 s      0.1652
+scout billing.customers  success        5        0   16.8 s      0.0035
+scout billing.invoices   success        5        0   24.0 s      0.0044
+scout crm.accounts       success        5        0   17.2 s      0.0037
+scout events.events      success        5        0   20.4 s      0.0040
+cross-source             success        9        0   26.0 s      0.0557
+engineer                 success       18        0   33.4 s      0.1166
+run                      gate PASS     47        0  137.7 s      0.1879
 ```
 
 The scouts run at the same time, so the run took less than the `run` row's
@@ -517,6 +529,11 @@ told to leave joins alone, often quoting the goal's sentence that the email
 is the only field the two systems share. The scouts add 21 to 38 seconds to
 each run, the time the slowest scout takes, and US$0.011 to 0.016 of
 estimated usage.
+
+With the cross-source agent as well, the engineer passed in 30 of 32 runs,
+against 31 of 32 with the cross-source agent alone: the scouts added nothing
+measurable there, and about US$0.04 of estimated usage per run. They remain
+an option, off by default.
 
 ### Comparison
 
@@ -580,14 +597,17 @@ is only fair when every arm runs on the same day, as here. The report is
 written to `comparison.txt` and `comparison.json`, and
 `python -m tenx.compare report <folder>` prints it again.
 
+Following this comparison, the cross-source agent runs by default. The
+comparison's arms are unchanged: `alone` still runs the engineer without it.
+
 ### Usage ledger
 
 Every run ends with its usage by role, printed and saved as `usage.json`.
 Each role runs as its own Claude Code session, and the figures are read from
 the report Claude Code prints when that session ends. The engineer is always
 a role; with `--scouts` each scout has a row of its own, named after its
-table, and with `--cross-source` so does the cross-source agent, in the
-order they ran.
+table, and unless `--no-cross-source` is given so does the cross-source
+agent, in the order they ran.
 
 | Column | Meaning |
 | --- | --- |
