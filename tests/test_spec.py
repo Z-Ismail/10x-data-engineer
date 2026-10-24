@@ -1,6 +1,7 @@
-"""Tests for counting what a contract keeps of the raw files.
+"""Tests for counting what a contract keeps of the raw files and writing SPEC.md.
 
-The raw files are handmade and small enough to count by eye.
+The raw files are handmade and small enough to count by eye, and the
+expected SPEC.md text is written out by hand.
 """
 
 import copy
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from tenx.contract import ContractError
-from tenx.spec import count_rows
+from tenx.spec import count_rows, render
 
 ORDERS = """id,amount,currency,livemode
 o1,100,usd,true
@@ -85,6 +86,52 @@ CONTRACT = {
     "questions": [],
 }
 
+SPEC = """# Spec
+
+The models to build, one section each. Row counts are from the raw files
+as they were when the spec was written.
+
+## `stg_shop__orders` (staging)
+
+One row per live order, refunds included.
+
+- Source: `shop.orders`, 4 rows
+- Key: `order_id`
+- Leave out:
+  - `test_mode`, 1 row: Test orders are not real. Rule: `livemode = 'false'`
+- Rows to keep: 3
+- Money: `amount` must add up to `amount` in the source, for each `currency` (`currency` in the source)
+
+| Column | From | Meaning |
+| --- | --- | --- |
+| `order_id` | `shop.orders.id` | The order ID. |
+| `amount` | `shop.orders.amount` | Minor units \\| negative for refunds. |
+| `currency` | `shop.orders.currency` | Code. |
+
+## `stg_shop__visits` (staging)
+
+One row per visit.
+
+- Source: `shop.visits`, 5 rows
+- Key: `visit_id`, `page`
+- Leave out:
+  - `repeat_visits`, 2 rows: Visits are sometimes logged twice. Rule: exact copies of another row; one copy is kept
+- Rows to keep: 3
+
+| Column | From | Meaning |
+| --- | --- | --- |
+| `visit_id` | `shop.visits.id` | The visit ID. |
+| `page` | `shop.visits.page` | The page. |
+
+## Assumptions
+
+- Amounts are in minor units.
+
+## Questions for the requester
+
+None.
+"""
+
 
 class SpecTest(unittest.TestCase):
     def setUp(self):
@@ -108,6 +155,30 @@ class SpecTest(unittest.TestCase):
             (visits.source_rows, visits.excluded, visits.expected_rows),
             (5, (("repeat_visits", 2),), 3),
         )
+
+    def test_the_spec_is_written_out(self):
+        self.assertEqual(render(CONTRACT, count_rows(CONTRACT, self.raw)), SPEC)
+
+    def test_a_model_with_nothing_left_out_and_questions(self):
+        contract = copy.deepcopy(CONTRACT)
+        contract["models"] = contract["models"][1:]
+        contract["models"][0]["exclusions"] = []
+        contract["assumptions"] = []
+        contract["questions"] = ["Should a repeated visit count twice?"]
+        text = render(contract, count_rows(contract, self.raw))
+        self.assertIn("- Leave out: nothing\n- Rows to keep: 5\n", text)
+        self.assertTrue(
+            text.endswith(
+                "## Assumptions\n\nNone.\n\n## Questions for the requester\n\n"
+                "- Should a repeated visit count twice?\n"
+            )
+        )
+
+    def test_a_total_without_grouping(self):
+        contract = copy.deepcopy(CONTRACT)
+        contract["models"][0]["totals"][0].update(by="", source_by="")
+        text = render(contract, count_rows(contract, self.raw))
+        self.assertIn("- Money: `amount` must add up to `amount` in the source\n\n", text)
 
     def test_a_rule_that_does_not_run_is_refused(self):
         contract = copy.deepcopy(CONTRACT)
