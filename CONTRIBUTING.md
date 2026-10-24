@@ -25,6 +25,9 @@ all of them 128 times and takes one to two hours.
 - One logical change per commit, with its tests.
 - Run `make test` before opening a pull request. Do not build on a failing
   baseline.
+- Changes reach `main` through pull requests. CI must pass first: the tests,
+  `ruff check` and `ruff format --check`, and `pip-audit` on the installed
+  dependencies.
 - Notable changes go in `CHANGELOG.md`.
 
 ## Layout
