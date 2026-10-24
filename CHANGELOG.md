@@ -4,6 +4,12 @@ Notable changes to this project.
 
 ## Unreleased
 
+### Fixed
+
+- The runner no longer waits forever when a command started by an agent
+  outlives it, and stops every process an agent started when the agent
+  times out or ends.
+
 ### Changed
 
 - README: the design now describes six roles in a coordinated workflow, the
