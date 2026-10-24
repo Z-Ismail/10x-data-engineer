@@ -7,7 +7,8 @@ must add up to the raw data. It arrives as JSON in the shape of SCHEMA.
 
 Nothing in it is taken on trust: every table and column it names must exist
 in the profiles, and a staging model may take columns only from its own raw
-table. A checked contract can be given to the gate as its declaration.
+table. The rules for leaving rows out are run on the raw files by tenx.spec.
+A checked contract can be given to the gate as its declaration.
 """
 
 from __future__ import annotations
