@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tenx"
 version = "0.0.1"
-description = "A multi-agent data engineering crew for dbt and DuckDB"
+description = "A multi-agent data engineering team that builds data pipelines and checks them against the source data"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"

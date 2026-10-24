@@ -1,6 +1,12 @@
 # 10x Data Engineer
 
-A multi-agent data engineering crew for dbt and DuckDB.
+A multi-agent data engineering team that builds data pipelines and checks
+its work against the source data.
+
+Today it builds tested dbt projects on DuckDB from raw files. The aim is
+wider: other platforms (Snowflake, Databricks, BigQuery), ingestion from
+APIs and databases, orchestration, and diagnosing and optimising existing
+pipelines. See [Scope](#scope) for what exists today and what is planned.
 
 It is installed as an add-on to [Claude Code](https://code.claude.com/docs),
 Anthropic's coding assistant, and adds a team of specialised agents and the
@@ -625,6 +631,21 @@ The tokens are listed per model because a session can use more than one: in
 the example above, Claude Code made a small request of its own on a second
 model. A figure that was not reported is shown as `-`, and the `run` row is
 only added up when every role reported.
+
+## Scope
+
+| Area | Today | Planned |
+| --- | --- | --- |
+| Transformation | dbt on DuckDB: staging models and a cross-source match | Marts and incremental models; plain SQL, Python and PySpark |
+| Ingestion | Local CSV, JSON and Parquet files | REST and GraphQL APIs, database extraction, change data capture, streaming |
+| Platforms | DuckDB | Snowflake first, then Databricks and BigQuery |
+| Orchestration | None | Airflow, Dagster, Databricks Jobs |
+| Checking results | The gate: build, rows, keys, money, expected rows, repeat build | Contracts, incremental and idempotency checks |
+| Fixing and tuning | None | Diagnosing failed pipelines; performance and cost |
+
+New areas are added as tools, specialist instructions and platform adapters
+used by the same roles, rather than as more agents. dbt and DuckDB are the
+first of each, not fixed choices.
 
 ## Design
 
