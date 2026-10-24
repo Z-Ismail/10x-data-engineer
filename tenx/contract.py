@@ -1,4 +1,4 @@
-"""Check a spec's contract against the source profiles.
+"""Check a spec's contract against the source profiles, and turn it into checks.
 
 A contract says, for each model a goal asks for, what one row of it means
 (its grain), its key, the raw table its rows come from, the rows it leaves
@@ -7,7 +7,7 @@ must add up to the raw data. It arrives as JSON in the shape of SCHEMA.
 
 Nothing in it is taken on trust: every table and column it names must exist
 in the profiles, and a staging model may take columns only from its own raw
-table.
+table. A checked contract can be given to the gate as its declaration.
 """
 
 from __future__ import annotations
@@ -254,3 +254,31 @@ def check_contract(contract, profiles: list[dict]) -> dict:
             f"the contract asks {len(contract['questions'])} questions; at most {MAX_QUESTIONS}"
         )
     return contract
+
+
+def to_declaration(contract: dict) -> dict:
+    """The gate's declaration for a checked contract.
+
+    The gate checks each model's rows against its source less the exclusions,
+    its key, and its money totals. Grain sentences, columns and reasons are
+    for people and the engineer; the gate does not read them.
+    """
+    models = []
+    for model in contract["models"]:
+        declared = {"name": model["name"], "key": list(model["key"]), "source": model["source"]}
+        exclusions = [
+            {"name": exclusion["name"], "where": exclusion["where"]}
+            if exclusion["rule"] == "where"
+            else {"name": exclusion["name"], "duplicate_rows": True}
+            for exclusion in model["exclusions"]
+        ]
+        if exclusions:
+            declared["exclusions"] = exclusions
+        totals = [
+            {field: total[field] for field in TOTAL_FIELDS if total[field]}
+            for total in model["totals"]
+        ]
+        if totals:
+            declared["totals"] = totals
+        models.append(declared)
+    return {"models": models}

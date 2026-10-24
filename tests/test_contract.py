@@ -1,11 +1,13 @@
-"""Tests for checking a spec's contract.
+"""Tests for checking a spec's contract and turning it into the gate's declaration.
 
 The profiles are handmade, holding only the fields the check reads: the demo
 tables and their columns as the profiler names them. The demo contract in
-tests/fixtures is written by hand from the demo goal.
+tests/fixtures is written by hand from the demo goal; its declaration is
+compared with the gate's own hand-written declaration for the demo.
 """
 
 import copy
+import dataclasses
 import json
 import tempfile
 import unittest
@@ -14,11 +16,13 @@ from pathlib import Path
 import jsonschema
 
 from demo.generate import generate
-from tenx.contract import SCHEMA, ContractError, check_contract, profile_columns
+from tenx.contract import SCHEMA, ContractError, check_contract, profile_columns, to_declaration
+from tenx.gate import load_declaration, parse_declaration
 from tenx.profile import profile_folder
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CONTRACT = json.loads((FIXTURES / "demo_contract.json").read_text(encoding="utf-8"))
+DECLARATION = FIXTURES / "demo_gate.json"
 
 
 def table(name, *columns):
@@ -217,6 +221,48 @@ class Check(unittest.TestCase):
         total = model(contract, "stg_billing__invoices")["totals"][0]
         total.update(by="", source_by="")
         check_contract(contract, PROFILES)
+
+
+class Declaration(unittest.TestCase):
+    def test_the_demo_contract_gives_the_demo_declaration_without_expected_rows(self):
+        reference = [
+            dataclasses.replace(spec, expected=None) for spec in load_declaration(DECLARATION)
+        ]
+        self.assertEqual(parse_declaration(to_declaration(CONTRACT), "the contract"), reference)
+
+    def test_the_declaration_is_written_out_in_full(self):
+        invoices = to_declaration(CONTRACT)["models"][1]
+        self.assertEqual(
+            invoices,
+            {
+                "name": "stg_billing__invoices",
+                "key": ["invoice_id"],
+                "source": "billing.invoices",
+                "exclusions": [{"name": "test_mode", "where": "livemode = 'false'"}],
+                "totals": [
+                    {
+                        "column": "amount_minor",
+                        "source_column": "amount_minor",
+                        "by": "currency",
+                        "source_by": "currency",
+                    }
+                ],
+            },
+        )
+        events = to_declaration(CONTRACT)["models"][3]
+        self.assertEqual(
+            events["exclusions"], [{"name": "repeat_deliveries", "duplicate_rows": True}]
+        )
+        self.assertNotIn("totals", events)
+        self.assertNotIn("exclusions", to_declaration(CONTRACT)["models"][2])
+
+    def test_a_total_without_grouping_leaves_by_out(self):
+        contract = copy.deepcopy(CONTRACT)
+        model(contract, "stg_billing__invoices")["totals"][0].update(by="", source_by="")
+        self.assertEqual(
+            to_declaration(contract)["models"][1]["totals"],
+            [{"column": "amount_minor", "source_column": "amount_minor"}],
+        )
 
 
 if __name__ == "__main__":
