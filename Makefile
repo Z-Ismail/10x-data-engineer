@@ -1,12 +1,16 @@
 PYTHON ?= python3
 
-.PHONY: install test demo-data profile overlap engineer engineer-alone engineer-scouts compare clean
+.PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts compare clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline]"
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v
+
+lint:
+	ruff check .
+	ruff format --check .
 
 demo-data:
 	$(PYTHON) demo/generate.py --seed 42 --companies 200

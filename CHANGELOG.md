@@ -6,6 +6,8 @@ Notable changes to this project.
 
 ### Changed
 
+- CI runs `ruff check`, `ruff format --check` and `pip-audit` alongside the
+  tests. `make lint` runs the same checks locally.
 - `python -m tenx.engineer` and `make engineer` run the cross-source agent
   before the engineer unless `--no-cross-source` is given, since it raised
   the engineer's pass rate in the comparison. `make engineer-alone` runs the
