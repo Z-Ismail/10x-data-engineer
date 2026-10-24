@@ -6,6 +6,9 @@ Notable changes to this project.
 
 ### Changed
 
+- README: the design now describes six roles in a coordinated workflow, the
+  limits per run, the platform plan, and a Security section on the engineer
+  agent's file access through dbt.
 - CI runs `ruff check`, `ruff format --check` and `pip-audit` alongside the
   tests. `make lint` runs the same checks locally.
 - `python -m tenx.engineer` and `make engineer` run the cross-source agent

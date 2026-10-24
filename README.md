@@ -23,7 +23,9 @@ use.
 | Comparison: how often the engineer passes with and without the other agents | Available |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
 | Spec contract: each model's grain, key, source, rows to leave out and column origins, checked against the profiles and the raw files and written out as `SPEC.md` | Available as Python code (`tenx.contract`, `tenx.spec`); the Architect agent that will write it is not built yet |
-| The rest of the crew | Planned |
+| Isolation: agents run in an operating-system sandbox that cannot see the gate's expectations | In progress. Until it lands, do not run the agents on sensitive data (see Security) |
+| Coordinated crew: six roles in a resumable workflow with approvals and spending limits | In progress, on the `langgraph` branch |
+| Snowflake, Databricks and BigQuery | Planned, read-only first |
 
 ## Why
 
@@ -630,35 +632,64 @@ This section describes the target design. The status table above shows which
 parts exist today.
 
 Input is a goal in plain English and a folder of raw files (CSV, JSON or
-Parquet). Output is a dbt project, delivered as pull requests, plus a report
-showing how the result ties back to the sources.
+Parquet). Output is a dbt project that has passed the gate, plus a report
+that separates what was verified, what was inferred, what is uncertain and
+what needs approval.
 
-| Role | Responsibility |
-| --- | --- |
-| Lead | Breaks the goal into tasks and decides how many roles the job needs |
-| Scouts | Look at the source tables, one table each, in parallel, and note what each needs |
-| Architect | Writes the spec, including the grain of every model |
-| QA | Writes acceptance checks from the spec before anything is built |
-| Staging engineers | One per source system: renames, casts, no joins |
-| Marts engineer | Matches records across systems and builds the final models |
-| Reviewer | Reviews each pull request and has to back findings with a query |
-| Analyst | Answers the original question from the finished tables |
+The crew has six roles. The coordinator is ordinary code; the other roles are
+agents, and each is used only when the job needs it.
 
-A job with one source and a few tables does not use all eight. The Lead runs
-a single engineer and the same gate.
+| Role | Responsibility | Today |
+| --- | --- | --- |
+| Supervisor | Turns a request into a plan, picks the roles, enforces spending limits and asks for approval | The runner in `tenx.engineer`, without approvals or limits per run |
+| Discovery | Profiles the sources, compares columns across tables, works out how they join | Profiler, overlap report and cross-source agent |
+| Architect | Writes the spec: grain, key, source, rows to leave out and column origins for each model | Spec contract checks exist; the agent does not |
+| Engineer | Builds the dbt models, and fixes them when the gate reports a failure | Builds the models; no second attempt yet |
+| Diagnostics | Finds why an existing project fails, separating confirmed facts from guesses | Planned |
+| Reviewer | Reviews the result against the spec; advisory, never overrides the gate | Planned |
 
-The gate fails a run unless:
+The workflow is being built with [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview)
+on the `langgraph` branch. Each run will be saved after every step, so it can
+be resumed after a stop, and will pause for approval before the spec is used and
+before anything leaves the run folder. Every role is measured against the
+version without it, and a role stays in the default run only if it improves
+the pass rate for its cost.
 
-- the project builds twice from an empty database with identical results
-- every model has a declared grain and a passing key test
-- no join changes the row count where it should not
-- money totals in the final tables match the raw sources
+The gate decides every result. It fails a run unless the project builds twice
+from an empty database with identical results, every model's key is unique
+and not null, each model holds the rows of its source less the declared
+exclusions, and money totals match the raw sources by currency. Its
+expectations are kept outside the agents' working folder; the sandbox (in
+progress) will make them unreadable to the agents.
 
-Acceptance checks are stored outside the engineers' write paths, so a check
-cannot be edited to make a run pass.
+### Costs and limits
 
-Everything runs locally on DuckDB. The agents run under your own Claude
-subscription, so there is no separate API key and no hosted service.
+Agents run on your own Claude subscription or API key; there is no hosted
+service. Each agent call has a turn limit, a spending limit and a time limit.
+The coordinated workflow will add a limit per run: before each agent starts,
+its full allowance will be set aside, and the agent will start only if that
+fits in what is left. Claude Code checks its own spending limit after each
+response, so a single call can pass its limit by up to one response; reports
+will show this.
+Dollar figures are Claude Code's estimates. On a subscription they are not
+what you are charged; the limit that applies is your plan's usage.
+
+### Platforms
+
+DuckDB is the only platform today. The coordinated workflow will reach the
+database through small interfaces (profile, validate, build), so that other
+platforms can be added without changing the agents. Snowflake, Databricks and BigQuery are planned,
+read-only first.
+
+## Security
+
+The engineer agent may run only `dbt`, but dbt can read files through DuckDB
+and can run Python models, so tool permissions alone do not stop it reading
+files outside its project. Until the operating-system sandbox lands, run the
+agents only on data you would be comfortable sharing with them, and keep
+credentials out of the machine's readable files. On Linux the sandbox will use
+[bubblewrap](https://github.com/containers/bubblewrap); on other systems the
+runner will refuse to run unsandboxed unless you say so.
 
 ## Requirements
 
