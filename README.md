@@ -22,6 +22,7 @@ use.
 | Scouts: notes on each raw table, given to the engineer | Available as an option; in a measured comparison they lowered the engineer's pass rate, and added nothing with the cross-source agent |
 | Comparison: how often the engineer passes with and without the other agents | Available |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
+| Spec contract: each model's grain, key, source, rows to leave out and column origins, checked against the profiles and the raw files and written out as `SPEC.md` | Available as Python code (`tenx.contract`, `tenx.spec`); the Architect agent that will write it is not built yet |
 | The rest of the crew | Planned |
 
 ## Why

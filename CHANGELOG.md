@@ -39,6 +39,15 @@ Notable changes to this project.
 
 ### Added
 
+- `tenx.contract` and `tenx.spec`: a spec's contract lists, for each model,
+  its grain, key, source table, the rows to leave out with the reason and
+  the rule, where each column comes from, and the money that must add up to
+  the raw data. The contract is checked against the source profiles (every
+  table and column it names must exist; a staging model takes columns only
+  from its own table; at most three open questions), each rule for leaving
+  rows out is run on the raw files and its rows counted, and the contract is
+  written out as `SPEC.md` and turned into a gate declaration. Nothing
+  writes a contract yet; it is the first part of the Architect role.
 - Comparison (`python -m tenx.compare`, `make compare`): runs the engineer
   alone, with scouts, with the cross-source agent and with both, the same
   number of times on every dataset, in shuffled blocks, and reports each
