@@ -53,6 +53,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -262,36 +263,78 @@ def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[
     ]
 
 
+def _stop_group(process: subprocess.Popen, grace: float) -> None:
+    """Stop the agent and every process it started.
+
+    The agent runs in its own process group, so one signal reaches the
+    commands it started as well, such as a dbt build. SIGTERM lets Claude
+    Code stop its commands; whatever is still running after the grace period
+    is killed.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
 def run_agent(project: Path, command: list[str], report_file: Path, timeout: float) -> AgentRun:
-    """Run the agent in the project folder and keep what it reported."""
+    """Run the agent in the project folder and keep what it reported.
+
+    The agent's output goes to files rather than pipes. A command the agent
+    started can outlive it and keep a pipe open, which would leave the runner
+    waiting for output that never ends; a file cannot hold the runner. The
+    report is moved into place only once the agent has finished, so a stopped
+    run never leaves a partial report.
+    """
     # dbt must find the project's own profiles.yml, not one set elsewhere.
     environment = {key: value for key, value in os.environ.items() if key != "DBT_PROFILES_DIR"}
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=project,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError as error:
-        raise EngineerError(
-            f"{command[0]} was not found; install Claude Code and sign in first"
-        ) from error
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # SIGTERM lets Claude Code stop the commands it started before it exits.
-        process.terminate()
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    partial = report_file.with_name(report_file.name + ".partial")
+    errors = report_file.with_name(report_file.name + ".stderr")
+    with partial.open("w", encoding="utf-8") as out, errors.open("w", encoding="utf-8") as err:
         try:
-            process.communicate(timeout=STOP_GRACE_SECONDS)
+            process = subprocess.Popen(
+                command,
+                cwd=project,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                text=True,
+                start_new_session=True,
+            )
+        except FileNotFoundError as error:
+            partial.unlink(missing_ok=True)
+            errors.unlink(missing_ok=True)
+            raise EngineerError(
+                f"{command[0]} was not found; install Claude Code and sign in first"
+            ) from error
+        try:
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
-        return AgentRun(process.returncode, None, timed_out_after=timeout)
-    report_file.write_text(stdout, encoding="utf-8")
+            _stop_group(process, STOP_GRACE_SECONDS)
+            partial.unlink(missing_ok=True)
+            errors.unlink(missing_ok=True)
+            return AgentRun(process.returncode, None, timed_out_after=timeout)
+        finally:
+            # Commands the agent left running when it ended are stopped too.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    stdout = partial.read_text(encoding="utf-8")
+    stderr = errors.read_text(encoding="utf-8")
+    errors.unlink(missing_ok=True)
+    os.replace(partial, report_file)
     try:
         report = json.loads(stdout)
     except json.JSONDecodeError:
