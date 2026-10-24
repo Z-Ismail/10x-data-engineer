@@ -1,0 +1,97 @@
+{
+  "models": [
+    {
+      "name": "stg_billing__customers",
+      "layer": "staging",
+      "grain": "One row per live billing customer.",
+      "key": ["customer_id"],
+      "source": "billing.customers",
+      "columns": [
+        {"name": "customer_id", "from": ["billing.customers.id"], "description": "The billing system's customer ID, as written."},
+        {"name": "email", "from": ["billing.customers.email"], "description": "The customer's billing email address, in lower case without surrounding spaces."},
+        {"name": "contact_name", "from": ["billing.customers.name"], "description": "The contact's name."},
+        {"name": "currency", "from": ["billing.customers.currency"], "description": "The customer's billing currency code."},
+        {"name": "created_at", "from": ["billing.customers.created"], "description": "When the customer was created, from Unix seconds, in UTC."}
+      ],
+      "exclusions": [
+        {"name": "test_mode", "reason": "Customers created in test mode are not real.", "rule": "where", "where": "livemode = 'false'"}
+      ],
+      "totals": []
+    },
+    {
+      "name": "stg_billing__invoices",
+      "layer": "staging",
+      "grain": "One row per live invoice, including void and open invoices and refunds.",
+      "key": ["invoice_id"],
+      "source": "billing.invoices",
+      "columns": [
+        {"name": "invoice_id", "from": ["billing.invoices.id"], "description": "The billing system's invoice ID."},
+        {"name": "customer_id", "from": ["billing.invoices.customer_id"], "description": "The customer the invoice is for."},
+        {"name": "amount_minor", "from": ["billing.invoices.amount_minor"], "description": "The amount in the currency's smallest unit, as an integer; refunds are negative."},
+        {"name": "currency", "from": ["billing.invoices.currency"], "description": "The invoice's currency code."},
+        {"name": "status", "from": ["billing.invoices.status"], "description": "paid, open or void."},
+        {"name": "created_at", "from": ["billing.invoices.created"], "description": "When the invoice was created, from Unix seconds, in UTC."}
+      ],
+      "exclusions": [
+        {"name": "test_mode", "reason": "Invoices created in test mode are not real.", "rule": "where", "where": "livemode = 'false'"}
+      ],
+      "totals": [
+        {"column": "amount_minor", "source_column": "amount_minor", "by": "currency", "source_by": "currency"}
+      ]
+    },
+    {
+      "name": "stg_crm__accounts",
+      "layer": "staging",
+      "grain": "One row per CRM account.",
+      "key": ["account_id"],
+      "source": "crm.accounts",
+      "columns": [
+        {"name": "account_id", "from": ["crm.accounts.account_id"], "description": "The CRM account ID, kept as text so its leading zeros stay."},
+        {"name": "company_name", "from": ["crm.accounts.company_name"], "description": "The company's name."},
+        {"name": "billing_email", "from": ["crm.accounts.billing_email"], "description": "The account's billing email address, in lower case without surrounding spaces."},
+        {"name": "segment", "from": ["crm.accounts.segment"], "description": "enterprise, mid_market or smb."},
+        {"name": "status", "from": ["crm.accounts.status"], "description": "customer or prospect."},
+        {"name": "created_date", "from": ["crm.accounts.created_date"], "description": "When the account was created, read as day/month/year."}
+      ],
+      "exclusions": [],
+      "totals": []
+    },
+    {
+      "name": "stg_events__events",
+      "layer": "staging",
+      "grain": "One row per product event, each delivered event once.",
+      "key": ["event_id"],
+      "source": "events.events",
+      "columns": [
+        {"name": "event_id", "from": ["events.events.event_id"], "description": "The event's ID."},
+        {"name": "workspace_id", "from": ["events.events.workspace_id"], "description": "The workspace the event happened in."},
+        {"name": "user_email", "from": ["events.events.user_email"], "description": "The user's email address, as delivered."},
+        {"name": "event_name", "from": ["events.events.event_name"], "description": "What happened."},
+        {"name": "occurred_at", "from": ["events.events.ts"], "description": "When the event happened, in UTC."}
+      ],
+      "exclusions": [
+        {"name": "repeat_deliveries", "reason": "The event log sometimes delivers the same event more than once, as an exact copy.", "rule": "duplicate_rows", "where": ""}
+      ],
+      "totals": []
+    },
+    {
+      "name": "int_customers_matched_to_accounts",
+      "layer": "intermediate",
+      "grain": "One row per live billing customer, with the CRM account of the same company.",
+      "key": ["customer_id"],
+      "source": "billing.customers",
+      "columns": [
+        {"name": "customer_id", "from": ["billing.customers.id"], "description": "The billing customer."},
+        {"name": "account_id", "from": ["crm.accounts.account_id"], "description": "The CRM account whose billing email has the same domain as the customer's email; empty when the company has no CRM account."}
+      ],
+      "exclusions": [
+        {"name": "test_mode", "reason": "Customers created in test mode are not real.", "rule": "where", "where": "livemode = 'false'"}
+      ],
+      "totals": []
+    }
+  ],
+  "assumptions": [
+    "The email domain identifies the company in both systems; some CRM accounts hold another mailbox at the company's domain."
+  ],
+  "questions": []
+}
