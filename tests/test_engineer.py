@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -46,6 +47,7 @@ from tenx.engineer import (
     prepare_project,
     prepare_scout,
     run,
+    run_agent,
 )
 from tenx.gate import FAIL, GateError, load_declaration, passed
 from tenx.scouts import render as render_table_notes
@@ -934,6 +936,76 @@ class RunTest(unittest.TestCase):
         with self.assertRaises(GateError):
             run(self.raw, DEMO_GOAL, bad, self.out)
         self.assertFalse(self.out.exists())
+
+
+# A stand-in agent that starts a child process sharing its output, as a dbt
+# build started by the agent would, and records the child's process id.
+LEAVES_A_CHILD = """
+import json, os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+open(os.environ["CHILD_PID_FILE"], "w").write(str(child.pid))
+if os.environ["AGENT_MODE"] == "hang":
+    time.sleep(120)
+print(json.dumps({"type": "result", "subtype": "success", "num_turns": 1}))
+"""
+
+
+def _running(pid: int) -> bool:
+    """Whether a process is alive (a zombie awaiting its parent is not)."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[0]
+    except FileNotFoundError:
+        return False
+    return state != "Z"
+
+
+@unittest.skipUnless(Path("/proc").is_dir(), "needs /proc to see processes")
+class RunAgentCleanupTest(unittest.TestCase):
+    """The runner never waits on, or leaves behind, a process the agent started."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.agent = self.root / "agent.py"
+        self.agent.write_text(LEAVES_A_CHILD, encoding="utf-8")
+        self.child_pid_file = self.root / "child.pid"
+        self.report = self.root / "out" / "agent.json"
+
+    def run_stand_in(self, mode: str, timeout: float):
+        environment = {"CHILD_PID_FILE": str(self.child_pid_file), "AGENT_MODE": mode}
+        with (
+            mock.patch.dict(os.environ, environment),
+            mock.patch("tenx.engineer.STOP_GRACE_SECONDS", 2),
+        ):
+            started = time.monotonic()
+            agent = run_agent(self.root, [sys.executable, str(self.agent)], self.report, timeout)
+            elapsed = time.monotonic() - started
+        child = int(self.child_pid_file.read_text())
+        self.addCleanup(lambda: _running(child) and os.kill(child, 9))
+        return agent, elapsed, child
+
+    def test_an_agent_that_finishes_is_not_held_by_its_child(self):
+        agent, elapsed, child = self.run_stand_in("finish", timeout=60)
+        self.assertLess(elapsed, 30)
+        self.assertEqual(agent.report["subtype"], "success")
+        self.assertIsNone(agent.timed_out_after)
+        self.assertEqual(json.loads(self.report.read_text())["num_turns"], 1)
+        time.sleep(0.5)
+        self.assertFalse(_running(child), "the child the agent left running was not stopped")
+
+    def test_a_timed_out_agent_and_its_child_are_stopped(self):
+        agent, elapsed, child = self.run_stand_in("hang", timeout=3)
+        # The timeout plus the grace period, with room for a slow machine.
+        self.assertLess(elapsed, 3 + 2 + 10)
+        self.assertEqual(agent.timed_out_after, 3)
+        self.assertIsNone(agent.report)
+        time.sleep(0.5)
+        self.assertFalse(_running(child), "the agent's child is still running")
+
+    def test_a_stopped_agent_leaves_no_report_or_scratch_files(self):
+        self.run_stand_in("hang", timeout=3)
+        self.assertEqual(sorted(path.name for path in self.report.parent.iterdir()), [])
 
 
 if __name__ == "__main__":
