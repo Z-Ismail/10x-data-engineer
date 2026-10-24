@@ -12,6 +12,9 @@ Notable changes to this project.
 
 ### Changed
 
+- README: the opening and a new Scope section describe the wider aim
+  (other platforms, ingestion, orchestration, diagnosis) and separate what
+  exists today from what is planned.
 - README: the design now describes six roles in a coordinated workflow, the
   limits per run, the platform plan, and a Security section on the engineer
   agent's file access through dbt.
