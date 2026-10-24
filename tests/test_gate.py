@@ -44,6 +44,7 @@ from tenx.gate import (
     expected_totals,
     load_declaration,
     main,
+    parse_declaration,
     passed,
     render,
     run_gate,
@@ -278,6 +279,12 @@ class Declaration(unittest.TestCase):
     def test_a_missing_file_is_reported(self):
         with self.assertRaises(GateError):
             load_declaration(self.root / "absent.json")
+
+    def test_a_declaration_read_already_is_validated_the_same_way(self):
+        payload = json.loads(DECLARATION.read_text(encoding="utf-8"))
+        self.assertEqual(parse_declaration(payload), load_declaration(DECLARATION))
+        with self.assertRaisesRegex(GateError, r"^the contract: unknown field owner$"):
+            parse_declaration({**payload, "owner": "data"}, "the contract")
 
 
 def node(unique_id, status, relation_name=None, message=None):

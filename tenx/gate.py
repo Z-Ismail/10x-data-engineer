@@ -362,18 +362,23 @@ def load_declaration(path: Path) -> list[ModelSpec]:
         raise GateError(f"could not read {path}: {error.strerror or error}") from error
     except json.JSONDecodeError as error:
         raise GateError(f"{path} is not valid JSON: {error}") from error
-    _require(isinstance(payload, dict), f"{path} must hold a JSON object")
+    return parse_declaration(payload, str(path))
+
+
+def parse_declaration(payload: object, where: str = "the declaration") -> list[ModelSpec]:
+    """Validate a declaration already read as JSON; where names it in messages."""
+    _require(isinstance(payload, dict), f"{where} must hold a JSON object")
     unknown = sorted(set(payload) - {"models"})
-    _require(not unknown, f"{path}: unknown field {', '.join(unknown)}")
+    _require(not unknown, f"{where}: unknown field {', '.join(unknown)}")
     listed = payload.get("models")
-    _require(isinstance(listed, list) and bool(listed), f"{path} must list at least one model")
+    _require(isinstance(listed, list) and bool(listed), f"{where} must list at least one model")
     try:
         models = [_parse_model(item) for item in listed]
     except GateError as error:
-        raise GateError(f"{path}: {error}") from error
+        raise GateError(f"{where}: {error}") from error
     names = [model.name for model in models]
     repeated = sorted({name for name in names if names.count(name) > 1})
-    _require(not repeated, f"{path}: {', '.join(repeated)} is declared more than once")
+    _require(not repeated, f"{where}: {', '.join(repeated)} is declared more than once")
     return models
 
 
