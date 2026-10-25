@@ -4,6 +4,16 @@ Notable changes to this project.
 
 ## Unreleased
 
+### Added
+
+- Every agent runs in a bubblewrap sandbox on Linux. It sees its own folder,
+  the add-on, the programs it runs, Claude Code's settings and, for the
+  engineer, the raw files; the gate's expectations, the repository, the run
+  folder and the home folder are hidden, and writes outside the agent's
+  folder are discarded. Where no sandbox can be set up the run is refused;
+  `--unisolated` runs without one, and the report and `usage.json` say so.
+  The gate's own build of the agent's project is not sandboxed yet.
+
 ### Fixed
 
 - The runner no longer waits forever when a command started by an agent

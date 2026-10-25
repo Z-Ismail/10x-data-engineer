@@ -29,7 +29,7 @@ use.
 | Comparison: how often the engineer passes with and without the other agents | Available |
 | Usage ledger: tokens, turns, time and cost by role for every run | Available |
 | Spec contract: each model's grain, key, source, rows to leave out and column origins, checked against the profiles and the raw files and written out as `SPEC.md` | Available as Python code (`tenx.contract`, `tenx.spec`); the Architect agent that will write it is not built yet |
-| Isolation: agents run in an operating-system sandbox that cannot see the gate's expectations | In progress. Until it lands, do not run the agents on sensitive data (see Security) |
+| Isolation: agents run in an operating-system sandbox that cannot see the gate's expectations | In progress. On Linux every agent runs in a bubblewrap sandbox; the gate's own build of the agent's project does not yet. Do not run the agents on sensitive data yet (see Security) |
 | Coordinated crew: six roles in a resumable workflow with approvals and spending limits | In progress, on the `langgraph` branch |
 | Snowflake, Databricks and BigQuery | Planned, read-only first |
 
@@ -365,7 +365,8 @@ sources, the staging models, any model that combines sources (under
 told to count rows with `dbt show` until every model reconciles with its
 source before it stops, but only the gate's verdict counts. The gate's
 declaration is never put in the agent's folder, so the agent cannot read the
-checks or change them.
+checks or change them, and on Linux the sandbox (see [Security](#security))
+hides it from the agent whatever command the agent runs.
 
 The agent runs in Claude Code without anyone at the keyboard. It may write
 files in its own folder and run `dbt`, and every other action is refused
@@ -450,15 +451,16 @@ pinned to the Sonnet model and stops after 20 turns.
 
 ```
 cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 8 cautions
-agent: success after 18 turns (exit 0)
+agent: success after 19 turns (exit 0)
 project: runs/demo/project
+sandbox: bubblewrap: the agents see only their own folder and the files their work needs
 
 gate: PASS (24 passed, 0 failed, 0 not run)
 ...
 role          outcome    turns  refused    time  cost (US$)
-cross-source  success        9        0  26.7 s      0.0729
-engineer      success       18        0  33.7 s      0.0829
-run           gate PASS     27        0  60.4 s      0.1558
+cross-source  success        9        0  27.3 s      0.0776
+engineer      success       19        0  25.3 s      0.1088
+run           gate PASS     28        0  52.6 s      0.1863
 ```
 
 In that run the notes said that trimming and lower case leave some
@@ -680,8 +682,8 @@ The gate decides every result. It fails a run unless the project builds twice
 from an empty database with identical results, every model's key is unique
 and not null, each model holds the rows of its source less the declared
 exclusions, and money totals match the raw sources by currency. Its
-expectations are kept outside the agents' working folder; the sandbox (in
-progress) will make them unreadable to the agents.
+expectations are kept outside the agents' working folder, and on Linux the
+sandbox makes them unreadable to the agents.
 
 ### Costs and limits
 
@@ -705,12 +707,44 @@ read-only first.
 ## Security
 
 The engineer agent may run only `dbt`, but dbt can read files through DuckDB
-and can run Python models, so tool permissions alone do not stop it reading
-files outside its project. Until the operating-system sandbox lands, run the
-agents only on data you would be comfortable sharing with them, and keep
-credentials out of the machine's readable files. On Linux the sandbox will use
-[bubblewrap](https://github.com/containers/bubblewrap); on other systems the
-runner will refuse to run unsandboxed unless you say so.
+and can run Python models, so tool permissions alone do not stop an agent
+reading files outside its project. So every agent runs inside an
+operating-system sandbox, which applies to everything the agent starts.
+
+On Linux the sandbox is [bubblewrap](https://github.com/containers/bubblewrap).
+Inside it the computer's files are read-only; the home folder, the temporary
+folders, the repository and the run folder are replaced by empty folders that
+are discarded when the agent stops; then only what the agent's work needs is
+put back: its own folder (the one place it can write), the add-on's agent
+files, the programs it runs (Claude Code, Python and dbt), Claude Code's own
+settings and sign-in, and, for the engineer, the raw files, read-only. The
+gate's expectations, the reference project the gate is tested against, the
+gate's work and the other agents' reports are never visible. The agent's
+processes have their own process ids and stop when the run stops. The tests
+check this by having a stand-in agent try to read each of these by `cat`, by
+Python, by `dbt show` with `read_text()` and by a dbt Python model, and run in
+CI.
+
+If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
+start the agents and says how to install or allow it. On Ubuntu 24.04 and
+later, AppArmor allows bubblewrap to set up a sandbox only with a profile
+that permits it; `.github/workflows/ci.yml` shows one. On macOS and Windows
+there is no tested sandbox yet, so the runner refuses there too.
+`--unisolated` runs the agents without a sandbox; the run's report and
+`usage.json` then say so.
+
+What the sandbox does not cover yet:
+
+- The gate builds the agent's project with dbt outside the sandbox, so a
+  dbt Python model the agent wrote runs with your access during the gate.
+- The agents keep network access, which Claude Code needs, so an agent could
+  send out the raw data it can read.
+- The agents see your environment variables, and Claude Code's settings
+  folder, which holds its sign-in and the history of your other sessions.
+
+Until these are closed, run the agents only on data you would be comfortable
+sharing with them, and keep credentials out of the environment you run them
+from.
 
 ## Requirements
 
@@ -721,6 +755,9 @@ dbt-duckdb 1.11, which are the `pipeline` dependency group in
 
 The engineer agent also needs [Claude Code](https://code.claude.com/docs),
 installed and signed in. It runs on your own Claude subscription or API key.
+On Linux the agents also need bubblewrap (`sudo apt install bubblewrap` on
+Debian and Ubuntu, `sudo dnf install bubblewrap` on Fedora); see
+[Security](#security).
 
 ## Repository layout
 
@@ -729,7 +766,7 @@ installed and signed in. It runs on your own Claude subscription or API key.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner, the row sample, the checks of the cross-source agent's and scouts' answers, and the comparison |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, and the comparison |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
 ## Licence
