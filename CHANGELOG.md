@@ -22,6 +22,10 @@ Notable changes to this project.
 
 ### Changed
 
+- README: rewritten around the product's aim, design and principles, with
+  a roadmap table showing what is available today. The detailed description
+  of each component, with example output, moved to `docs/components.md`,
+  and the full security description to `docs/security.md`.
 - README: the opening and a new Scope section describe the wider aim
   (other platforms, ingestion, orchestration, diagnosis) and separate what
   exists today from what is planned.
