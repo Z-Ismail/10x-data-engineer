@@ -611,7 +611,9 @@ class SandboxedTimeoutTest(unittest.TestCase):
             agent = root / "tools" / "agent.py"
             agent.parent.mkdir()
             agent.write_text(HANGS_WITH_A_CHILD, encoding="utf-8")
-            mounts = Mounts(workspace=workspace, read_only=(agent.parent,))
+            # The Python that runs the stand-in may be in a hidden folder.
+            python = (Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve())
+            mounts = Mounts(workspace=workspace, read_only=(agent.parent, *python))
             with mock.patch("tenx.engineer.STOP_GRACE_SECONDS", 2):
                 started = time.monotonic()
                 outcome = run_agent(
@@ -623,7 +625,7 @@ class SandboxedTimeoutTest(unittest.TestCase):
                     mounts,
                 )
                 elapsed = time.monotonic() - started
-            self.assertEqual(outcome.timed_out_after, 3)
+            self.assertEqual(outcome.timed_out_after, 3, outcome.describe())
             self.assertLess(elapsed, 3 + 2 + 10)
             beat = workspace / "heartbeat"
             self.assertTrue(beat.is_file(), "the child never ran")
