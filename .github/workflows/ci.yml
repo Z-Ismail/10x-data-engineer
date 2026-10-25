@@ -23,7 +23,22 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: make install
+      - name: Install bubblewrap
+        # Ubuntu 24.04 lets a program set up a sandbox only if an AppArmor
+        # profile allows it to create user namespaces; bubblewrap has none.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
+            | sudo tee /etc/apparmor.d/bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          bwrap --ro-bind / / --unshare-pid --die-with-parent true
       - name: Run tests
+        # The sandbox tests fail here, rather than being skipped, if
+        # bubblewrap cannot run.
+        env:
+          TENX_REQUIRE_SANDBOX: "1"
         run: make test
       - name: Generate demo data
         run: make demo-data
