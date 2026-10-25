@@ -50,12 +50,17 @@ from tenx.engineer import (
     run_agent,
 )
 from tenx.gate import FAIL, GateError, load_declaration, passed
+from tenx.sandbox import Unisolated
 from tenx.scouts import render as render_table_notes
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REFERENCE_MODELS = FIXTURES / "demo_project" / "models"
 DECLARATION = FIXTURES / "demo_gate.json"
 DEMO_GOAL = Path(__file__).resolve().parent.parent / "demo" / "goal.md"
+# The stand-in records what it saw outside its folder and copies models from
+# the fixtures, so these runs are unisolated; tests/test_sandbox.py runs
+# agents in the sandbox.
+UNISOLATED = Unisolated()
 
 # Stands in for the claude command. It records how it was started and what
 # its folder held, and reports like `claude -p --output-format json` does.
@@ -483,6 +488,7 @@ class RunTest(unittest.TestCase):
                     str(DECLARATION),
                     "--out",
                     str(self.out),
+                    "--unisolated",
                     "--no-cross-source",
                 ]
             )
@@ -557,6 +563,7 @@ class RunTest(unittest.TestCase):
                     str(DECLARATION),
                     "--out",
                     str(self.out),
+                    "--unisolated",
                     *flags,
                 ]
             )
@@ -648,6 +655,7 @@ class RunTest(unittest.TestCase):
                     str(DECLARATION),
                     "--out",
                     str(self.out),
+                    "--unisolated",
                     "--scouts",
                     *flags,
                 ]
@@ -877,7 +885,9 @@ class RunTest(unittest.TestCase):
             test_mode = [row for row in csv.DictReader(handle) if row["livemode"] == "false"]
         self.assertGreater(len(test_mode), 0)
         with self.stub(self.broken):
-            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
+            outcome = run(
+                self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60, sandbox=UNISOLATED
+            )
         agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.report["subtype"], "success")
         self.assertFalse(passed(results))
@@ -893,7 +903,9 @@ class RunTest(unittest.TestCase):
 
     def test_an_agent_that_fails_to_run_leaves_nothing_to_pass(self):
         with self.stub(mode="crash"):
-            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
+            outcome = run(
+                self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60, sandbox=UNISOLATED
+            )
         agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.describe(), "exited 1 without a report: Error: not signed in")
         self.assertFalse(passed(results))
@@ -907,7 +919,7 @@ class RunTest(unittest.TestCase):
 
     def test_an_agent_that_does_not_finish_is_stopped(self):
         with self.stub(REFERENCE_MODELS, mode="hang"):
-            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=5)
+            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=5, sandbox=UNISOLATED)
         agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.describe(), "stopped: did not finish within 5 seconds")
         self.assertFalse((self.out / AGENT_FILE).exists())
@@ -924,17 +936,17 @@ class RunTest(unittest.TestCase):
             mock.patch.dict(os.environ, {"PATH": str(self.root)}),
             self.assertRaisesRegex(EngineerError, "claude was not found"),
         ):
-            run(self.raw, DEMO_GOAL, DECLARATION, self.out)
+            run(self.raw, DEMO_GOAL, DECLARATION, self.out, sandbox=UNISOLATED)
 
     def test_refuses_an_output_folder_that_is_not_empty(self):
         write(self.out / "project" / "models" / "old.sql", "select 1")
         with self.assertRaisesRegex(EngineerError, "must be empty"):
-            run(self.raw, DEMO_GOAL, DECLARATION, self.out)
+            run(self.raw, DEMO_GOAL, DECLARATION, self.out, sandbox=UNISOLATED)
 
     def test_an_unusable_declaration_stops_the_run_before_anything_is_written(self):
         bad = write(self.root / "bad.json", '{"models": [{"name": "m", "colour": "red"}]}')
         with self.assertRaises(GateError):
-            run(self.raw, DEMO_GOAL, bad, self.out)
+            run(self.raw, DEMO_GOAL, bad, self.out, sandbox=UNISOLATED)
         self.assertFalse(self.out.exists())
 
 

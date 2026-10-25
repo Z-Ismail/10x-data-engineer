@@ -2,15 +2,24 @@
 
 The command line bubblewrap is given is checked against paths worked out by
 hand, and the sandbox is refused where it cannot be set up.
+The runner shows each agent what its work needs and hides the rest, and
+the command line refuses a run without a sandbox unless told otherwise.
 """
 
+import io
+import json
 import os
+import shutil
 import stat
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from demo.generate import generate
+from tenx.engineer import PLUGIN_DIR, USAGE_FILE, main, mounts
 from tenx.sandbox import (
     BWRAP_INSTALL,
     Bubblewrap,
@@ -19,6 +28,11 @@ from tenx.sandbox import (
     Unisolated,
     default_sandbox,
 )
+
+FIXTURES = Path(__file__).parent / "fixtures"
+REFERENCE_MODELS = FIXTURES / "demo_project" / "models"
+DECLARATION = FIXTURES / "demo_gate.json"
+DEMO_GOAL = PLUGIN_DIR / "demo" / "goal.md"
 
 
 def options(arguments: list[str]) -> list[str]:
@@ -178,6 +192,48 @@ class BubblewrapCommandTest(unittest.TestCase):
         self.assertEqual(Unisolated().command(["claude", "-p"], self.mounts()), ["claude", "-p"])
 
 
+class RunnerMountsTest(unittest.TestCase):
+    """What the runner shows each agent, and what it hides."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.home = self.root / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        (self.home / ".claude.json").write_text("{}", encoding="utf-8")
+        self.out = self.root / "run"
+        (self.out / "plugin").mkdir(parents=True)
+        self.checks = self.root / "gate.json"
+        self.raw = self.root / "data"
+        self.claude = shutil.which("python3")
+
+    def test_the_engineer_sees_the_raw_data_and_the_other_agents_do_not(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            engineer = mounts(self.out / "project", self.out, self.checks, self.claude, self.raw)
+            other = mounts(self.out / "cross_source", self.out, self.checks, self.claude)
+        self.assertEqual(engineer.workspace, self.out / "project")
+        self.assertEqual(engineer.read_only[:2], (self.raw, self.out / "plugin"))
+        self.assertEqual(other.read_only[0], self.out / "plugin")
+        self.assertNotIn(self.raw, other.read_only)
+        for seen in (engineer, other):
+            self.assertEqual(seen.hidden, (PLUGIN_DIR, self.out, self.checks))
+            self.assertEqual(seen.writable, (self.home / ".claude", self.home / ".claude.json"))
+        # Claude Code, and the Python that runs dbt, are shown.
+        self.assertIn(Path(self.claude).resolve().parent, engineer.read_only)
+        self.assertIn(Path(sys.prefix).resolve(), engineer.read_only)
+
+    def test_claude_code_settings_follow_its_config_folder(self):
+        config = self.root / "config"
+        config.mkdir()
+        with mock.patch.dict(
+            os.environ, {"HOME": str(self.home), "CLAUDE_CONFIG_DIR": str(config)}
+        ):
+            seen = mounts(self.out / "project", self.out, self.checks, self.claude)
+        self.assertEqual(seen.writable, (config, self.home / ".claude.json"))
+
+
 class DefaultSandboxTest(unittest.TestCase):
     def test_unisolated_only_when_asked(self):
         self.assertIsInstance(default_sandbox(unisolated=True), Unisolated)
@@ -211,3 +267,55 @@ class DefaultSandboxTest(unittest.TestCase):
                 ),
             ):
                 default_sandbox(platform="linux")
+
+
+class CommandLineSandboxTest(unittest.TestCase):
+    """Refused without a sandbox; run, and marked, with --unisolated."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.raw = self.root / "data"
+        generate(11, 20, self.raw, self.root / "answers")
+        self.out = self.root / "run"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        claude = bin_dir / "claude"
+        claude.write_text(
+            f"#!{sys.executable}\nimport json\n"
+            'print(json.dumps({"type": "result", "subtype": "success", "num_turns": 1}))\n',
+            encoding="utf-8",
+        )
+        claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
+        self.path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+    def main(self, *flags: str) -> tuple[int, str, str]:
+        arguments = ["--raw", str(self.raw), "--goal", str(DEMO_GOAL)]
+        arguments += ["--checks", str(DECLARATION), "--out", str(self.out), "--no-cross-source"]
+        with (
+            mock.patch.dict(os.environ, {"PATH": self.path}),
+            redirect_stdout(io.StringIO()) as printed,
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            code = main(arguments + list(flags))
+        return code, printed.getvalue(), errors.getvalue()
+
+    def test_without_bubblewrap_the_run_is_refused_before_anything_is_written(self):
+        with mock.patch("tenx.sandbox.which", return_value=None):
+            code, printed, errors = self.main()
+        self.assertEqual(code, 2)
+        self.assertEqual(printed, "")
+        self.assertIn("error: bubblewrap (bwrap) is needed", errors)
+        self.assertFalse(self.out.exists())
+
+    def test_an_unisolated_run_goes_ahead_and_says_so(self):
+        with mock.patch("tenx.sandbox.which", return_value=None):
+            code, printed, _ = self.main("--unisolated")
+        self.assertEqual(code, 1, printed)  # the stand-in writes no models
+        self.assertIn(
+            "sandbox: none (--unisolated): the agents could read and change any file you can\n",
+            printed,
+        )
+        ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(ledger["sandbox"], "none")

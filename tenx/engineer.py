@@ -33,6 +33,12 @@ builds the project from an empty database and checks it against the raw
 files. The run passes only if the gate passes. Last, the run's usage is
 recorded and printed by role.
 
+Every agent runs in a sandbox (bubblewrap on Linux): it sees its own folder,
+the add-on, the programs it runs and, for the engineer, the raw files, and
+nothing else of the run, the repository or the home folder. Where no sandbox
+can be set up the run is refused, unless --unisolated is given, and the
+report then says the agents ran without one.
+
 Unless --no-cross-source is given, the cross-source agent runs first. It
 reads the goal, the profiles and the overlap report in a folder of its own,
 changes nothing, and answers how the tables the goal needs join. Its answer
@@ -68,6 +74,7 @@ from tenx.ledger import render as render_usage
 from tenx.overlap import overlap_folder, write_report
 from tenx.profile import ProfileError, profile_folder
 from tenx.sample import sample
+from tenx.sandbox import Mounts, Sandbox, SandboxError, Unisolated, default_sandbox
 from tenx.scouts import NOTES_FILE as TABLE_NOTES_FILE
 from tenx.scouts import SCHEMA as SCOUT_SCHEMA
 from tenx.scouts import ScoutError
@@ -286,8 +293,18 @@ def _stop_group(process: subprocess.Popen, grace: float) -> None:
     process.wait()
 
 
-def run_agent(project: Path, command: list[str], report_file: Path, timeout: float) -> AgentRun:
+def run_agent(
+    project: Path,
+    command: list[str],
+    report_file: Path,
+    timeout: float,
+    sandbox: Sandbox | None = None,
+    mounts: Mounts | None = None,
+) -> AgentRun:
     """Run the agent in the project folder and keep what it reported.
+
+    With a sandbox, the agent sees only what ``mounts`` allow; without one
+    it runs unisolated.
 
     The agent's output goes to files rather than pipes. A command the agent
     started can outlive it and keep a pipe open, which would leave the runner
@@ -300,10 +317,12 @@ def run_agent(project: Path, command: list[str], report_file: Path, timeout: flo
     report_file.parent.mkdir(parents=True, exist_ok=True)
     partial = report_file.with_name(report_file.name + ".partial")
     errors = report_file.with_name(report_file.name + ".stderr")
+    sandbox = sandbox or Unisolated()
+    started = sandbox.command(command, mounts or Mounts(workspace=project))
     with partial.open("w", encoding="utf-8") as out, errors.open("w", encoding="utf-8") as err:
         try:
             process = subprocess.Popen(
-                command,
+                started,
                 cwd=project,
                 env=environment,
                 stdin=subprocess.DEVNULL,
@@ -390,6 +409,57 @@ class Run:
     results: list[Result]
     notes: Notes | None = None
     scouts: tuple[ScoutNotes, ...] = ()
+    sandbox: str | None = None
+
+
+def claude_config() -> tuple[Path, ...]:
+    """Claude Code's own settings and sign-in, which it must be able to read and update."""
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    folder = Path(configured) if configured else Path.home() / ".claude"
+    paths = [folder, Path.home() / ".claude.json"]
+    return tuple(path for path in paths if path.exists())
+
+
+def tools(claude: str) -> tuple[Path, ...]:
+    """The installed programs an agent runs: Claude Code, Node, Python and dbt.
+
+    The sandbox hides the home folder, where these are often installed, so
+    the folders that hold them are shown again, read-only.
+    """
+    folders = [Path(claude).resolve().parent, Path(sys.prefix), Path(sys.base_prefix)]
+    for program in ("node", "dbt"):
+        found = shutil.which(program)
+        if found:
+            folder = Path(found).resolve().parent
+            # A program in a virtual environment needs the whole environment.
+            if (folder.parent / "pyvenv.cfg").is_file():
+                folder = folder.parent
+            folders.append(folder)
+    unique = []
+    for folder in folders:
+        folder = folder.resolve()
+        if folder.is_dir() and folder not in unique:
+            unique.append(folder)
+    return tuple(unique)
+
+
+def mounts(
+    workspace: Path, out: Path, checks: Path, claude: str, raw: Path | None = None
+) -> Mounts:
+    """What one agent may see: its own folder, the add-on, its tools, and raw data if it needs it.
+
+    The run folder (with the gate's work and the other agents' reports),
+    the declaration and the repository (with its reference answers) are
+    hidden.
+    """
+    shown = [Path(raw)] if raw is not None else []
+    shown += [out / PLUGIN_COPY_DIR, *tools(claude)]
+    return Mounts(
+        workspace=workspace,
+        read_only=tuple(shown),
+        writable=claude_config(),
+        hidden=(PLUGIN_DIR, Path(out), Path(checks)),
+    )
 
 
 def scout_role(table: str) -> Role:
@@ -407,7 +477,7 @@ def usage(run: Run) -> Ledger:
     if run.notes is not None:
         roles.append(_role_usage(CROSS_SOURCE, run.notes.agent))
     roles.append(_role_usage(ENGINEER, run.engineer))
-    return Ledger(tuple(roles), "PASS" if passed(run.results) else "FAIL")
+    return Ledger(tuple(roles), "PASS" if passed(run.results) else "FAIL", run.sandbox)
 
 
 def prepare_cross_source(folder: Path, project: Path, raw: Path) -> None:
@@ -429,12 +499,15 @@ def run_cross_source(
     plugin: Path,
     claude: str,
     timeout: float,
+    sandbox: Sandbox,
+    checks: Path,
 ) -> Notes:
     """Run the cross-source agent and write its checked answer for the engineer."""
     folder = out / CROSS_SOURCE_DIR
     prepare_cross_source(folder, project, raw)
     command = agent_command(claude, plugin, CROSS_SOURCE)
-    agent = run_agent(folder.resolve(), command, out / CROSS_SOURCE_FILE, timeout)
+    seen = mounts(folder, out, checks, claude)
+    agent = run_agent(folder.resolve(), command, out / CROSS_SOURCE_FILE, timeout, sandbox, seen)
     try:
         notes = notes_from_report(agent.report, profiles)
     except NotesError as error:
@@ -460,6 +533,8 @@ def run_scouts(
     plugin: Path,
     claude: str,
     timeout: float,
+    sandbox: Sandbox,
+    checks: Path,
 ) -> tuple[ScoutNotes, ...]:
     """Run a scout for every raw table, several at a time, and write their notes."""
     folders = out / SCOUTS_DIR
@@ -470,7 +545,8 @@ def run_scouts(
     def scout(profile: dict) -> AgentRun:
         table = profile["table"]
         report = folders / f"{table}.json"
-        return run_agent((folders / table).resolve(), command, report, timeout)
+        seen = mounts(folders / table, out, checks, claude)
+        return run_agent((folders / table).resolve(), command, report, timeout, sandbox, seen)
 
     with ThreadPoolExecutor(max_workers=PARALLEL_SCOUTS) as pool:
         agents = list(pool.map(scout, profiles))
@@ -499,8 +575,12 @@ def run(
     timeout: float = TIMEOUT_MINUTES * 60,
     cross_source: bool = False,
     scouts: bool = False,
+    sandbox: Sandbox | None = None,
 ) -> Run:
     """Prepare the project, let the agent build it, then run the gate on it.
+
+    Every agent runs in ``sandbox``; by default that is bubblewrap, and the
+    run is refused before anything is written if it cannot be set up.
 
     With scouts, a scout runs for each raw table first, and the checked
     answers are put in the project as TABLE_NOTES.md. With cross_source, the
@@ -513,6 +593,15 @@ def run(
             f"the agent definitions are not in {PLUGIN_DIR}; run from a clone of the repository"
         )
     load_declaration(checks)
+    found = shutil.which(claude)
+    if found is None:
+        raise EngineerError(f"{claude} was not found; install Claude Code and sign in first")
+    claude = found
+    if sandbox is None:
+        try:
+            sandbox = default_sandbox()
+        except SandboxError as error:
+            raise EngineerError(str(error)) from error
     out = Path(out)
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise EngineerError(f"{out} must be empty")
@@ -521,14 +610,19 @@ def run(
     plugin = stage_plugin(out.resolve() / PLUGIN_COPY_DIR)
     scout_notes: tuple[ScoutNotes, ...] = ()
     if scouts:
-        scout_notes = run_scouts(out, project, Path(raw), profiles, plugin, claude, timeout)
+        scout_notes = run_scouts(
+            out, project, Path(raw), profiles, plugin, claude, timeout, sandbox, checks
+        )
     notes = None
     if cross_source:
-        notes = run_cross_source(out, project, Path(raw), profiles, plugin, claude, timeout)
+        notes = run_cross_source(
+            out, project, Path(raw), profiles, plugin, claude, timeout, sandbox, checks
+        )
     command = agent_command(claude, plugin)
-    agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout)
+    seen = mounts(project, out, checks, claude, raw=Path(raw))
+    agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout, sandbox, seen)
     results = run_gate(project, raw, checks, out / GATE_DIR)
-    outcome = Run(agent, results, notes, scout_notes)
+    outcome = Run(agent, results, notes, scout_notes, sandbox.name)
     usage(outcome).write(out / USAGE_FILE)
     return outcome
 
@@ -555,8 +649,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run a scout for each raw table first and give their notes to the engineer",
     )
+    parser.add_argument(
+        "--unisolated",
+        action="store_true",
+        help="run the agents without a sandbox, so that they can read and change any file "
+        "you can; only for data and machines where that is acceptable",
+    )
     args = parser.parse_args(argv)
     try:
+        sandbox = default_sandbox(unisolated=args.unisolated)
         outcome = run(
             args.raw,
             args.goal,
@@ -564,8 +665,9 @@ def main(argv: list[str] | None = None) -> int:
             args.out,
             cross_source=args.cross_source,
             scouts=args.scouts,
+            sandbox=sandbox,
         )
-    except (EngineerError, GateError) as error:
+    except (EngineerError, GateError, SandboxError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     for scout in outcome.scouts:
@@ -574,6 +676,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cross-source: {outcome.notes.describe()}")
     print(f"agent: {outcome.engineer.describe()}")
     print(f"project: {args.out / PROJECT_DIR}")
+    print(f"sandbox: {sandbox.describe()}")
     print()
     print(render(outcome.results), end="")
     print()
