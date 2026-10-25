@@ -41,6 +41,7 @@ all of them 128 times and takes one to two hours.
 | --- | --- |
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
+| `docs/` | The component reference |
 | `demo/` | Generator for the three demo source systems, and their goal |
 | `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, and the spec contract's check |
 | `tests/` | Tests, and the dbt project the gate is tested against |
