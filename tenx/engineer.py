@@ -318,7 +318,10 @@ def run_agent(
     partial = report_file.with_name(report_file.name + ".partial")
     errors = report_file.with_name(report_file.name + ".stderr")
     sandbox = sandbox or Unisolated()
-    started = sandbox.command(command, mounts or Mounts(workspace=project))
+    try:
+        started = sandbox.command(command, mounts or Mounts(workspace=project))
+    except SandboxError as error:
+        raise EngineerError(str(error)) from error
     with partial.open("w", encoding="utf-8") as out, errors.open("w", encoding="utf-8") as err:
         try:
             process = subprocess.Popen(

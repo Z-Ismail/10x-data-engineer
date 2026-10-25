@@ -26,7 +26,16 @@ from pathlib import Path
 from unittest import mock
 
 from demo.generate import generate
-from tenx.engineer import AGENT_FILE, PLUGIN_DIR, PROJECT_DIR, USAGE_FILE, main, mounts, run_agent
+from tenx.engineer import (
+    AGENT_FILE,
+    PLUGIN_DIR,
+    PROJECT_DIR,
+    USAGE_FILE,
+    EngineerError,
+    main,
+    mounts,
+    run_agent,
+)
 from tenx.sandbox import (
     BWRAP_INSTALL,
     Bubblewrap,
@@ -249,6 +258,15 @@ class RunnerMountsTest(unittest.TestCase):
         # Claude Code, and the Python that runs dbt, are shown.
         self.assertIn(Path(self.claude).resolve().parent, engineer.read_only)
         self.assertIn(Path(sys.prefix).resolve(), engineer.read_only)
+
+    def test_paths_that_cannot_be_kept_apart_stop_the_run_with_a_reason(self):
+        # A raw folder that holds the home folder would show the home folder.
+        sandbox = Bubblewrap("bwrap", home=self.raw / "home")
+        (self.raw / "home").mkdir(parents=True)
+        (self.out / "project").mkdir()
+        seen = mounts(self.out / "project", self.out, self.checks, self.claude, self.raw)
+        with self.assertRaisesRegex(EngineerError, "which the agent must not see"):
+            run_agent(self.out / "project", ["true"], self.out / "agent.json", 5, sandbox, seen)
 
     def test_claude_code_settings_follow_its_config_folder(self):
         config = self.root / "config"
