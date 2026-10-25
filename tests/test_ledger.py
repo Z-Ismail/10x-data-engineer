@@ -231,6 +231,15 @@ class LedgerFileTest(unittest.TestCase):
             [model["model"] for model in role["models"]],
             ["claude-haiku-5-5", "claude-sonnet-5-5"],
         )
+        self.assertNotIn("sandbox", written)
+
+    def test_records_the_sandbox_the_agents_ran_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "usage.json"
+            Ledger((role_usage("engineer", REPORT),), "PASS", "bubblewrap").write(path)
+            written = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(list(written), ["gate", "roles", "sandbox"])
+        self.assertEqual(written["sandbox"], "bubblewrap")
 
 
 if __name__ == "__main__":

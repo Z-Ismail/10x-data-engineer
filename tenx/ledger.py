@@ -138,9 +138,13 @@ class Ledger:
 
     roles: tuple[RoleUsage, ...]
     gate: str
+    sandbox: str | None = None
 
     def to_dict(self) -> dict:
-        return {"gate": self.gate, "roles": [role.to_dict() for role in self.roles]}
+        record = {"gate": self.gate, "roles": [role.to_dict() for role in self.roles]}
+        if self.sandbox is not None:
+            record["sandbox"] = self.sandbox
+        return record
 
     def write(self, path: Path) -> None:
         path.write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")
