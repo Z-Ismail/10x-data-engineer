@@ -593,6 +593,9 @@ def run(
             f"the agent definitions are not in {PLUGIN_DIR}; run from a clone of the repository"
         )
     load_declaration(checks)
+    out = Path(out)
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise EngineerError(f"{out} must be empty")
     found = shutil.which(claude)
     if found is None:
         raise EngineerError(f"{claude} was not found; install Claude Code and sign in first")
@@ -602,9 +605,6 @@ def run(
             sandbox = default_sandbox()
         except SandboxError as error:
             raise EngineerError(str(error)) from error
-    out = Path(out)
-    if out.exists() and (not out.is_dir() or any(out.iterdir())):
-        raise EngineerError(f"{out} must be empty")
     project = out / PROJECT_DIR
     profiles = prepare_project(project, raw, goal)
     plugin = stage_plugin(out.resolve() / PLUGIN_COPY_DIR)
