@@ -66,6 +66,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from tenx import artefacts
 from tenx.cross_source import NOTES_FILE, SCHEMA, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
 from tenx.gate import GateError, Result, load_declaration, passed, render, run_gate
@@ -363,7 +364,7 @@ def run_agent(
     stdout = partial.read_text(encoding="utf-8")
     stderr = errors.read_text(encoding="utf-8")
     errors.unlink(missing_ok=True)
-    os.replace(partial, report_file)
+    artefacts.replace(partial, report_file)
     try:
         report = json.loads(stdout)
     except json.JSONDecodeError:
@@ -522,7 +523,7 @@ def run_cross_source(
         notes = notes_from_report(agent.report, profiles)
     except NotesError as error:
         return Notes(agent, problem=str(error))
-    (project / NOTES_FILE).write_text(render_notes(notes), encoding="utf-8")
+    artefacts.write_text(project / NOTES_FILE, render_notes(notes))
     return Notes(agent, len(notes["joins"]), len(notes["cautions"]))
 
 
@@ -532,7 +533,7 @@ def prepare_scout(folder: Path, project: Path, raw: Path, profile: dict) -> None
     shutil.copyfile(project / GOAL_FILE, folder / GOAL_FILE)
     table = profile["table"]
     shutil.copyfile(project / SOURCE_PROFILES_DIR / f"{table}.txt", folder / PROFILE_FILE)
-    (folder / SAMPLE_FILE).write_text(sample(raw / profile["file"], table), encoding="utf-8")
+    artefacts.write_text(folder / SAMPLE_FILE, sample(raw / profile["file"], table))
 
 
 def run_scouts(
@@ -572,7 +573,7 @@ def run_scouts(
         outcomes.append(ScoutNotes(table, agent, len(notes["findings"]), len(notes["questions"])))
         tables.append((table, notes))
     if any(notes is not None for _, notes in tables):
-        (project / TABLE_NOTES_FILE).write_text(render_table_notes(tables), encoding="utf-8")
+        artefacts.write_text(project / TABLE_NOTES_FILE, render_table_notes(tables))
     return tuple(outcomes)
 
 
