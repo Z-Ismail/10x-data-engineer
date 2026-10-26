@@ -22,6 +22,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from tenx import artefacts
+
 
 @dataclass(frozen=True)
 class ModelUsage:
@@ -147,7 +149,7 @@ class Ledger:
         return record
 
     def write(self, path: Path) -> None:
-        path.write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")
+        artefacts.write_text(path, json.dumps(self.to_dict(), indent=2) + "\n")
 
 
 def _total(values: list) -> int | float | None:

@@ -19,6 +19,11 @@ Notable changes to this project.
   one's database. `python -m tenx.gate` builds in the sandbox by default and
   refuses where none can be set up; `--unisolated` builds without one and
   says so.
+- Run artefacts are written atomically: to a temporary file beside the
+  destination, synced, then renamed into place, so a run stopped part way
+  never leaves a half-written report, profile, note or ledger. Also new, for
+  resuming runs later: input hashes, attempt folders with manifests, and the
+  rule for when an earlier attempt can be reused.
 
 ### Fixed
 

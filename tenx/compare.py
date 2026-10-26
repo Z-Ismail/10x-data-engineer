@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from math import comb, exp, lgamma, log
 from pathlib import Path
 
+from tenx import artefacts
 from tenx.engineer import EngineerError
 from tenx.engineer import run as engineer_run
 from tenx.gate import GateError, load_declaration
@@ -197,7 +198,7 @@ def write_plan(
         "seed": seed,
         "order": [{"dataset": t.dataset, "arm": t.arm, "trial": t.trial} for t in order],
     }
-    (Path(out) / PLAN_FILE).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    artefacts.write_text(Path(out) / PLAN_FILE, json.dumps(document, indent=2) + "\n")
     return order
 
 
@@ -446,10 +447,8 @@ def report(out: Path) -> str:
     """Summarise the comparison in out, and write it there as text and JSON."""
     summary = summarise(out)
     text = render(summary)
-    (Path(out) / REPORT_TEXT).write_text(text, encoding="utf-8")
-    (Path(out) / REPORT_JSON).write_text(
-        json.dumps(summary.to_dict(), indent=2) + "\n", encoding="utf-8"
-    )
+    artefacts.write_text(Path(out) / REPORT_TEXT, text)
+    artefacts.write_text(Path(out) / REPORT_JSON, json.dumps(summary.to_dict(), indent=2) + "\n")
     return text
 
 

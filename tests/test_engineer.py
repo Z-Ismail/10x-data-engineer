@@ -24,6 +24,7 @@ from unittest import mock
 import yaml
 
 from demo.generate import generate
+from tenx import artefacts
 from tenx.cross_source import render as render_notes
 from tenx.engineer import (
     AGENT_FILE,
@@ -598,6 +599,28 @@ class RunTest(unittest.TestCase):
             )
         self.assertEqual(code, 0, printed.getvalue())
         return printed.getvalue()
+
+    def test_reports_notes_and_usage_are_written_atomically(self):
+        # A run stopped part way must never leave a half-written file behind.
+        written, moved = [], []
+        real_write, real_replace = artefacts.write_text, artefacts.replace
+
+        def write(path, text):
+            written.append(Path(path).name)
+            real_write(path, text)
+
+        def move(source, path):
+            moved.append(Path(path).name)
+            real_replace(source, path)
+
+        with (
+            mock.patch.object(artefacts, "write_text", write),
+            mock.patch.object(artefacts, "replace", move),
+        ):
+            self.run_with_cross_source(ANSWER)
+        self.assertIn("JOINS.md", written)
+        self.assertIn(USAGE_FILE, written)
+        self.assertEqual(sorted(moved), sorted([AGENT_FILE, CROSS_SOURCE_FILE]))
 
     def test_cross_source_notes_reach_the_engineer(self):
         # The cross-source agent runs unless it is turned off.
