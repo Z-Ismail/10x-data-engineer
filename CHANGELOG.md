@@ -27,6 +27,11 @@ Notable changes to this project.
 
 ### Fixed
 
+- Agents in the sandbox can run shell commands when the runner is started
+  from Claude Code's own shell. Claude Code moved each command into the
+  memory cgroup it was already in, which the sandbox's read-only `/sys`
+  does not allow, so every command failed; the sandbox now turns that
+  cgroup off with `CLAUDE_CODE_TOOL_MEMORY_LIMIT=none`.
 - The runner no longer waits forever when a command started by an agent
   outlives it, and stops every process an agent started when the agent
   times out or ends.

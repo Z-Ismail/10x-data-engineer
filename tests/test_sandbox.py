@@ -279,6 +279,66 @@ class RunnerMountsTest(unittest.TestCase):
         self.assertEqual(seen.writable, (config, self.home / ".claude.json"))
 
 
+# Writes the agent's view of Claude Code's tool cgroup setting to a file.
+RECORDS_TOOL_CGROUP = (
+    "import os, pathlib; pathlib.Path('cgroup.txt').write_text("
+    "os.environ.get('CLAUDE_CODE_TOOL_MEMORY_LIMIT', 'unset'))"
+)
+
+
+class PassThrough:
+    """A stand-in sandbox that starts the command as it is."""
+
+    def command(self, command: list[str], mounts: Mounts) -> list[str]:
+        return command
+
+    def describe(self) -> str:
+        return "pass-through"
+
+
+class RecordsToolCgroup:
+    def run_recorder(self, sandbox, mounts=None) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve() / "work"
+            workspace.mkdir()
+            outcome = run_agent(
+                workspace,
+                [sys.executable, "-c", RECORDS_TOOL_CGROUP],
+                workspace.parent / "out" / "agent.json",
+                30,
+                sandbox,
+                mounts(workspace) if mounts else None,
+            )
+            self.assertEqual(outcome.exit_code, 0, outcome.describe())
+            return (workspace / "cgroup.txt").read_text(encoding="utf-8")
+
+
+class ToolCgroupTest(RecordsToolCgroup, unittest.TestCase):
+    """Claude Code's shell cgroup cannot work inside a sandbox, so it is turned off there."""
+
+    def test_turned_off_for_a_sandboxed_agent(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_TOOL_MEMORY_LIMIT": "2g"}):
+            self.assertEqual(self.run_recorder(PassThrough()), "none")
+
+    def test_left_as_the_user_set_it_without_a_sandbox(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_TOOL_MEMORY_LIMIT": "2g"}):
+            self.assertEqual(self.run_recorder(Unisolated()), "2g")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CLAUDE_CODE_TOOL_MEMORY_LIMIT", None)
+            self.assertEqual(self.run_recorder(None), "unset")
+            self.assertNotIn("CLAUDE_CODE_TOOL_MEMORY_LIMIT", os.environ)
+
+
+@needs_sandbox
+class SandboxedToolCgroupTest(RecordsToolCgroup, unittest.TestCase):
+    def test_turned_off_in_the_real_sandbox(self):
+        python = (Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve())
+        found = self.run_recorder(
+            default_sandbox(), lambda workspace: Mounts(workspace=workspace, read_only=python)
+        )
+        self.assertEqual(found, "none")
+
+
 class DefaultSandboxTest(unittest.TestCase):
     def test_unisolated_only_when_asked(self):
         self.assertIsInstance(default_sandbox(unisolated=True), Unisolated)
