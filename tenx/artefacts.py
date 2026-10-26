@@ -251,3 +251,39 @@ def load(folder: Path) -> Attempt | None:
     if document.get("action_id") != attempt.action_id:
         return None  # the manifest was changed after it was written
     return attempt
+
+
+def _outputs_intact(attempt: Attempt) -> bool:
+    for name, recorded in attempt.outputs.items():
+        path = attempt.folder / name
+        if not path.is_file() or file_hash(path) != recorded:
+            return False
+    return True
+
+
+def reusable(
+    root: Path, run_id: str, node: str, files: Mapping[str, str], values: Mapping[str, str]
+) -> Attempt | None:
+    """The latest finished attempt a resumed run can use instead of running the step again.
+
+    An attempt is reused only if it completed, was made from exactly these
+    inputs for this run and step (its action ID, worked out again, matches),
+    and every output it recorded is still there unchanged. Otherwise there is
+    nothing to reuse and the step runs again, in a new attempt.
+
+    The manifest itself is trusted: it is written atomically, outside the
+    work folder an agent is given. Someone who edits it by hand can make an
+    attempt look reusable; the check guards against crashes, not editors.
+    """
+    wanted = input_hash(files, values)
+    for number in reversed(attempt_numbers(root, node)):
+        attempt = load(Path(root) / node / f"{ATTEMPT_PREFIX}{number}")
+        if (
+            attempt is not None
+            and attempt.status == COMPLETE
+            and attempt.number == number
+            and attempt.action_id == action_id(run_id, node, number, wanted)
+            and _outputs_intact(attempt)
+        ):
+            return attempt
+    return None

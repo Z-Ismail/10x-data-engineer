@@ -186,7 +186,7 @@ class HashTest(unittest.TestCase):
             artefacts.input_files({"goal": self.root / "nowhere.md"})
 
 
-class AttemptTest(unittest.TestCase):
+class AttemptFixture(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -201,6 +201,8 @@ class AttemptTest(unittest.TestCase):
         arguments = {"files": self.files, "values": self.values, **changes}
         return artefacts.start(self.root, "run-1", "engineer", **arguments)
 
+
+class AttemptTest(AttemptFixture):
     def test_attempts_are_numbered_from_one_each_in_its_own_folder(self):
         first, second = self.start(), self.start()
         self.assertEqual((first.number, second.number), (1, 2))
@@ -272,6 +274,65 @@ class AttemptTest(unittest.TestCase):
                 else:
                     manifest.write_text(text, encoding="utf-8")
                 self.assertIsNone(artefacts.load(attempt.folder))
+
+
+class ReuseTest(AttemptFixture):
+    """When a resumed run may use an earlier attempt instead of running the step again."""
+
+    def complete(self, **changes):
+        attempt = self.start(**changes)
+        (attempt.work / "agent.json").write_text('{"result": "done"}', encoding="utf-8")
+        return artefacts.finish(attempt, "complete", ["work/agent.json"])
+
+    def reusable(self, files=None, values=None, run_id="run-1", node="engineer"):
+        files = self.files if files is None else files
+        values = self.values if values is None else values
+        return artefacts.reusable(self.root, run_id, node, files, values)
+
+    def test_a_complete_attempt_from_the_same_inputs_is_reused(self):
+        done = self.complete()
+        self.assertEqual(self.reusable(), done)
+
+    def test_the_latest_matching_attempt_is_chosen(self):
+        self.complete()
+        latest = self.complete()
+        self.assertEqual(self.reusable().number, latest.number)
+
+    def test_an_earlier_complete_attempt_is_used_when_the_latest_failed(self):
+        done = self.complete()
+        artefacts.finish(self.start(), "failed")
+        self.start()  # started, never finished: the run stopped here
+        self.assertEqual(self.reusable(), done)
+
+    def test_nothing_is_reused_when_any_condition_fails(self):
+        def edit_output(attempt):
+            (attempt.work / "agent.json").write_text('{"result": "edited"}', encoding="utf-8")
+
+        def rename_folder(attempt):
+            attempt.folder.rename(attempt.folder.with_name("attempt-9"))
+
+        cases = {
+            "only started": (lambda: self.start(), {}),
+            "failed": (lambda: artefacts.finish(self.start(), "failed"), {}),
+            "other files": (self.complete, {"files": {"goal": "0" * 64}}),
+            "other values": (self.complete, {"values": {"model": "opus"}}),
+            "another run": (self.complete, {"run_id": "run-2"}),
+            "another step": (self.complete, {"node": "gate"}),
+            "output missing": (
+                lambda: self.complete().work.joinpath("agent.json").unlink(),
+                {},
+            ),
+            "output changed": (lambda: edit_output(self.complete()), {}),
+            "folder renumbered": (lambda: rename_folder(self.complete()), {}),
+        }
+        for name, (make, asked) in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(self.root, ignore_errors=True)
+                make()
+                self.assertIsNone(self.reusable(**asked))
+
+    def test_no_attempts_means_nothing_to_reuse(self):
+        self.assertIsNone(self.reusable())
 
 
 class KilledWriterTest(unittest.TestCase):
