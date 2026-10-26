@@ -24,7 +24,7 @@ import duckdb
 
 from demo.generate import generate
 from tenx.gate import DATABASE_FILE, EXPECTED_FILE, REPEAT_DIR, REPEAT_FILE, passed, run_gate
-from tenx.sandbox import SandboxError, Unisolated, default_sandbox
+from tenx.sandbox import Bubblewrap, SandboxError, Unisolated, default_sandbox
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PROJECT = FIXTURES / "demo_project"
@@ -184,6 +184,74 @@ class UnisolatedGateProbeTest(unittest.TestCase):
         self.assertTrue(seen["expected tampered"])
         self.assertTrue(seen["first tampered"])
         self.assertEqual(seen["escaped"], ["project", "raw", "home"])
+
+
+@needs_sandbox
+class SandboxedGateTest(unittest.TestCase):
+    """The gate's builds in the real sandbox: nothing hidden is read or changed."""
+
+    # Where to keep the test's files (by default, a temporary folder), and
+    # the sandbox to use, made from the test's home folder.
+    location = None
+
+    @staticmethod
+    def sandbox(home: Path) -> Bubblewrap:
+        return default_sandbox()
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(dir=cls.location)
+        cls.root = Path(cls.tmp.name).resolve()
+        cls.seen = hostile_gate(cls.root, cls.sandbox(cls.root / "home"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_both_builds_ran_the_hostile_model(self):
+        self.assertFalse(self.seen["first"]["second build"])
+        self.assertTrue(self.seen["second"]["second build"])
+
+    def test_nothing_hidden_can_be_read(self):
+        for name in ("first", "second"):
+            build = self.seen[name]
+            for probe in ("declaration", "expected rows", "home key"):
+                with self.subTest(build=name, probe=probe):
+                    self.assertIn(build[probe], BLOCKED)
+        self.assertIn(self.seen["second"]["first database"], BLOCKED)
+
+    def test_nothing_outside_the_build_folder_is_changed(self):
+        self.assertTrue(self.seen["declaration intact"])
+        self.assertFalse(self.seen["expected tampered"])
+        self.assertFalse(self.seen["first tampered"])
+        self.assertEqual(self.seen["escaped"], [])
+
+    def test_the_reference_models_still_pass(self):
+        failed = {
+            (result.check, result.subject)
+            for result in self.seen["results"]
+            if result.status != "pass"
+        }
+        # The hostile model's own row differs between the builds.
+        self.assertLessEqual(failed, {("repeat", "leak")})
+        declared = [r for r in self.seen["results"] if r.subject != "leak"]
+        self.assertTrue(passed(declared))
+
+
+class OutsideTemporaryFoldersGateTest(SandboxedGateTest):
+    """The same, with the test's files in the real home folder.
+
+    In a temporary folder everything of the test is hidden whatever else the
+    sandbox does. Here the sandbox is told the home folder is the test's own,
+    so the declaration, the expected rows and the first database must each
+    be hidden in their own right.
+    """
+
+    location = Path.home()
+
+    @staticmethod
+    def sandbox(home: Path) -> Bubblewrap:
+        return Bubblewrap(default_sandbox().executable, home=home)
 
 
 @needs_sandbox
