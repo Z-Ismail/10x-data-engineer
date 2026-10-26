@@ -597,6 +597,34 @@ the example above, Claude Code made a small request of its own on a second
 model. A figure that was not reported is shown as `-`, and the `run` row is
 only added up when every role reported.
 
+## Run artefacts
+
+`tenx/artefacts.py` holds what a stopped run needs in order to be resumed
+safely. The workflow that resumes a run is not built yet; today these pieces
+are used by the runner's own writes and by their tests.
+
+- **Atomic writes.** Each file is written to a temporary file beside it,
+  synced to disk, and renamed into place, then the folder is synced. A run
+  stopped at any moment leaves the old file or the new one, never part of one.
+  Agent reports, `JOINS.md`, `TABLE_NOTES.md`, samples, profiles, the overlap
+  report, `usage.json` and the comparison's plan and report are written this
+  way. A process killed outright can leave a temporary file, named
+  `.<file>.<random>.tmp`; it is never read as a result.
+- **Input hashes.** The SHA-256 of each input file, by label (a folder counts
+  as every file in it), and one hash over those and named values such as the
+  model.
+- **Attempts.** Each attempt at a step gets its own folder,
+  `<step>/attempt-<n>/`, with a `work` folder (a copy of the project to work
+  on, so a failed attempt never changes the last good one) and a
+  `manifest.json` recording its inputs, its action ID (a hash of the run,
+  step, attempt number and input hash), how it ended and the hash of each
+  output.
+- **Reuse.** An earlier attempt is used again only if it completed, was made
+  from the same inputs for the same run and step, and every output it
+  recorded is still there unchanged; otherwise the step runs again in a new
+  attempt. The manifest is outside the work folder an agent is given, and is
+  trusted: the check guards against crashes, not against someone editing it.
+
 ## Repository layout
 
 | Path | Contents |
@@ -604,6 +632,6 @@ only added up when every role reported.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, and the comparison |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, and the run artefacts |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
