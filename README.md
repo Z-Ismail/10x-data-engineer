@@ -112,7 +112,7 @@ if:
 | Build | Engineer agent: dbt models on DuckDB from a plain-English goal | Available |
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
 | Specification | Machine-checked spec contract and `SPEC.md` | Available as code; the Architect agent is next |
-| Safety | Operating-system sandbox for every agent, failing closed | In progress: every agent runs in a bubblewrap sandbox on Linux; the gate's own build of the agent's project is next |
+| Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
 | Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress |
 | Build | Repair loop driven by the gate's report | Planned |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
@@ -152,9 +152,11 @@ gate's expectations, the repository and your home folder are hidden. Where
 no sandbox can be set up, the runner refuses to start the agents unless you
 pass `--unisolated`, and the run is then marked as unisolated.
 
-The sandbox does not yet cover the gate's own build of the agent's project,
-network access or environment variables. Until it does, run the agents only
-on data you would be comfortable sharing with them. Details, and how the
+The gate builds the agent's project in the same sandbox, so a dbt Python
+model the agent wrote cannot read the gate's expectations or change its
+databases either. The sandbox does not yet limit network access or
+environment variables. Until it does, run the agents only on data you would
+be comfortable sharing with them. Details, and how the
 isolation is tested, are in [docs/security.md](docs/security.md).
 
 ## Costs

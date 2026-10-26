@@ -31,6 +31,7 @@ from tenx.engineer import (
     CROSS_SOURCE_DIR,
     CROSS_SOURCE_FILE,
     DEV_DATABASE,
+    GATE_DIR,
     GOAL_FILE,
     PLUGIN_COPY_DIR,
     PLUGIN_DIR,
@@ -545,6 +546,34 @@ class RunTest(unittest.TestCase):
             [(r["role"], r["outcome"], r["turns"]) for r in ledger["roles"]],
             [("engineer", "success", 7)],
         )
+
+    def test_the_gate_builds_in_the_run_sandbox_and_sees_nothing_else_of_the_run(self):
+        class Recorder:
+            name, isolated = "recorder", False
+
+            def __init__(self):
+                self.seen = []
+
+            def command(self, command, mounts):
+                self.seen.append(mounts)
+                return list(command)
+
+            def describe(self):
+                return "recorder"
+
+        sandbox = Recorder()
+        with self.stub(REFERENCE_MODELS):
+            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, sandbox=sandbox)
+        self.assertTrue(passed(outcome.results))
+        out = self.out.resolve()
+        engineer, first, second = sandbox.seen
+        self.assertEqual(engineer.workspace, out / PROJECT_DIR)
+        self.assertEqual(
+            (first.workspace, second.workspace), (out / GATE_DIR, out / GATE_DIR / "repeat")
+        )
+        for build in (first, second):
+            self.assertEqual(build.read_only[:2], (out / PROJECT_DIR, self.raw.resolve()))
+            self.assertEqual(build.hidden[:3], (DECLARATION.resolve(), PLUGIN_DIR, out))
 
     def run_with_cross_source(
         self, answer: dict | None, pass_mode: str = "success", *flags: str

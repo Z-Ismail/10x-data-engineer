@@ -74,7 +74,14 @@ from tenx.ledger import render as render_usage
 from tenx.overlap import overlap_folder, write_report
 from tenx.profile import ProfileError, profile_folder
 from tenx.sample import sample
-from tenx.sandbox import Mounts, Sandbox, SandboxError, Unisolated, default_sandbox
+from tenx.sandbox import (
+    Mounts,
+    Sandbox,
+    SandboxError,
+    Unisolated,
+    default_sandbox,
+    python_folders,
+)
 from tenx.scouts import NOTES_FILE as TABLE_NOTES_FILE
 from tenx.scouts import SCHEMA as SCOUT_SCHEMA
 from tenx.scouts import ScoutError
@@ -429,7 +436,7 @@ def tools(claude: str) -> tuple[Path, ...]:
     The sandbox hides the home folder, where these are often installed, so
     the folders that hold them are shown again, read-only.
     """
-    folders = [Path(claude).resolve().parent, Path(sys.prefix), Path(sys.base_prefix)]
+    folders = [Path(claude).resolve().parent, *python_folders()]
     for program in ("node", "dbt"):
         found = shutil.which(program)
         if found:
@@ -624,7 +631,11 @@ def run(
     command = agent_command(claude, plugin)
     seen = mounts(project, out, checks, claude, raw=Path(raw))
     agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout, sandbox, seen)
-    results = run_gate(project, raw, checks, out / GATE_DIR)
+    # The gate builds what the agent wrote, so its builds run in the same
+    # sandbox, and see nothing of the run or the repository but the project.
+    results = run_gate(
+        project, raw, checks, out / GATE_DIR, sandbox, hidden=(PLUGIN_DIR, out.resolve())
+    )
     outcome = Run(agent, results, notes, scout_notes, sandbox.name)
     usage(outcome).write(out / USAGE_FILE)
     return outcome

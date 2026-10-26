@@ -19,6 +19,21 @@ check this by having a stand-in agent try to read each of these by `cat`, by
 Python, by `dbt show` with `read_text()` and by a dbt Python model, and run in
 CI.
 
+The gate builds the agent's project twice with dbt, and building runs the
+project's code, including any dbt Python model the agent wrote. So each build
+runs in the same sandbox: it sees the project and the raw files read-only and
+can write only its own work folder. The gate's declaration and the rows it
+expects are hidden from both builds, and the first build's database from the
+second, so a model can neither copy the answers nor change what it is
+compared with. The gate's own checks, which read the declaration and the
+built databases, run outside the sandbox after each build. The tests check
+this with a project whose Python model tries, during both builds, to read
+the declaration, the expected rows, the first build's database and a key in
+the home folder, and to change the declaration, the gate's databases, the
+project, the raw files and the home folder; every attempt fails in the
+sandbox and succeeds without it. `python -m tenx.gate` also builds in the
+sandbox, and refuses where none can be set up unless given `--unisolated`.
+
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and
 later, AppArmor allows bubblewrap to set up a sandbox only with a profile
@@ -29,12 +44,11 @@ there is no tested sandbox yet, so the runner refuses there too.
 
 What the sandbox does not cover yet:
 
-- The gate builds the agent's project with dbt outside the sandbox, so a
-  dbt Python model the agent wrote runs with your access during the gate.
-- The agents keep network access, which Claude Code needs, so an agent could
-  send out the raw data it can read.
-- The agents see your environment variables, and Claude Code's settings
-  folder, which holds its sign-in and the history of your other sessions.
+- The agents and the gate's builds keep network access, which Claude Code
+  needs, so an agent could send out the raw data it can read.
+- The agents and the gate's builds see your environment variables, and the
+  agents see Claude Code's settings folder, which holds its sign-in and the
+  history of your other sessions.
 
 Until these are closed, run the agents only on data you would be comfortable
 sharing with them, and keep credentials out of the environment you run them
