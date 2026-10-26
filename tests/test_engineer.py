@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -23,6 +24,7 @@ from unittest import mock
 import yaml
 
 from demo.generate import generate
+from tenx import artefacts
 from tenx.cross_source import render as render_notes
 from tenx.engineer import (
     AGENT_FILE,
@@ -30,6 +32,7 @@ from tenx.engineer import (
     CROSS_SOURCE_DIR,
     CROSS_SOURCE_FILE,
     DEV_DATABASE,
+    GATE_DIR,
     GOAL_FILE,
     PLUGIN_COPY_DIR,
     PLUGIN_DIR,
@@ -46,14 +49,20 @@ from tenx.engineer import (
     prepare_project,
     prepare_scout,
     run,
+    run_agent,
 )
 from tenx.gate import FAIL, GateError, load_declaration, passed
+from tenx.sandbox import Unisolated
 from tenx.scouts import render as render_table_notes
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REFERENCE_MODELS = FIXTURES / "demo_project" / "models"
 DECLARATION = FIXTURES / "demo_gate.json"
 DEMO_GOAL = Path(__file__).resolve().parent.parent / "demo" / "goal.md"
+# The stand-in records what it saw outside its folder and copies models from
+# the fixtures, so these runs are unisolated; tests/test_sandbox.py runs
+# agents in the sandbox.
+UNISOLATED = Unisolated()
 
 # Stands in for the claude command. It records how it was started and what
 # its folder held, and reports like `claude -p --output-format json` does.
@@ -481,6 +490,7 @@ class RunTest(unittest.TestCase):
                     str(DECLARATION),
                     "--out",
                     str(self.out),
+                    "--unisolated",
                     "--no-cross-source",
                 ]
             )
@@ -538,6 +548,34 @@ class RunTest(unittest.TestCase):
             [("engineer", "success", 7)],
         )
 
+    def test_the_gate_builds_in_the_run_sandbox_and_sees_nothing_else_of_the_run(self):
+        class Recorder:
+            name, isolated = "recorder", False
+
+            def __init__(self):
+                self.seen = []
+
+            def command(self, command, mounts):
+                self.seen.append(mounts)
+                return list(command)
+
+            def describe(self):
+                return "recorder"
+
+        sandbox = Recorder()
+        with self.stub(REFERENCE_MODELS):
+            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, sandbox=sandbox)
+        self.assertTrue(passed(outcome.results))
+        out = self.out.resolve()
+        engineer, first, second = sandbox.seen
+        self.assertEqual(engineer.workspace, out / PROJECT_DIR)
+        self.assertEqual(
+            (first.workspace, second.workspace), (out / GATE_DIR, out / GATE_DIR / "repeat")
+        )
+        for build in (first, second):
+            self.assertEqual(build.read_only[:2], (out / PROJECT_DIR, self.raw.resolve()))
+            self.assertEqual(build.hidden[:3], (DECLARATION.resolve(), PLUGIN_DIR, out))
+
     def run_with_cross_source(
         self, answer: dict | None, pass_mode: str = "success", *flags: str
     ) -> str:
@@ -555,11 +593,34 @@ class RunTest(unittest.TestCase):
                     str(DECLARATION),
                     "--out",
                     str(self.out),
+                    "--unisolated",
                     *flags,
                 ]
             )
         self.assertEqual(code, 0, printed.getvalue())
         return printed.getvalue()
+
+    def test_reports_notes_and_usage_are_written_atomically(self):
+        # A run stopped part way must never leave a half-written file behind.
+        written, moved = [], []
+        real_write, real_replace = artefacts.write_text, artefacts.replace
+
+        def write(path, text):
+            written.append(Path(path).name)
+            real_write(path, text)
+
+        def move(source, path):
+            moved.append(Path(path).name)
+            real_replace(source, path)
+
+        with (
+            mock.patch.object(artefacts, "write_text", write),
+            mock.patch.object(artefacts, "replace", move),
+        ):
+            self.run_with_cross_source(ANSWER)
+        self.assertIn("JOINS.md", written)
+        self.assertIn(USAGE_FILE, written)
+        self.assertEqual(sorted(moved), sorted([AGENT_FILE, CROSS_SOURCE_FILE]))
 
     def test_cross_source_notes_reach_the_engineer(self):
         # The cross-source agent runs unless it is turned off.
@@ -646,6 +707,7 @@ class RunTest(unittest.TestCase):
                     str(DECLARATION),
                     "--out",
                     str(self.out),
+                    "--unisolated",
                     "--scouts",
                     *flags,
                 ]
@@ -875,7 +937,9 @@ class RunTest(unittest.TestCase):
             test_mode = [row for row in csv.DictReader(handle) if row["livemode"] == "false"]
         self.assertGreater(len(test_mode), 0)
         with self.stub(self.broken):
-            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
+            outcome = run(
+                self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60, sandbox=UNISOLATED
+            )
         agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.report["subtype"], "success")
         self.assertFalse(passed(results))
@@ -891,7 +955,9 @@ class RunTest(unittest.TestCase):
 
     def test_an_agent_that_fails_to_run_leaves_nothing_to_pass(self):
         with self.stub(mode="crash"):
-            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60)
+            outcome = run(
+                self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=60, sandbox=UNISOLATED
+            )
         agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.describe(), "exited 1 without a report: Error: not signed in")
         self.assertFalse(passed(results))
@@ -905,7 +971,7 @@ class RunTest(unittest.TestCase):
 
     def test_an_agent_that_does_not_finish_is_stopped(self):
         with self.stub(REFERENCE_MODELS, mode="hang"):
-            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=5)
+            outcome = run(self.raw, DEMO_GOAL, DECLARATION, self.out, timeout=5, sandbox=UNISOLATED)
         agent, results = outcome.engineer, outcome.results
         self.assertEqual(agent.describe(), "stopped: did not finish within 5 seconds")
         self.assertFalse((self.out / AGENT_FILE).exists())
@@ -922,18 +988,88 @@ class RunTest(unittest.TestCase):
             mock.patch.dict(os.environ, {"PATH": str(self.root)}),
             self.assertRaisesRegex(EngineerError, "claude was not found"),
         ):
-            run(self.raw, DEMO_GOAL, DECLARATION, self.out)
+            run(self.raw, DEMO_GOAL, DECLARATION, self.out, sandbox=UNISOLATED)
 
     def test_refuses_an_output_folder_that_is_not_empty(self):
         write(self.out / "project" / "models" / "old.sql", "select 1")
         with self.assertRaisesRegex(EngineerError, "must be empty"):
-            run(self.raw, DEMO_GOAL, DECLARATION, self.out)
+            run(self.raw, DEMO_GOAL, DECLARATION, self.out, sandbox=UNISOLATED)
 
     def test_an_unusable_declaration_stops_the_run_before_anything_is_written(self):
         bad = write(self.root / "bad.json", '{"models": [{"name": "m", "colour": "red"}]}')
         with self.assertRaises(GateError):
-            run(self.raw, DEMO_GOAL, bad, self.out)
+            run(self.raw, DEMO_GOAL, bad, self.out, sandbox=UNISOLATED)
         self.assertFalse(self.out.exists())
+
+
+# A stand-in agent that starts a child process sharing its output, as a dbt
+# build started by the agent would, and records the child's process id.
+LEAVES_A_CHILD = """
+import json, os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+open(os.environ["CHILD_PID_FILE"], "w").write(str(child.pid))
+if os.environ["AGENT_MODE"] == "hang":
+    time.sleep(120)
+print(json.dumps({"type": "result", "subtype": "success", "num_turns": 1}))
+"""
+
+
+def _running(pid: int) -> bool:
+    """Whether a process is alive (a zombie awaiting its parent is not)."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[0]
+    except FileNotFoundError:
+        return False
+    return state != "Z"
+
+
+@unittest.skipUnless(Path("/proc").is_dir(), "needs /proc to see processes")
+class RunAgentCleanupTest(unittest.TestCase):
+    """The runner never waits on, or leaves behind, a process the agent started."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.agent = self.root / "agent.py"
+        self.agent.write_text(LEAVES_A_CHILD, encoding="utf-8")
+        self.child_pid_file = self.root / "child.pid"
+        self.report = self.root / "out" / "agent.json"
+
+    def run_stand_in(self, mode: str, timeout: float):
+        environment = {"CHILD_PID_FILE": str(self.child_pid_file), "AGENT_MODE": mode}
+        with (
+            mock.patch.dict(os.environ, environment),
+            mock.patch("tenx.engineer.STOP_GRACE_SECONDS", 2),
+        ):
+            started = time.monotonic()
+            agent = run_agent(self.root, [sys.executable, str(self.agent)], self.report, timeout)
+            elapsed = time.monotonic() - started
+        child = int(self.child_pid_file.read_text())
+        self.addCleanup(lambda: _running(child) and os.kill(child, 9))
+        return agent, elapsed, child
+
+    def test_an_agent_that_finishes_is_not_held_by_its_child(self):
+        agent, elapsed, child = self.run_stand_in("finish", timeout=60)
+        self.assertLess(elapsed, 30)
+        self.assertEqual(agent.report["subtype"], "success")
+        self.assertIsNone(agent.timed_out_after)
+        self.assertEqual(json.loads(self.report.read_text())["num_turns"], 1)
+        time.sleep(0.5)
+        self.assertFalse(_running(child), "the child the agent left running was not stopped")
+
+    def test_a_timed_out_agent_and_its_child_are_stopped(self):
+        agent, elapsed, child = self.run_stand_in("hang", timeout=3)
+        # The timeout plus the grace period, with room for a slow machine.
+        self.assertLess(elapsed, 3 + 2 + 10)
+        self.assertEqual(agent.timed_out_after, 3)
+        self.assertIsNone(agent.report)
+        time.sleep(0.5)
+        self.assertFalse(_running(child), "the agent's child is still running")
+
+    def test_a_stopped_agent_leaves_no_report_or_scratch_files(self):
+        self.run_stand_in("hang", timeout=3)
+        self.assertEqual(sorted(path.name for path in self.report.parent.iterdir()), [])
 
 
 if __name__ == "__main__":

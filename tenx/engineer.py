@@ -33,6 +33,12 @@ builds the project from an empty database and checks it against the raw
 files. The run passes only if the gate passes. Last, the run's usage is
 recorded and printed by role.
 
+Every agent runs in a sandbox (bubblewrap on Linux): it sees its own folder,
+the add-on, the programs it runs and, for the engineer, the raw files, and
+nothing else of the run, the repository or the home folder. Where no sandbox
+can be set up the run is refused, unless --unisolated is given, and the
+report then says the agents ran without one.
+
 Unless --no-cross-source is given, the cross-source agent runs first. It
 reads the goal, the profiles and the overlap report in a folder of its own,
 changes nothing, and answers how the tables the goal needs join. Its answer
@@ -53,12 +59,14 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from tenx import artefacts
 from tenx.cross_source import NOTES_FILE, SCHEMA, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
 from tenx.gate import GateError, Result, load_declaration, passed, render, run_gate
@@ -67,6 +75,14 @@ from tenx.ledger import render as render_usage
 from tenx.overlap import overlap_folder, write_report
 from tenx.profile import ProfileError, profile_folder
 from tenx.sample import sample
+from tenx.sandbox import (
+    Mounts,
+    Sandbox,
+    SandboxError,
+    Unisolated,
+    default_sandbox,
+    python_folders,
+)
 from tenx.scouts import NOTES_FILE as TABLE_NOTES_FILE
 from tenx.scouts import SCHEMA as SCOUT_SCHEMA
 from tenx.scouts import ScoutError
@@ -93,6 +109,11 @@ PROJECT_NAME = "tenx_project"
 GOAL_FILE = "GOAL.md"
 SOURCE_PROFILES_DIR = "source_profiles"
 DEV_DATABASE = "dev.duckdb"
+# Claude Code can move each shell command into a memory cgroup. Started from
+# inside Claude Code's own shell, it reuses the cgroup it is already in, which
+# a sandbox cannot enter because /sys is read-only there, and then no shell
+# command can start. Inside the sandbox, the cgroup is turned off.
+SANDBOXED_AGENT_ENVIRONMENT = {"CLAUDE_CODE_TOOL_MEMORY_LIMIT": "none"}
 
 
 class EngineerError(Exception):
@@ -262,36 +283,95 @@ def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[
     ]
 
 
-def run_agent(project: Path, command: list[str], report_file: Path, timeout: float) -> AgentRun:
-    """Run the agent in the project folder and keep what it reported."""
+def _stop_group(process: subprocess.Popen, grace: float) -> None:
+    """Stop the agent and every process it started.
+
+    The agent runs in its own process group, so one signal reaches the
+    commands it started as well, such as a dbt build. SIGTERM lets Claude
+    Code stop its commands; whatever is still running after the grace period
+    is killed.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
+def run_agent(
+    project: Path,
+    command: list[str],
+    report_file: Path,
+    timeout: float,
+    sandbox: Sandbox | None = None,
+    mounts: Mounts | None = None,
+) -> AgentRun:
+    """Run the agent in the project folder and keep what it reported.
+
+    With a sandbox, the agent sees only what ``mounts`` allow; without one
+    it runs unisolated.
+
+    The agent's output goes to files rather than pipes. A command the agent
+    started can outlive it and keep a pipe open, which would leave the runner
+    waiting for output that never ends; a file cannot hold the runner. The
+    report is moved into place only once the agent has finished, so a stopped
+    run never leaves a partial report.
+    """
     # dbt must find the project's own profiles.yml, not one set elsewhere.
     environment = {key: value for key, value in os.environ.items() if key != "DBT_PROFILES_DIR"}
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    partial = report_file.with_name(report_file.name + ".partial")
+    errors = report_file.with_name(report_file.name + ".stderr")
+    sandbox = sandbox or Unisolated()
+    if not isinstance(sandbox, Unisolated):
+        environment.update(SANDBOXED_AGENT_ENVIRONMENT)
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=project,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError as error:
-        raise EngineerError(
-            f"{command[0]} was not found; install Claude Code and sign in first"
-        ) from error
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # SIGTERM lets Claude Code stop the commands it started before it exits.
-        process.terminate()
+        started = sandbox.command(command, mounts or Mounts(workspace=project))
+    except SandboxError as error:
+        raise EngineerError(str(error)) from error
+    with partial.open("w", encoding="utf-8") as out, errors.open("w", encoding="utf-8") as err:
         try:
-            process.communicate(timeout=STOP_GRACE_SECONDS)
+            process = subprocess.Popen(
+                started,
+                cwd=project,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                text=True,
+                start_new_session=True,
+            )
+        except FileNotFoundError as error:
+            partial.unlink(missing_ok=True)
+            errors.unlink(missing_ok=True)
+            raise EngineerError(
+                f"{command[0]} was not found; install Claude Code and sign in first"
+            ) from error
+        try:
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
-        return AgentRun(process.returncode, None, timed_out_after=timeout)
-    report_file.write_text(stdout, encoding="utf-8")
+            _stop_group(process, STOP_GRACE_SECONDS)
+            partial.unlink(missing_ok=True)
+            errors.unlink(missing_ok=True)
+            return AgentRun(process.returncode, None, timed_out_after=timeout)
+        finally:
+            # Commands the agent left running when it ended are stopped too.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    stdout = partial.read_text(encoding="utf-8")
+    stderr = errors.read_text(encoding="utf-8")
+    errors.unlink(missing_ok=True)
+    artefacts.replace(partial, report_file)
     try:
         report = json.loads(stdout)
     except json.JSONDecodeError:
@@ -347,6 +427,57 @@ class Run:
     results: list[Result]
     notes: Notes | None = None
     scouts: tuple[ScoutNotes, ...] = ()
+    sandbox: str | None = None
+
+
+def claude_config() -> tuple[Path, ...]:
+    """Claude Code's own settings and sign-in, which it must be able to read and update."""
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    folder = Path(configured) if configured else Path.home() / ".claude"
+    paths = [folder, Path.home() / ".claude.json"]
+    return tuple(path for path in paths if path.exists())
+
+
+def tools(claude: str) -> tuple[Path, ...]:
+    """The installed programs an agent runs: Claude Code, Node, Python and dbt.
+
+    The sandbox hides the home folder, where these are often installed, so
+    the folders that hold them are shown again, read-only.
+    """
+    folders = [Path(claude).resolve().parent, *python_folders()]
+    for program in ("node", "dbt"):
+        found = shutil.which(program)
+        if found:
+            folder = Path(found).resolve().parent
+            # A program in a virtual environment needs the whole environment.
+            if (folder.parent / "pyvenv.cfg").is_file():
+                folder = folder.parent
+            folders.append(folder)
+    unique = []
+    for folder in folders:
+        folder = folder.resolve()
+        if folder.is_dir() and folder not in unique:
+            unique.append(folder)
+    return tuple(unique)
+
+
+def mounts(
+    workspace: Path, out: Path, checks: Path, claude: str, raw: Path | None = None
+) -> Mounts:
+    """What one agent may see: its own folder, the add-on, its tools, and raw data if it needs it.
+
+    The run folder (with the gate's work and the other agents' reports),
+    the declaration and the repository (with its reference answers) are
+    hidden.
+    """
+    shown = [Path(raw)] if raw is not None else []
+    shown += [out / PLUGIN_COPY_DIR, *tools(claude)]
+    return Mounts(
+        workspace=workspace,
+        read_only=tuple(shown),
+        writable=claude_config(),
+        hidden=(PLUGIN_DIR, Path(out), Path(checks)),
+    )
 
 
 def scout_role(table: str) -> Role:
@@ -364,7 +495,7 @@ def usage(run: Run) -> Ledger:
     if run.notes is not None:
         roles.append(_role_usage(CROSS_SOURCE, run.notes.agent))
     roles.append(_role_usage(ENGINEER, run.engineer))
-    return Ledger(tuple(roles), "PASS" if passed(run.results) else "FAIL")
+    return Ledger(tuple(roles), "PASS" if passed(run.results) else "FAIL", run.sandbox)
 
 
 def prepare_cross_source(folder: Path, project: Path, raw: Path) -> None:
@@ -386,17 +517,20 @@ def run_cross_source(
     plugin: Path,
     claude: str,
     timeout: float,
+    sandbox: Sandbox,
+    checks: Path,
 ) -> Notes:
     """Run the cross-source agent and write its checked answer for the engineer."""
     folder = out / CROSS_SOURCE_DIR
     prepare_cross_source(folder, project, raw)
     command = agent_command(claude, plugin, CROSS_SOURCE)
-    agent = run_agent(folder.resolve(), command, out / CROSS_SOURCE_FILE, timeout)
+    seen = mounts(folder, out, checks, claude)
+    agent = run_agent(folder.resolve(), command, out / CROSS_SOURCE_FILE, timeout, sandbox, seen)
     try:
         notes = notes_from_report(agent.report, profiles)
     except NotesError as error:
         return Notes(agent, problem=str(error))
-    (project / NOTES_FILE).write_text(render_notes(notes), encoding="utf-8")
+    artefacts.write_text(project / NOTES_FILE, render_notes(notes))
     return Notes(agent, len(notes["joins"]), len(notes["cautions"]))
 
 
@@ -406,7 +540,7 @@ def prepare_scout(folder: Path, project: Path, raw: Path, profile: dict) -> None
     shutil.copyfile(project / GOAL_FILE, folder / GOAL_FILE)
     table = profile["table"]
     shutil.copyfile(project / SOURCE_PROFILES_DIR / f"{table}.txt", folder / PROFILE_FILE)
-    (folder / SAMPLE_FILE).write_text(sample(raw / profile["file"], table), encoding="utf-8")
+    artefacts.write_text(folder / SAMPLE_FILE, sample(raw / profile["file"], table))
 
 
 def run_scouts(
@@ -417,6 +551,8 @@ def run_scouts(
     plugin: Path,
     claude: str,
     timeout: float,
+    sandbox: Sandbox,
+    checks: Path,
 ) -> tuple[ScoutNotes, ...]:
     """Run a scout for every raw table, several at a time, and write their notes."""
     folders = out / SCOUTS_DIR
@@ -427,7 +563,8 @@ def run_scouts(
     def scout(profile: dict) -> AgentRun:
         table = profile["table"]
         report = folders / f"{table}.json"
-        return run_agent((folders / table).resolve(), command, report, timeout)
+        seen = mounts(folders / table, out, checks, claude)
+        return run_agent((folders / table).resolve(), command, report, timeout, sandbox, seen)
 
     with ThreadPoolExecutor(max_workers=PARALLEL_SCOUTS) as pool:
         agents = list(pool.map(scout, profiles))
@@ -443,7 +580,7 @@ def run_scouts(
         outcomes.append(ScoutNotes(table, agent, len(notes["findings"]), len(notes["questions"])))
         tables.append((table, notes))
     if any(notes is not None for _, notes in tables):
-        (project / TABLE_NOTES_FILE).write_text(render_table_notes(tables), encoding="utf-8")
+        artefacts.write_text(project / TABLE_NOTES_FILE, render_table_notes(tables))
     return tuple(outcomes)
 
 
@@ -456,8 +593,12 @@ def run(
     timeout: float = TIMEOUT_MINUTES * 60,
     cross_source: bool = False,
     scouts: bool = False,
+    sandbox: Sandbox | None = None,
 ) -> Run:
     """Prepare the project, let the agent build it, then run the gate on it.
+
+    Every agent runs in ``sandbox``; by default that is bubblewrap, and the
+    run is refused before anything is written if it cannot be set up.
 
     With scouts, a scout runs for each raw table first, and the checked
     answers are put in the project as TABLE_NOTES.md. With cross_source, the
@@ -473,19 +614,37 @@ def run(
     out = Path(out)
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise EngineerError(f"{out} must be empty")
+    found = shutil.which(claude)
+    if found is None:
+        raise EngineerError(f"{claude} was not found; install Claude Code and sign in first")
+    claude = found
+    if sandbox is None:
+        try:
+            sandbox = default_sandbox()
+        except SandboxError as error:
+            raise EngineerError(str(error)) from error
     project = out / PROJECT_DIR
     profiles = prepare_project(project, raw, goal)
     plugin = stage_plugin(out.resolve() / PLUGIN_COPY_DIR)
     scout_notes: tuple[ScoutNotes, ...] = ()
     if scouts:
-        scout_notes = run_scouts(out, project, Path(raw), profiles, plugin, claude, timeout)
+        scout_notes = run_scouts(
+            out, project, Path(raw), profiles, plugin, claude, timeout, sandbox, checks
+        )
     notes = None
     if cross_source:
-        notes = run_cross_source(out, project, Path(raw), profiles, plugin, claude, timeout)
+        notes = run_cross_source(
+            out, project, Path(raw), profiles, plugin, claude, timeout, sandbox, checks
+        )
     command = agent_command(claude, plugin)
-    agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout)
-    results = run_gate(project, raw, checks, out / GATE_DIR)
-    outcome = Run(agent, results, notes, scout_notes)
+    seen = mounts(project, out, checks, claude, raw=Path(raw))
+    agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout, sandbox, seen)
+    # The gate builds what the agent wrote, so its builds run in the same
+    # sandbox, and see nothing of the run or the repository but the project.
+    results = run_gate(
+        project, raw, checks, out / GATE_DIR, sandbox, hidden=(PLUGIN_DIR, out.resolve())
+    )
+    outcome = Run(agent, results, notes, scout_notes, sandbox.name)
     usage(outcome).write(out / USAGE_FILE)
     return outcome
 
@@ -512,8 +671,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run a scout for each raw table first and give their notes to the engineer",
     )
+    parser.add_argument(
+        "--unisolated",
+        action="store_true",
+        help="run the agents without a sandbox, so that they can read and change any file "
+        "you can; only for data and machines where that is acceptable",
+    )
     args = parser.parse_args(argv)
     try:
+        sandbox = default_sandbox(unisolated=args.unisolated)
         outcome = run(
             args.raw,
             args.goal,
@@ -521,8 +687,9 @@ def main(argv: list[str] | None = None) -> int:
             args.out,
             cross_source=args.cross_source,
             scouts=args.scouts,
+            sandbox=sandbox,
         )
-    except (EngineerError, GateError) as error:
+    except (EngineerError, GateError, SandboxError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     for scout in outcome.scouts:
@@ -531,6 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cross-source: {outcome.notes.describe()}")
     print(f"agent: {outcome.engineer.describe()}")
     print(f"project: {args.out / PROJECT_DIR}")
+    print(f"sandbox: {sandbox.describe()}")
     print()
     print(render(outcome.results), end="")
     print()

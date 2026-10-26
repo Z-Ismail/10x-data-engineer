@@ -29,6 +29,7 @@ from pathlib import Path
 
 import duckdb
 
+from tenx import artefacts
 from tenx.profile import (
     PLACEHOLDERS,
     ProfileError,
@@ -332,9 +333,9 @@ def write_report(report: dict, out: Path) -> None:
             "rename the file"
         )
     out.mkdir(parents=True, exist_ok=True)
-    (out / f"{REPORT_NAME}.txt").write_text(render(report), encoding="utf-8")
-    (out / f"{REPORT_NAME}.json").write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    artefacts.write_text(out / f"{REPORT_NAME}.txt", render(report))
+    artefacts.write_text(
+        out / f"{REPORT_NAME}.json", json.dumps(report, indent=2, sort_keys=True) + "\n"
     )
 
 

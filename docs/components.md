@@ -132,6 +132,14 @@ files. A successful build is only the first check. There are six checks:
 | `expected` | a model's named columns do not hold exactly the rows that a declared query gives from the raw files |
 | `repeat` | a second build of the project into another empty database does not give the same rows in every model |
 
+Building a project runs its code, so on Linux each build runs in the same
+bubblewrap sandbox as the agents: it sees the project and the raw files
+read-only, can write only its own work folder, and cannot see the
+declaration, the expected rows or (for the second build) the first build's
+database. Where no sandbox can be set up the command refuses to build, with
+exit status 2; `--unisolated` builds without one, for a project you trust,
+and prints a warning. See [Security](security.md).
+
 What to expect is declared in a JSON file that is kept outside the dbt
 project, so the checks cannot be edited by whoever writes the models:
 
@@ -320,7 +328,8 @@ sources, the staging models, any model that combines sources (under
 told to count rows with `dbt show` until every model reconciles with its
 source before it stops, but only the gate's verdict counts. The gate's
 declaration is never put in the agent's folder, so the agent cannot read the
-checks or change them.
+checks or change them, and on Linux the sandbox (see [Security](security.md))
+hides it from the agent whatever command the agent runs.
 
 The agent runs in Claude Code without anyone at the keyboard. It may write
 files in its own folder and run `dbt`, and every other action is refused
@@ -405,15 +414,16 @@ pinned to the Sonnet model and stops after 20 turns.
 
 ```
 cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 8 cautions
-agent: success after 18 turns (exit 0)
+agent: success after 19 turns (exit 0)
 project: runs/demo/project
+sandbox: bubblewrap: the agents and the gate's builds see only their own folder and the files their work needs
 
 gate: PASS (24 passed, 0 failed, 0 not run)
 ...
 role          outcome    turns  refused    time  cost (US$)
-cross-source  success        9        0  26.7 s      0.0729
-engineer      success       18        0  33.7 s      0.0829
-run           gate PASS     27        0  60.4 s      0.1558
+cross-source  success        9        0  27.3 s      0.0776
+engineer      success       19        0  25.3 s      0.1088
+run           gate PASS     28        0  52.6 s      0.1863
 ```
 
 In that run the notes said that trimming and lower case leave some
@@ -587,6 +597,34 @@ the example above, Claude Code made a small request of its own on a second
 model. A figure that was not reported is shown as `-`, and the `run` row is
 only added up when every role reported.
 
+## Run artefacts
+
+`tenx/artefacts.py` holds what a stopped run needs in order to be resumed
+safely. The workflow that resumes a run is not built yet; today these pieces
+are used by the runner's own writes and by their tests.
+
+- **Atomic writes.** Each file is written to a temporary file beside it,
+  synced to disk, and renamed into place, then the folder is synced. A run
+  stopped at any moment leaves the old file or the new one, never part of one.
+  Agent reports, `JOINS.md`, `TABLE_NOTES.md`, samples, profiles, the overlap
+  report, `usage.json` and the comparison's plan and report are written this
+  way. A process killed outright can leave a temporary file, named
+  `.<file>.<random>.tmp`; it is never read as a result.
+- **Input hashes.** The SHA-256 of each input file, by label (a folder counts
+  as every file in it), and one hash over those and named values such as the
+  model.
+- **Attempts.** Each attempt at a step gets its own folder,
+  `<step>/attempt-<n>/`, with a `work` folder (a copy of the project to work
+  on, so a failed attempt never changes the last good one) and a
+  `manifest.json` recording its inputs, its action ID (a hash of the run,
+  step, attempt number and input hash), how it ended and the hash of each
+  output.
+- **Reuse.** An earlier attempt is used again only if it completed, was made
+  from the same inputs for the same run and step, and every output it
+  recorded is still there unchanged; otherwise the step runs again in a new
+  attempt. The manifest is outside the work folder an agent is given, and is
+  trusted: the check guards against crashes, not against someone editing it.
+
 ## Repository layout
 
 | Path | Contents |
@@ -594,6 +632,6 @@ only added up when every role reported.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner, the row sample, the checks of the cross-source agent's and scouts' answers, and the comparison |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, and the run artefacts |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 

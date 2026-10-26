@@ -112,7 +112,7 @@ if:
 | Build | Engineer agent: dbt models on DuckDB from a plain-English goal | Available |
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
 | Specification | Machine-checked spec contract and `SPEC.md` | Available as code; the Architect agent is next |
-| Safety | Operating-system sandbox for every agent, failing closed | In progress |
+| Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
 | Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress |
 | Build | Repair loop driven by the gate's report | Planned |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
@@ -124,9 +124,10 @@ if:
 
 ## Getting started
 
-Requirements: Python 3.10 or later, and
+Requirements: Python 3.10 or later;
 [Claude Code](https://code.claude.com/docs) installed and signed in for the
-agents.
+agents; and on Linux, bubblewrap (`sudo apt install bubblewrap` on Debian
+and Ubuntu, `sudo dnf install bubblewrap` on Fedora) for the sandbox.
 
 ```
 make install    # the package, DuckDB and dbt
@@ -143,12 +144,20 @@ the [component reference](docs/components.md).
 ## Security
 
 dbt can read files through DuckDB and can run Python models, so limiting an
-agent's tools does not limit what it can read. Isolation therefore has to
-come from the operating system: the agents will run in a sandbox that shows
-them only their own work and the data they need, and the runner will refuse
-to start them where no sandbox can be set up. Until the sandbox is
-released, run the agents only on data you would be comfortable sharing with
-them, and keep credentials off the machine's readable files.
+agent's tools does not limit what it can read. Isolation therefore comes
+from the operating system. On Linux every agent runs in a
+[bubblewrap](https://github.com/containers/bubblewrap) sandbox that shows it
+only its own folder, the programs it runs and the data its work needs; the
+gate's expectations, the repository and your home folder are hidden. Where
+no sandbox can be set up, the runner refuses to start the agents unless you
+pass `--unisolated`, and the run is then marked as unisolated.
+
+The gate builds the agent's project in the same sandbox, so a dbt Python
+model the agent wrote cannot read the gate's expectations or change its
+databases either. The sandbox does not yet limit network access or
+environment variables. Until it does, run the agents only on data you would
+be comfortable sharing with them. Details, and how the
+isolation is tested, are in [docs/security.md](docs/security.md).
 
 ## Costs
 
@@ -162,6 +171,7 @@ that applies is your plan's usage.
 
 - [Component reference](docs/components.md): every tool and agent that
   exists today, how to run it, and example output
+- [Security](docs/security.md): the sandbox, what it hides and what it does not cover yet
 - [Demo data](demo/README.md): the source systems and their planted defects
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)

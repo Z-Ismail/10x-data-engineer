@@ -4,11 +4,44 @@ Notable changes to this project.
 
 ## Unreleased
 
+### Added
+
+- Every agent runs in a bubblewrap sandbox on Linux. It sees its own folder,
+  the add-on, the programs it runs, Claude Code's settings and, for the
+  engineer, the raw files; the gate's expectations, the repository, the run
+  folder and the home folder are hidden, and writes outside the agent's
+  folder are discarded. Where no sandbox can be set up the run is refused;
+  `--unisolated` runs without one, and the report and `usage.json` say so.
+- The gate builds each project in the same sandbox, so a dbt Python model
+  cannot read the gate's declaration or expected rows, or change its
+  databases. Each build sees the project and the raw files read-only and can
+  write only its own work folder; the second build cannot see the first
+  one's database. `python -m tenx.gate` builds in the sandbox by default and
+  refuses where none can be set up; `--unisolated` builds without one and
+  says so.
+- Run artefacts are written atomically: to a temporary file beside the
+  destination, synced, then renamed into place, so a run stopped part way
+  never leaves a half-written report, profile, note or ledger. Also new, for
+  resuming runs later: input hashes, attempt folders with manifests, and the
+  rule for when an earlier attempt can be reused.
+
+### Fixed
+
+- Agents in the sandbox can run shell commands when the runner is started
+  from Claude Code's own shell. Claude Code moved each command into the
+  memory cgroup it was already in, which the sandbox's read-only `/sys`
+  does not allow, so every command failed; the sandbox now turns that
+  cgroup off with `CLAUDE_CODE_TOOL_MEMORY_LIMIT=none`.
+- The runner no longer waits forever when a command started by an agent
+  outlives it, and stops every process an agent started when the agent
+  times out or ends.
+
 ### Changed
 
 - README: rewritten around the product's aim, design and principles, with
   a roadmap table showing what is available today. The detailed description
-  of each component, with example output, moved to `docs/components.md`.
+  of each component, with example output, moved to `docs/components.md`,
+  and the full security description to `docs/security.md`.
 - README: the opening and a new Scope section describe the wider aim
   (other platforms, ingestion, orchestration, diagnosis) and separate what
   exists today from what is planned.

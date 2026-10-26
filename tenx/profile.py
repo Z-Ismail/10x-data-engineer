@@ -22,6 +22,8 @@ from pathlib import Path
 
 import duckdb
 
+from tenx import artefacts
+
 FORMATS = {
     ".csv": "csv",
     ".tsv": "csv",
@@ -411,9 +413,9 @@ def profile_folder(root: Path, out: Path) -> list[dict]:
     con.close()
     out.mkdir(parents=True, exist_ok=True)
     for profile in profiles:
-        (out / f"{profile['table']}.txt").write_text(render(profile), encoding="utf-8")
-        (out / f"{profile['table']}.json").write_text(
-            json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        artefacts.write_text(out / f"{profile['table']}.txt", render(profile))
+        artefacts.write_text(
+            out / f"{profile['table']}.json", json.dumps(profile, indent=2, sort_keys=True) + "\n"
         )
     return profiles
 
