@@ -19,6 +19,13 @@ check this by having a stand-in agent try to read each of these by `cat`, by
 Python, by `dbt show` with `read_text()` and by a dbt Python model, and run in
 CI.
 
+Claude Code can put the shell commands it runs into a memory cgroup, with
+`CLAUDE_CODE_TOOL_MEMORY_LIMIT`. Inside the sandbox `/sys` is read-only, so
+when the runner is started from Claude Code's own shell, whose cgroup an
+agent would reuse, no command could start. The runner sets
+`CLAUDE_CODE_TOOL_MEMORY_LIMIT=none` for every sandboxed agent, so its
+commands are not held to that memory cap.
+
 The gate builds the agent's project twice with dbt, and building runs the
 project's code, including any dbt Python model the agent wrote. So each build
 runs in the same sandbox: it sees the project and the raw files read-only and
