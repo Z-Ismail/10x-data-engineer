@@ -51,6 +51,7 @@ from tenx.gate import (
     source_files,
     store_expected,
 )
+from tenx.sandbox import Mounts, SandboxError, python_folders
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PROJECT = FIXTURES / "demo_project"
@@ -1496,6 +1497,77 @@ class CannotRun(unittest.TestCase):
             )
         self.assertEqual(code, 2)
         self.assertIn("error: could not read", stderr.getvalue())
+
+
+class Recorder:
+    """A sandbox that records what each build may see and runs it unchanged."""
+
+    name = "recorder"
+    isolated = False
+
+    def __init__(self):
+        self.seen: list[Mounts] = []
+
+    def command(self, command: list[str], mounts: Mounts) -> list[str]:
+        self.seen.append(mounts)
+        return list(command)
+
+    def describe(self) -> str:
+        return "recorder"
+
+
+class BuildSandbox(unittest.TestCase):
+    """What each of the gate's builds is shown, hidden and allowed to write."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.raw = self.root / "raw"
+        write(self.raw / "shop" / "orders.csv", "id,status\n1,paid\n2,void\n")
+        self.project = self.root / "project"
+        write(
+            self.project / "dbt_project.yml",
+            'name: shop\nconfig-version: 2\nmodel-paths: ["models"]\n',
+        )
+        write(
+            self.project / "models" / "paid.sql",
+            "select * from read_csv('{{ var('raw_dir') }}/shop/orders.csv', header=true) "
+            "where status = 'paid'",
+        )
+        query = "SELECT id FROM shop.orders WHERE status = 'paid'"
+        model = {"name": "paid", "key": ["id"], "expected": {"columns": ["id"], "query": query}}
+        self.checks = declaration(self.root, {"models": [model]})
+        self.work = self.root / "work"
+
+    def test_each_build_sees_the_project_and_raw_files_and_writes_only_its_folder(self):
+        sandbox = Recorder()
+        elsewhere = write(self.root / "elsewhere" / "secret.txt", "secret")
+        missing = self.root / "never-made"
+        results = run_gate(
+            self.project, self.raw, self.checks, self.work, sandbox, (elsewhere, missing)
+        )
+        self.assertTrue(passed(results), render(results))
+        first, second = sandbox.seen
+        shown = (self.project, self.raw, *python_folders())
+        hidden = (self.checks, elsewhere, self.work / "expected.duckdb")
+        self.assertEqual(first, Mounts(self.work, read_only=shown, hidden=hidden))
+        self.assertEqual(
+            second,
+            Mounts(
+                self.work / "repeat",
+                read_only=shown,
+                hidden=(*hidden, self.work / "build.duckdb"),
+            ),
+        )
+
+    def test_a_build_that_cannot_be_kept_apart_stops_the_gate(self):
+        sandbox = mock.Mock()
+        sandbox.command.side_effect = SandboxError("no room")
+        with self.assertRaisesRegex(
+            GateError, "cannot be kept apart from the gate's files: no room"
+        ):
+            run_gate(self.project, self.raw, self.checks, self.work, sandbox)
 
 
 def replace_in(path: Path, old: str, new: str) -> None:

@@ -66,6 +66,12 @@ copy of a row counts.
 The project reads the raw files from the folder passed to dbt as the variable
 ``raw_dir``.
 
+Building the project runs its code, and a dbt Python model can run any
+Python, so each build can run in a sandbox: it sees the project and the raw
+files read-only and can write only its own work folder, and the declaration
+and the expected rows are hidden from it, as is the first build's database
+from the second. The gate's own checks run outside the sandbox.
+
 Usage:
     python -m tenx.gate path/to/project --raw demo/data --checks gate.json
 
@@ -95,6 +101,7 @@ from tenx.profile import (
     relation,
     table_name,
 )
+from tenx.sandbox import Mounts, Sandbox, SandboxError, Unisolated, python_folders
 
 PASS, FAIL, SKIP = "pass", "fail", "skip"
 # Statuses dbt records for a node that did what was asked. A test set to warn
@@ -1128,13 +1135,20 @@ def check_repeat_build(
 
 
 def build_project(
-    project: Path, raw: Path, workdir: Path, database_file: str = DATABASE_FILE
+    project: Path,
+    raw: Path,
+    workdir: Path,
+    database_file: str = DATABASE_FILE,
+    sandbox: Sandbox | None = None,
+    hidden: tuple[Path, ...] = (),
 ) -> tuple[int, dict | None, str]:
     """Run ``dbt build`` on the project into a new database under workdir.
 
     dbt runs as its own process, as its documentation asks of callers, and
     with a connection profile written here, so the project cannot choose
-    which database it is built into. Returns the exit status, the parsed
+    which database it is built into. In ``sandbox`` the build sees the
+    project and the raw files read-only, can write only workdir, and never
+    sees the ``hidden`` paths. Returns the exit status, the parsed
     ``run_results.json`` if dbt wrote one, and what dbt printed.
     """
     if not dbt_installed():
@@ -1175,6 +1189,15 @@ def build_project(
         "--vars",
         json.dumps({"raw_dir": str(raw)}),
     ]
+    seen = Mounts(
+        workspace=workdir,
+        read_only=(project, raw, *python_folders()),
+        hidden=tuple(path for path in hidden if path.exists()),
+    )
+    try:
+        command = (sandbox or Unisolated()).command(command, seen)
+    except SandboxError as error:
+        raise GateError(f"the build cannot be kept apart from the gate's files: {error}") from error
     finished = subprocess.run(
         command,
         cwd=project,
@@ -1193,7 +1216,14 @@ def build_project(
     return finished.returncode, run_results, finished.stdout
 
 
-def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> list[Result]:
+def _run(
+    project: Path,
+    raw: Path,
+    models: list[ModelSpec],
+    workdir: Path,
+    sandbox: Sandbox | None,
+    hidden: tuple[Path, ...],
+) -> list[Result]:
     files = source_files(raw)
     for model in models:
         if model.source is not None and model.source not in files:
@@ -1214,7 +1244,11 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
     if any(model.expected is not None for model in models):
         store_expected(models, files, workdir / EXPECTED_FILE)
 
-    exit_code, run_results, output = build_project(project, raw, workdir)
+    # Neither build may see the rows it is compared with.
+    hidden = (*hidden, workdir / EXPECTED_FILE)
+    exit_code, run_results, output = build_project(
+        project, raw, workdir, sandbox=sandbox, hidden=hidden
+    )
     results, relations = check_build(exit_code, run_results, models, output)
 
     database = workdir / DATABASE_FILE
@@ -1252,7 +1286,15 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
 
     # The project is built again from nothing and must give the same tables.
     if first:
-        second = build_project(project, raw, workdir / REPEAT_DIR, REPEAT_FILE)
+        # Nor may the second build see the first one's tables.
+        second = build_project(
+            project,
+            raw,
+            workdir / REPEAT_DIR,
+            REPEAT_FILE,
+            sandbox=sandbox,
+            hidden=(*hidden, workdir / DATABASE_FILE),
+        )
         results += check_repeat_build(workdir, first, *second)
     else:
         results.append(
@@ -1267,25 +1309,36 @@ def _run(project: Path, raw: Path, models: list[ModelSpec], workdir: Path) -> li
     return results
 
 
-def run_gate(project: Path, raw: Path, checks: Path, workdir: Path | None = None) -> list[Result]:
+def run_gate(
+    project: Path,
+    raw: Path,
+    checks: Path,
+    workdir: Path | None = None,
+    sandbox: Sandbox | None = None,
+    hidden: tuple[Path, ...] = (),
+) -> list[Result]:
     """Build the project from an empty database and run every check.
 
     The database, dbt's artifacts and its log are written to workdir and
     kept. Without a workdir they go to a temporary folder that is removed.
+    With a sandbox, each build runs in it and cannot see the declaration,
+    the expected rows or the ``hidden`` paths; without one, the builds can
+    read and change any file the user can.
     """
     project = Path(project).resolve()
     raw = Path(raw).resolve()
     models = load_declaration(checks)
+    hidden = (Path(checks).resolve(), *(Path(path).resolve() for path in hidden))
     if not (project / "dbt_project.yml").is_file():
         raise GateError(f"{project} is not a dbt project: it has no dbt_project.yml")
     if workdir is None:
         with tempfile.TemporaryDirectory(prefix="tenx-gate-") as temporary:
-            return _run(project, raw, models, Path(temporary))
+            return _run(project, raw, models, Path(temporary).resolve(), sandbox, hidden)
     workdir = Path(workdir).resolve()
     if workdir.exists() and (not workdir.is_dir() or any(workdir.iterdir())):
         raise GateError(f"{workdir} must be empty, so that the build starts from nothing")
     workdir.mkdir(parents=True, exist_ok=True)
-    return _run(project, raw, models, workdir)
+    return _run(project, raw, models, workdir, sandbox, hidden)
 
 
 def passed(results: list[Result]) -> bool:
