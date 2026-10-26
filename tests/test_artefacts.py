@@ -1,5 +1,6 @@
 """Tests for the artefacts a run can be resumed from."""
 
+import json
 import os
 import random
 import shutil
@@ -183,6 +184,94 @@ class HashTest(unittest.TestCase):
     def test_a_missing_input_is_an_error_not_an_empty_input(self):
         with self.assertRaisesRegex(FileNotFoundError, "input 'goal' not found"):
             artefacts.input_files({"goal": self.root / "nowhere.md"})
+
+
+class AttemptTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / "runs"
+        self.project = Path(tmp.name) / "project"
+        (self.project / "models").mkdir(parents=True)
+        (self.project / "models" / "stg.sql").write_text("select 1\n", encoding="utf-8")
+        self.files = {"goal": HELLO}
+        self.values = {"model": "sonnet"}
+
+    def start(self, **changes):
+        arguments = {"files": self.files, "values": self.values, **changes}
+        return artefacts.start(self.root, "run-1", "engineer", **arguments)
+
+    def test_attempts_are_numbered_from_one_each_in_its_own_folder(self):
+        first, second = self.start(), self.start()
+        self.assertEqual((first.number, second.number), (1, 2))
+        self.assertEqual(first.folder, self.root / "engineer" / "attempt-1")
+        self.assertEqual(second.folder, self.root / "engineer" / "attempt-2")
+        self.assertTrue(first.work.is_dir() and second.work.is_dir())
+        self.assertEqual(artefacts.attempt_numbers(self.root, "engineer"), [1, 2])
+        self.assertEqual(artefacts.attempt_numbers(self.root, "gate"), [])
+
+    def test_a_number_already_taken_is_skipped(self):
+        (self.root / "engineer" / "attempt-1").mkdir(parents=True)
+        with mock.patch("tenx.artefacts.attempt_numbers", return_value=[]):
+            self.assertEqual(self.start().number, 2)
+
+    def test_the_manifest_records_the_inputs_and_the_names_worked_out_from_them(self):
+        attempt = self.start()
+        manifest = json.loads((attempt.folder / "manifest.json").read_text(encoding="utf-8"))
+        expected_hash = artefacts.input_hash(self.files, self.values)
+        self.assertEqual(
+            manifest,
+            {
+                "run_id": "run-1",
+                "node": "engineer",
+                "attempt": 1,
+                "action_id": artefacts.action_id("run-1", "engineer", 1, expected_hash),
+                "input_hash": expected_hash,
+                "inputs": {"files": self.files, "values": self.values},
+                "status": "started",
+                "outputs": {},
+            },
+        )
+        self.assertEqual(artefacts.load(attempt.folder), attempt)
+
+    def test_the_project_is_copied_so_a_failed_attempt_leaves_the_last_one_alone(self):
+        first = self.start(copy_from=self.project)
+        (first.work / "models" / "stg.sql").write_text("select 2\n", encoding="utf-8")
+        artefacts.finish(first, "complete", ["work/models/stg.sql"])
+        second = self.start(copy_from=first.work)
+        (second.work / "models" / "stg.sql").write_text("broken", encoding="utf-8")
+        artefacts.finish(second, "failed")
+        self.assertEqual((first.work / "models" / "stg.sql").read_text(), "select 2\n")
+        self.assertEqual((self.project / "models" / "stg.sql").read_text(), "select 1\n")
+
+    def test_finishing_records_the_status_and_each_output_hash(self):
+        attempt = self.start()
+        (attempt.work / "agent.json").write_text("hello\n", encoding="utf-8")
+        finished = artefacts.finish(attempt, "complete", ["work/agent.json"])
+        self.assertEqual(finished.status, "complete")
+        self.assertEqual(finished.outputs, {"work/agent.json": HELLO})
+        self.assertEqual(artefacts.load(attempt.folder), finished)
+        with self.assertRaisesRegex(ValueError, "not 'started'"):
+            artefacts.finish(attempt, "started")
+
+    def test_a_missing_unreadable_or_edited_manifest_loads_as_nothing(self):
+        attempt = self.start()
+        manifest = attempt.folder / "manifest.json"
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+        cases = {
+            "missing": None,
+            "not json": "{",
+            "not an object": "[]",
+            "a field missing": json.dumps({k: v for k, v in document.items() if k != "node"}),
+            "inputs edited": json.dumps({**document, "inputs": {"files": {}, "values": {}}}),
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                if text is None:
+                    manifest.unlink(missing_ok=True)
+                else:
+                    manifest.write_text(text, encoding="utf-8")
+                self.assertIsNone(artefacts.load(attempt.folder))
 
 
 class KilledWriterTest(unittest.TestCase):

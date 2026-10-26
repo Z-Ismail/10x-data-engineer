@@ -11,8 +11,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from dataclasses import replace as replace_fields
 from pathlib import Path
 
 TEMPORARY_SUFFIX = ".tmp"
@@ -119,3 +122,132 @@ def replace(source: Path, path: Path) -> None:
         os.fsync(handle.fileno())
     os.replace(source, path)
     _sync_folder(Path(path).parent)
+
+
+MANIFEST_FILE = "manifest.json"
+WORK_DIR = "work"
+ATTEMPT_PREFIX = "attempt-"
+STARTED, COMPLETE, FAILED = "started", "complete", "failed"
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """One attempt at one step of a run, and what it was made from.
+
+    The attempt's folder holds its manifest and a ``work`` folder, the only
+    part an agent is given; so an agent cannot change the record of its own
+    attempt. Outputs are named relative to the attempt's folder.
+    """
+
+    folder: Path
+    run_id: str
+    node: str
+    number: int
+    files: dict[str, str]
+    values: dict[str, str]
+    status: str = STARTED
+    outputs: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def work(self) -> Path:
+        return self.folder / WORK_DIR
+
+    @property
+    def input_hash(self) -> str:
+        return input_hash(self.files, self.values)
+
+    @property
+    def action_id(self) -> str:
+        return action_id(self.run_id, self.node, self.number, self.input_hash)
+
+    def to_dict(self) -> dict:
+        return {
+            "run_id": self.run_id,
+            "node": self.node,
+            "attempt": self.number,
+            "action_id": self.action_id,
+            "input_hash": self.input_hash,
+            "inputs": {"files": self.files, "values": self.values},
+            "status": self.status,
+            "outputs": self.outputs,
+        }
+
+
+def _write_manifest(attempt: Attempt) -> None:
+    text = json.dumps(attempt.to_dict(), indent=2, sort_keys=True) + "\n"
+    write_text(attempt.folder / MANIFEST_FILE, text)
+
+
+def attempt_numbers(root: Path, node: str) -> list[int]:
+    """The numbers of a step's attempts so far, in order."""
+    folder = Path(root) / node
+    if not folder.is_dir():
+        return []
+    numbers = []
+    for path in folder.iterdir():
+        suffix = path.name.removeprefix(ATTEMPT_PREFIX)
+        if path.is_dir() and path.name.startswith(ATTEMPT_PREFIX) and suffix.isdigit():
+            numbers.append(int(suffix))
+    return sorted(numbers)
+
+
+def start(
+    root: Path,
+    run_id: str,
+    node: str,
+    files: Mapping[str, str],
+    values: Mapping[str, str],
+    copy_from: Path | None = None,
+) -> Attempt:
+    """Begin a new attempt in a folder of its own, numbered after the last one.
+
+    ``copy_from`` is copied into the attempt's work folder, so the attempt
+    changes its own copy and never the last good one.
+    """
+    number = (attempt_numbers(root, node) or [0])[-1] + 1
+    (Path(root) / node).mkdir(parents=True, exist_ok=True)
+    while True:
+        folder = Path(root) / node / f"{ATTEMPT_PREFIX}{number}"
+        try:
+            folder.mkdir()
+            break
+        except FileExistsError:
+            number += 1  # another start took this number first
+    attempt = Attempt(folder, run_id, node, number, dict(files), dict(values))
+    if copy_from is not None:
+        shutil.copytree(copy_from, attempt.work)
+    else:
+        attempt.work.mkdir()
+    _write_manifest(attempt)
+    return attempt
+
+
+def finish(attempt: Attempt, status: str, outputs: list[str] = ()) -> Attempt:
+    """Record how an attempt ended, with the hash of each output it made."""
+    if status not in (COMPLETE, FAILED):
+        raise ValueError(f"an attempt ends {COMPLETE} or {FAILED}, not {status!r}")
+    hashes = {name: file_hash(attempt.folder / name) for name in sorted(outputs)}
+    finished = replace_fields(attempt, status=status, outputs=hashes)
+    _write_manifest(finished)
+    return finished
+
+
+def load(folder: Path) -> Attempt | None:
+    """The attempt recorded in ``folder``, or None if its manifest is missing or unreadable."""
+    try:
+        document = json.loads((Path(folder) / MANIFEST_FILE).read_text(encoding="utf-8"))
+        attempt = Attempt(
+            Path(folder),
+            document["run_id"],
+            document["node"],
+            document["attempt"],
+            dict(document["inputs"]["files"]),
+            dict(document["inputs"]["values"]),
+            document["status"],
+            dict(document["outputs"]),
+        )
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    if document.get("action_id") != attempt.action_id:
+        return None  # the manifest was changed after it was written
+    return attempt
