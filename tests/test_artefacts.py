@@ -15,6 +15,9 @@ from pathlib import Path
 from unittest import mock
 
 from tenx import artefacts
+from tenx.compare import PLAN_FILE, write_plan
+from tenx.overlap import overlap_folder, write_report
+from tenx.profile import profile_folder
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -333,6 +336,34 @@ class ReuseTest(AttemptFixture):
 
     def test_no_attempts_means_nothing_to_reuse(self):
         self.assertIsNone(self.reusable())
+
+
+class WritersTest(unittest.TestCase):
+    """Profiles, the overlap report and the comparison's files are written atomically."""
+
+    def test_each_writer_uses_the_atomic_write(self):
+        written = []
+        real_write = artefacts.write_text
+
+        def record(path, text):
+            written.append(Path(path).name)
+            real_write(path, text)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw, out = Path(tmp) / "raw", Path(tmp) / "out"
+            raw.mkdir()
+            (raw / "a.csv").write_text("id,email\n1,x@a.com\n2,y@b.com\n", encoding="utf-8")
+            (raw / "b.csv").write_text("key,email\n9,x@a.com\n", encoding="utf-8")
+            with mock.patch.object(artefacts, "write_text", record):
+                profile_folder(raw, out)
+                write_report(overlap_folder(raw, exclude=out), out)
+                write_plan(Path(tmp), ["seed-1"], ["alone"], 1, 7)
+        self.assertEqual(
+            sorted(written),
+            sorted(
+                ["a.txt", "a.json", "b.txt", "b.json", "overlap.txt", "overlap.json", PLAN_FILE]
+            ),
+        )
 
 
 class KilledWriterTest(unittest.TestCase):
