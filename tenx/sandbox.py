@@ -19,6 +19,7 @@ for an unisolated run on purpose, and that run is then marked as such.
 from __future__ import annotations
 
 import os
+import site
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,24 @@ class Unisolated:
 
     def describe(self) -> str:
         return "none (--unisolated): the agents could read and change any file you can"
+
+
+def python_folders() -> tuple[Path, ...]:
+    """The folders holding the running Python and the packages it imports.
+
+    The sandbox hides the home folder, where a virtual environment or a
+    user's own packages are often installed, so a command run with this
+    Python inside the sandbox needs these shown again, read-only.
+    """
+    folders = [Path(sys.prefix), Path(sys.base_prefix), Path(sys.executable).parent]
+    if site.ENABLE_USER_SITE:
+        folders.append(Path(site.getusersitepackages()))
+    unique: list[Path] = []
+    for folder in folders:
+        folder = folder.resolve()
+        if folder.is_dir() and folder not in unique:
+            unique.append(folder)
+    return tuple(unique)
 
 
 def _inside(path: Path, folder: Path) -> bool:

@@ -43,6 +43,7 @@ from tenx.sandbox import (
     SandboxError,
     Unisolated,
     default_sandbox,
+    python_folders,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -311,6 +312,40 @@ class DefaultSandboxTest(unittest.TestCase):
                 ),
             ):
                 default_sandbox(platform="linux")
+
+
+class PythonFoldersTest(unittest.TestCase):
+    """The folders a command run with this Python needs, worked out by hand."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        for name in ("venv/bin", "base", "user"):
+            (self.root / name).mkdir(parents=True)
+
+    def folders(self, user: Path, enabled: bool = True, base: str = "base") -> tuple[Path, ...]:
+        with (
+            mock.patch.object(sys, "prefix", str(self.root / "venv")),
+            mock.patch.object(sys, "base_prefix", str(self.root / base)),
+            mock.patch.object(sys, "executable", str(self.root / "venv" / "bin" / "python")),
+            mock.patch("tenx.sandbox.site.ENABLE_USER_SITE", enabled),
+            mock.patch("tenx.sandbox.site.getusersitepackages", return_value=str(user)),
+        ):
+            return python_folders()
+
+    def test_the_environment_its_base_its_programs_and_user_packages(self):
+        expected = tuple(self.root / name for name in ("venv", "base", "venv/bin", "user"))
+        self.assertEqual(self.folders(self.root / "user"), expected)
+
+    def test_missing_folders_and_disabled_user_packages_are_left_out(self):
+        expected = tuple(self.root / name for name in ("venv", "base", "venv/bin"))
+        self.assertEqual(self.folders(self.root / "absent"), expected)
+        self.assertEqual(self.folders(self.root / "user", enabled=False), expected)
+
+    def test_a_folder_named_twice_is_listed_once(self):
+        listed = self.folders(self.root / "absent", base="venv")
+        self.assertEqual(listed, (self.root / "venv", self.root / "venv" / "bin"))
 
 
 class CommandLineSandboxTest(unittest.TestCase):
