@@ -616,7 +616,10 @@ class SandboxedRunTest(unittest.TestCase):
     def test_the_reference_models_built_in_the_sandbox_pass_the_gate(self):
         self.assertEqual(self.code, 0, self.printed)
         self.assertIn("gate: PASS (24 passed, 0 failed, 0 not run)", self.printed)
-        self.assertIn("sandbox: bubblewrap: the agents see only their own folder", self.printed)
+        self.assertIn(
+            "sandbox: bubblewrap: the agents and the gate's builds see only their own folder",
+            self.printed,
+        )
         ledger = json.loads((self.out / USAGE_FILE).read_text(encoding="utf-8"))
         self.assertEqual((ledger["gate"], ledger["sandbox"]), ("PASS", "bubblewrap"))
 

@@ -631,7 +631,11 @@ def run(
     command = agent_command(claude, plugin)
     seen = mounts(project, out, checks, claude, raw=Path(raw))
     agent = run_agent(project.resolve(), command, out / AGENT_FILE, timeout, sandbox, seen)
-    results = run_gate(project, raw, checks, out / GATE_DIR)
+    # The gate builds what the agent wrote, so its builds run in the same
+    # sandbox, and see nothing of the run or the repository but the project.
+    results = run_gate(
+        project, raw, checks, out / GATE_DIR, sandbox, hidden=(PLUGIN_DIR, out.resolve())
+    )
     outcome = Run(agent, results, notes, scout_notes, sandbox.name)
     usage(outcome).write(out / USAGE_FILE)
     return outcome

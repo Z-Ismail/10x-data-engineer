@@ -173,7 +173,10 @@ class Bubblewrap:
         return arguments + list(command)
 
     def describe(self) -> str:
-        return "bubblewrap: the agents see only their own folder and the files their work needs"
+        return (
+            "bubblewrap: the agents and the gate's builds see only their own folder "
+            "and the files their work needs"
+        )
 
 
 def check(sandbox: Bubblewrap) -> None:
