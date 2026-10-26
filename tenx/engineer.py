@@ -108,6 +108,11 @@ PROJECT_NAME = "tenx_project"
 GOAL_FILE = "GOAL.md"
 SOURCE_PROFILES_DIR = "source_profiles"
 DEV_DATABASE = "dev.duckdb"
+# Claude Code can move each shell command into a memory cgroup. Started from
+# inside Claude Code's own shell, it reuses the cgroup it is already in, which
+# a sandbox cannot enter because /sys is read-only there, and then no shell
+# command can start. Inside the sandbox, the cgroup is turned off.
+SANDBOXED_AGENT_ENVIRONMENT = {"CLAUDE_CODE_TOOL_MEMORY_LIMIT": "none"}
 
 
 class EngineerError(Exception):
@@ -325,6 +330,8 @@ def run_agent(
     partial = report_file.with_name(report_file.name + ".partial")
     errors = report_file.with_name(report_file.name + ".stderr")
     sandbox = sandbox or Unisolated()
+    if not isinstance(sandbox, Unisolated):
+        environment.update(SANDBOXED_AGENT_ENVIRONMENT)
     try:
         started = sandbox.command(command, mounts or Mounts(workspace=project))
     except SandboxError as error:
