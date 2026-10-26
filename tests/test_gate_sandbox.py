@@ -13,17 +13,28 @@ Skipped where bubblewrap cannot run, unless TENX_REQUIRE_SANDBOX is set, as
 it is in CI; then they fail instead.
 """
 
+import io
 import json
 import os
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import duckdb
 
 from demo.generate import generate
-from tenx.gate import DATABASE_FILE, EXPECTED_FILE, REPEAT_DIR, REPEAT_FILE, passed, run_gate
+from tenx.gate import (
+    DATABASE_FILE,
+    EXPECTED_FILE,
+    REPEAT_DIR,
+    REPEAT_FILE,
+    main,
+    passed,
+    run_gate,
+)
 from tenx.sandbox import Bubblewrap, SandboxError, Unisolated, default_sandbox
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -265,3 +276,47 @@ class SandboxedReferenceTest(unittest.TestCase):
             )
         self.assertTrue(passed(results))
         self.assertEqual(len(results), 24)
+
+
+class CommandLineTest(unittest.TestCase):
+    """The gate's command builds in the sandbox, refuses without one, or says it has none."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        generate(11, 20, self.root / "data", self.root / "answers")
+        self.work = self.root / "work"
+
+    def main(self, *flags: str) -> tuple[int, str, str]:
+        arguments = [str(PROJECT), "--raw", str(self.root / "data"), "--checks", str(DECLARATION)]
+        with (
+            redirect_stdout(io.StringIO()) as printed,
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            code = main([*arguments, "--workdir", str(self.work), *flags])
+        return code, printed.getvalue(), errors.getvalue()
+
+    def test_without_bubblewrap_nothing_is_built(self):
+        with mock.patch("tenx.sandbox.which", return_value=None):
+            code, printed, errors = self.main()
+        self.assertEqual((code, printed), (2, ""))
+        self.assertIn("error: bubblewrap (bwrap) is needed", errors)
+        self.assertFalse(self.work.exists())
+
+    def test_an_unisolated_build_goes_ahead_and_says_so(self):
+        with mock.patch("tenx.sandbox.which", return_value=None):
+            code, printed, errors = self.main("--unisolated")
+        self.assertEqual(code, 0, printed + errors)
+        self.assertEqual(errors, "warning: built without a sandbox (--unisolated)\n")
+        self.assertTrue(printed.startswith("gate: PASS (24 passed"))
+
+    @unittest.skipIf(
+        SANDBOX_PROBLEM and not os.environ.get("TENX_REQUIRE_SANDBOX"), "no working sandbox"
+    )
+    def test_by_default_the_builds_run_in_bubblewrap(self):
+        with mock.patch("tenx.gate.run_gate", wraps=run_gate) as gate:
+            code, printed, errors = self.main()
+        self.assertEqual((code, errors), (0, ""), printed)
+        self.assertTrue(printed.startswith("gate: PASS (24 passed"))
+        self.assertIsInstance(gate.call_args.args[4], Bubblewrap)

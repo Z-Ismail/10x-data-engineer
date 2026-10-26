@@ -75,6 +75,9 @@ from the second. The gate's own checks run outside the sandbox.
 Usage:
     python -m tenx.gate path/to/project --raw demo/data --checks gate.json
 
+The command builds in a sandbox (bubblewrap, Linux) and refuses to run where
+none can be set up, unless given --unisolated.
+
 Exit status is 0 when every check passes, 1 when any check fails and 2 when
 the gate could not run.
 """
@@ -101,7 +104,14 @@ from tenx.profile import (
     relation,
     table_name,
 )
-from tenx.sandbox import Mounts, Sandbox, SandboxError, Unisolated, python_folders
+from tenx.sandbox import (
+    Mounts,
+    Sandbox,
+    SandboxError,
+    Unisolated,
+    default_sandbox,
+    python_folders,
+)
 
 PASS, FAIL, SKIP = "pass", "fail", "skip"
 # Statuses dbt records for a node that did what was asked. A test set to warn
@@ -1380,9 +1390,22 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="empty folder to keep the built database, dbt artifacts and log in",
     )
+    parser.add_argument(
+        "--unisolated",
+        action="store_true",
+        help="build without a sandbox, so that the project's code can read and change any "
+        "file you can; only for a project you trust",
+    )
     args = parser.parse_args(argv)
     try:
-        results = run_gate(args.project, args.raw, args.checks, args.workdir)
+        sandbox = default_sandbox(unisolated=args.unisolated)
+    except SandboxError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if not sandbox.isolated:
+        print("warning: built without a sandbox (--unisolated)", file=sys.stderr)
+    try:
+        results = run_gate(args.project, args.raw, args.checks, args.workdir, sandbox)
     except GateError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

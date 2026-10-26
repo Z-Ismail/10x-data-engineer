@@ -1493,6 +1493,7 @@ class CannotRun(unittest.TestCase):
                     str(self.root / "raw"),
                     "--checks",
                     str(self.root / "absent.json"),
+                    "--unisolated",
                 ]
             )
         self.assertEqual(code, 2)
@@ -1760,7 +1761,9 @@ class DemoProject(unittest.TestCase):
     def test_the_command_reports_a_pass_and_exits_0(self):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = main([str(PROJECT), "--raw", str(self.raw), "--checks", str(DECLARATION)])
+            code = main(
+                [str(PROJECT), "--raw", str(self.raw), "--checks", str(DECLARATION), "--unisolated"]
+            )
         self.assertEqual(code, 0)
         self.assertTrue(stdout.getvalue().startswith("gate: PASS (24 passed, 0 failed, 0 not run)"))
 
@@ -2286,7 +2289,9 @@ class DemoProject(unittest.TestCase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = main([str(project), "--raw", str(self.raw), "--checks", str(DECLARATION)])
+            code = main(
+                [str(project), "--raw", str(self.raw), "--checks", str(DECLARATION), "--unisolated"]
+            )
         self.assertEqual(code, 1)
         report = stdout.getvalue()
         self.assertTrue(report.startswith("gate: FAIL (20 passed, 4 failed, 0 not run)"), report)
