@@ -12,7 +12,13 @@ Notable changes to this project.
   folder and the home folder are hidden, and writes outside the agent's
   folder are discarded. Where no sandbox can be set up the run is refused;
   `--unisolated` runs without one, and the report and `usage.json` say so.
-  The gate's own build of the agent's project is not sandboxed yet.
+- The gate builds each project in the same sandbox, so a dbt Python model
+  cannot read the gate's declaration or expected rows, or change its
+  databases. Each build sees the project and the raw files read-only and can
+  write only its own work folder; the second build cannot see the first
+  one's database. `python -m tenx.gate` builds in the sandbox by default and
+  refuses where none can be set up; `--unisolated` builds without one and
+  says so.
 
 ### Fixed
 

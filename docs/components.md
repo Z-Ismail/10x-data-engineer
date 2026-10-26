@@ -132,6 +132,14 @@ files. A successful build is only the first check. There are six checks:
 | `expected` | a model's named columns do not hold exactly the rows that a declared query gives from the raw files |
 | `repeat` | a second build of the project into another empty database does not give the same rows in every model |
 
+Building a project runs its code, so on Linux each build runs in the same
+bubblewrap sandbox as the agents: it sees the project and the raw files
+read-only, can write only its own work folder, and cannot see the
+declaration, the expected rows or (for the second build) the first build's
+database. Where no sandbox can be set up the command refuses to build, with
+exit status 2; `--unisolated` builds without one, for a project you trust,
+and prints a warning. See [Security](security.md).
+
 What to expect is declared in a JSON file that is kept outside the dbt
 project, so the checks cannot be edited by whoever writes the models:
 
@@ -408,7 +416,7 @@ pinned to the Sonnet model and stops after 20 turns.
 cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 8 cautions
 agent: success after 19 turns (exit 0)
 project: runs/demo/project
-sandbox: bubblewrap: the agents see only their own folder and the files their work needs
+sandbox: bubblewrap: the agents and the gate's builds see only their own folder and the files their work needs
 
 gate: PASS (24 passed, 0 failed, 0 not run)
 ...
