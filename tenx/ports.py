@@ -16,6 +16,10 @@ that the code built on it cannot reach one by accident.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+from tenx.sandbox import Mounts, Sandbox
 
 __all__ = [
     "BUILD",
@@ -25,12 +29,18 @@ __all__ = [
     "SCAFFOLD",
     "STRUCTURED_ANSWER",
     "VALIDATE",
+    "AgentBackend",
     "AgentRun",
     "BuildResult",
     "CheckResult",
+    "Mounts",
     "Role",
+    "Sandbox",
+    "SourceProfiler",
+    "TransformEngine",
     "UnsupportedCapability",
     "ValidationReport",
+    "Validator",
     "require",
 ]
 
@@ -129,3 +139,86 @@ class BuildResult:
     @property
     def ok(self) -> bool:
         return self.exit_code == 0
+
+
+@runtime_checkable
+class SourceProfiler(Protocol):
+    """Describes raw sources: one profile per table, and values tables share."""
+
+    name: str
+
+    def capabilities(self) -> frozenset[str]: ...
+
+    def profile(self, raw: Path, out: Path) -> list[dict]:
+        """Profile every table under ``raw``, write the profiles to ``out``, return them."""
+        ...
+
+    def overlap(self, raw: Path, out: Path) -> dict:
+        """Compare columns across the tables under ``raw``; write the report to ``out``."""
+        ...
+
+
+@runtime_checkable
+class TransformEngine(Protocol):
+    """Turns a project of models into tables."""
+
+    name: str
+
+    def capabilities(self) -> frozenset[str]: ...
+
+    def scaffold(self, project: Path, raw: Path) -> None:
+        """Write an empty project in ``project`` that reads the raw files under ``raw``."""
+        ...
+
+    def build(
+        self,
+        project: Path,
+        raw: Path,
+        workdir: Path,
+        sandbox: Sandbox | None = None,
+        hidden: tuple[Path, ...] = (),
+    ) -> BuildResult:
+        """Build the project from nothing into ``workdir``, in ``sandbox`` if given."""
+        ...
+
+
+@runtime_checkable
+class Validator(Protocol):
+    """Decides, in code, whether a built project does what was declared."""
+
+    name: str
+
+    def capabilities(self) -> frozenset[str]: ...
+
+    def validate(
+        self,
+        project: Path,
+        raw: Path,
+        declaration: Path,
+        workdir: Path,
+        sandbox: Sandbox | None = None,
+        hidden: tuple[Path, ...] = (),
+    ) -> ValidationReport:
+        """Build the project afresh and run every declared check on it."""
+        ...
+
+
+@runtime_checkable
+class AgentBackend(Protocol):
+    """Runs one agent session in a folder and returns what it reported."""
+
+    name: str
+
+    def capabilities(self) -> frozenset[str]: ...
+
+    def run(
+        self,
+        role: Role,
+        workspace: Path,
+        report_file: Path,
+        timeout: float,
+        sandbox: Sandbox | None = None,
+        mounts: Mounts | None = None,
+    ) -> AgentRun:
+        """Run ``role`` in ``workspace``; keep its report in ``report_file``."""
+        ...

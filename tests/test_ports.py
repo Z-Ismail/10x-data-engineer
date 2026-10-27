@@ -5,9 +5,13 @@ from tenx import engineer, ports
 from tenx.ports import (
     OVERLAP,
     PROFILE,
+    AgentBackend,
     AgentRun,
     BuildResult,
+    SourceProfiler,
+    TransformEngine,
     UnsupportedCapability,
+    Validator,
     require,
 )
 
@@ -26,6 +30,13 @@ class ProfilesOnly:
     def overlap(self, raw: Path, out: Path) -> dict:
         require(self, OVERLAP)
         return {}
+
+
+class NoMethods:
+    name = "nothing"
+
+    def capabilities(self) -> frozenset[str]:
+        return frozenset()
 
 
 class CapabilityTest(unittest.TestCase):
@@ -52,6 +63,16 @@ class CapabilityTest(unittest.TestCase):
             ports.STRUCTURED_ANSWER,
         ]
         self.assertEqual(len(set(names)), len(names))
+
+
+class ProtocolTest(unittest.TestCase):
+    def test_a_profiler_written_elsewhere_satisfies_the_interface(self):
+        self.assertIsInstance(ProfilesOnly(), SourceProfiler)
+
+    def test_an_object_without_the_methods_does_not(self):
+        for interface in (SourceProfiler, TransformEngine, Validator, AgentBackend):
+            with self.subTest(interface=interface.__name__):
+                self.assertNotIsInstance(NoMethods(), interface)
 
 
 class SharedTypesTest(unittest.TestCase):
