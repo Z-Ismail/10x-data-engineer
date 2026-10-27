@@ -45,14 +45,14 @@ __all__ = [
     "require",
 ]
 
-# Capabilities, each named for what it does.
-PROFILE = "profile"
-OVERLAP = "overlap"
-SCAFFOLD = "scaffold"
-BUILD = "build"
-VALIDATE = "validate"
-RUN_AGENT = "run agent"
-STRUCTURED_ANSWER = "structured answer"
+# Capabilities, each named for what it does, so that a refusal reads as a sentence.
+PROFILE = "profile sources"
+OVERLAP = "compare columns across tables"
+SCAFFOLD = "scaffold a project"
+BUILD = "build a project"
+VALIDATE = "validate a project"
+RUN_AGENT = "run an agent"
+STRUCTURED_ANSWER = "give a structured answer"
 
 
 class UnsupportedCapability(Exception):

@@ -45,8 +45,8 @@ class CapabilityTest(unittest.TestCase):
         self.assertEqual(profiler.profile(Path("raw"), Path("out")), [])
         with self.assertRaises(UnsupportedCapability) as caught:
             profiler.overlap(Path("raw"), Path("out"))
-        self.assertEqual(str(caught.exception), "flat files cannot overlap")
-        self.assertEqual(caught.exception.capability, "overlap")
+        self.assertEqual(str(caught.exception), "flat files cannot compare columns across tables")
+        self.assertEqual(caught.exception.capability, OVERLAP)
         self.assertEqual(caught.exception.implementation, "flat files")
 
     def test_declared_capability_passes(self):
