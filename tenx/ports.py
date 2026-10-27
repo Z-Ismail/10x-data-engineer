@@ -15,7 +15,7 @@ that the code built on it cannot reach one by accident.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -34,6 +34,7 @@ __all__ = [
     "BuildResult",
     "CheckResult",
     "Mounts",
+    "PlatformError",
     "Role",
     "Sandbox",
     "SourceProfiler",
@@ -61,6 +62,14 @@ class UnsupportedCapability(Exception):
         super().__init__(f"{implementation} cannot {capability}")
         self.capability = capability
         self.implementation = implementation
+
+
+class PlatformError(Exception):
+    """An adapter could not do what it was asked, for the reason given.
+
+    Adapters raise this in place of their platform's own errors, so that the
+    code calling them need not know which platform it is.
+    """
 
 
 def require(port: object, capability: str) -> None:
@@ -117,6 +126,7 @@ class CheckResult:
     subject: str
     status: str
     detail: str
+    facts: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
