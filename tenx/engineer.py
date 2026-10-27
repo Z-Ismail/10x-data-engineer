@@ -73,6 +73,7 @@ from tenx.gate import GateError, Result, load_declaration, passed, render, run_g
 from tenx.ledger import Ledger, role_usage
 from tenx.ledger import render as render_usage
 from tenx.overlap import overlap_folder, write_report
+from tenx.ports import AgentRun, Role
 from tenx.profile import ProfileError, profile_folder
 from tenx.sample import sample
 from tenx.sandbox import (
@@ -118,18 +119,6 @@ SANDBOXED_AGENT_ENVIRONMENT = {"CLAUDE_CODE_TOOL_MEMORY_LIMIT": "none"}
 
 class EngineerError(Exception):
     """The run could not start or its inputs are unusable."""
-
-
-@dataclass(frozen=True)
-class Role:
-    """One agent of the add-on, and how the runner starts it."""
-
-    name: str
-    agent: str
-    prompt: str
-    allowed_tools: tuple[str, ...]
-    max_turns: int
-    json_schema: dict | None = None
 
 
 ENGINEER = Role(
@@ -217,32 +206,6 @@ def prepare_project(project: Path, raw: Path, goal: Path) -> list[dict]:
     (project / "profiles.yml").write_text(profiles_yml(), encoding="utf-8")
     (project / "models").mkdir()
     return profiles
-
-
-def _duration(seconds: float) -> str:
-    if seconds >= 60 and seconds % 60 == 0:
-        minutes = int(seconds // 60)
-        return f"{minutes} minute{'s' if minutes != 1 else ''}"
-    return f"{seconds:g} seconds"
-
-
-@dataclass(frozen=True)
-class AgentRun:
-    exit_code: int | None
-    report: dict | None
-    timed_out_after: float | None = None
-    message: str = ""
-
-    def describe(self) -> str:
-        if self.timed_out_after is not None:
-            return f"stopped: did not finish within {_duration(self.timed_out_after)}"
-        if self.report is None:
-            reason = f": {self.message}" if self.message else ""
-            return f"exited {self.exit_code} without a report{reason}"
-        outcome = self.report.get("subtype") or "unknown"
-        turns = self.report.get("num_turns")
-        detail = f"{outcome} after {turns} turns" if turns is not None else outcome
-        return f"{detail} (exit {self.exit_code})"
 
 
 def stage_plugin(destination: Path) -> Path:
