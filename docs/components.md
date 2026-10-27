@@ -625,6 +625,41 @@ are used by the runner's own writes and by their tests.
   attempt. The manifest is outside the work folder an agent is given, and is
   trusted: the check guards against crashes, not against someone editing it.
 
+## Capability interfaces
+
+`tenx/ports.py` names what a run needs from a platform, by capability rather
+than by tool, so that the workflow being built (checkpoints, resume and
+approvals) can run on other platforms later without changing. The workflow
+is not built yet; today the interfaces have their first implementations and
+tests, and the runner works as before.
+
+| Interface | Capabilities | First implementation |
+| --- | --- | --- |
+| `SourceProfiler` | profile sources; compare columns across tables | `DuckDBProfiler` (`tenx/adapters/duckdb.py`): the source profiler and the overlap report |
+| `TransformEngine` | scaffold a project; build a project | `DbtDuckDB`: an empty dbt project that reads the raw files, built with `dbt build` into a new DuckDB file |
+| `Validator` | validate a project | `DuckDBGate`: the gate, with its results and its report text unchanged |
+| `AgentBackend` | run an agent; give a structured answer | `ClaudeCode` (`tenx/backends/claude_code.py`): `claude -p` with the runner's own command line, start and stop |
+| `Sandbox` | (unchanged) | `Bubblewrap` and `Unisolated` in `tenx/sandbox.py` |
+
+Each implementation lists what it can do with `capabilities()`. Asking one
+for something it cannot do raises `UnsupportedCapability`, whose message is
+a sentence such as "plain agents cannot give a structured answer", before
+anything is started. Errors of the platform underneath (a folder with no
+tables, a declaration that does not parse) are raised as `PlatformError`
+with the same message, so the code calling an interface never needs to know
+which platform it is talking to.
+
+The implementations wrap the existing modules and are tested against them on
+generated demo data: the same profile and overlap files byte for byte, the
+same dbt project files, the same build results, and the same gate results
+and report on a correct and a broken project. A test keeps `tenx/ports.py`,
+and the workflow's package `tenx/graph/` once it exists, free of imports of
+DuckDB, dbt, the gate, the profiler, the overlap report, the runner or the
+implementations themselves, whether written as an import statement or as a
+module name given to `importlib`; a second test imports them in a fresh
+interpreter and checks that none of those modules was loaded, directly or
+through another module.
+
 ## Repository layout
 
 | Path | Contents |
@@ -632,6 +667,7 @@ are used by the runner's own writes and by their tests.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, and the run artefacts |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, the run artefacts, and the capability interfaces |
+| `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 

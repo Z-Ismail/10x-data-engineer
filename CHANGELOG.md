@@ -24,6 +24,15 @@ Notable changes to this project.
   never leaves a half-written report, profile, note or ledger. Also new, for
   resuming runs later: input hashes, attempt folders with manifests, and the
   rule for when an earlier attempt can be reused.
+- Capability interfaces (`tenx/ports.py`) for what a run needs from a
+  platform: profiling sources, scaffolding and building a project,
+  validating it, and running an agent. DuckDB and dbt (`tenx/adapters/`)
+  and Claude Code (`tenx/backends/`) are the first implementations and
+  behave exactly as the code they wrap. An implementation asked for
+  something it cannot do refuses with `UnsupportedCapability`, and its
+  platform's errors are raised as `PlatformError`. A test keeps the
+  interfaces, and the workflow code that will use them, free of DuckDB, dbt
+  and gate imports.
 
 ### Fixed
 

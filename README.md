@@ -113,6 +113,7 @@ if:
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
 | Specification | Machine-checked spec contract and `SPEC.md` | Available as code; the Architect agent is next |
 | Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
+| Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available as code; the workflow that uses them is in progress |
 | Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress |
 | Build | Repair loop driven by the gate's report | Planned |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
