@@ -6,10 +6,12 @@ import stat
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from tenx.backends.claude_code import ClaudeCode
 from tenx.engineer import CROSS_SOURCE, ENGINEER, SCOUT, agent_command, run_agent, scout_role
+from tenx.policy import Policy
 from tenx.ports import RUN_AGENT, AgentBackend, PlatformError, UnsupportedCapability
 
 STAND_IN = f"""#!{sys.executable}
@@ -45,6 +47,21 @@ class CommandTest(unittest.TestCase):
                     backend.command(role),
                     agent_command("/usr/bin/claude", Path("/run/plugin"), role),
                 )
+
+    def test_the_command_carries_the_backends_policy(self):
+        caps = {"engineer": "0.5", "cross-source": "0.25", "scout": "0.05"}
+        rules = Policy(
+            run_usd=Decimal(1), call_usd={kind: Decimal(cap) for kind, cap in caps.items()}
+        )
+        backend = ClaudeCode("/usr/bin/claude", Path("/run/plugin"), rules)
+        for role in (ENGINEER, CROSS_SOURCE, scout_role("crm.accounts")):
+            with self.subTest(role=role.name):
+                command = backend.command(role)
+                self.assertEqual(
+                    command, agent_command("/usr/bin/claude", Path("/run/plugin"), role, rules)
+                )
+                cap = command[command.index("--max-budget-usd") + 1]
+                self.assertEqual(cap, caps[role.budget_kind])
 
 
 class RunTest(unittest.TestCase):

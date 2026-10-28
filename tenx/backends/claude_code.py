@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tenx.engineer import EngineerError, agent_command, run_agent
+from tenx.policy import Policy
 from tenx.ports import (
     RUN_AGENT,
     STRUCTURED_ANSWER,
@@ -27,15 +28,16 @@ class ClaudeCode:
 
     name = "Claude Code"
 
-    def __init__(self, claude: str, plugin_dir: Path) -> None:
+    def __init__(self, claude: str, plugin_dir: Path, policy: Policy | None = None) -> None:
         self.claude = claude
         self.plugin_dir = Path(plugin_dir)
+        self.policy = policy or Policy()
 
     def capabilities(self) -> frozenset[str]:
         return frozenset({RUN_AGENT, STRUCTURED_ANSWER})
 
     def command(self, role: Role) -> list[str]:
-        return agent_command(self.claude, self.plugin_dir, role)
+        return agent_command(self.claude, self.plugin_dir, role, self.policy)
 
     def run(
         self,

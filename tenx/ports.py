@@ -88,6 +88,12 @@ class Role:
     allowed_tools: tuple[str, ...]
     max_turns: int
     json_schema: dict | None = None
+    # The kind of agent the spending policy caps it as; its name when not given.
+    kind: str | None = None
+
+    @property
+    def budget_kind(self) -> str:
+        return self.kind or self.name
 
 
 def _duration(seconds: float) -> str:

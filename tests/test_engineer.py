@@ -18,6 +18,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -32,6 +33,7 @@ from tenx.engineer import (
     CROSS_SOURCE_DIR,
     CROSS_SOURCE_FILE,
     DEV_DATABASE,
+    ENGINEER,
     GATE_DIR,
     GOAL_FILE,
     PLUGIN_COPY_DIR,
@@ -50,8 +52,10 @@ from tenx.engineer import (
     prepare_scout,
     run,
     run_agent,
+    scout_role,
 )
 from tenx.gate import FAIL, GateError, load_declaration, passed
+from tenx.policy import Policy, PolicyError
 from tenx.sandbox import Unisolated
 from tenx.scouts import render as render_table_notes
 
@@ -391,7 +395,7 @@ class AgentCommandTest(unittest.TestCase):
                 "--max-turns",
                 "60",
                 "--max-budget-usd",
-                "5",
+                "0.75",
                 "--output-format",
                 "json",
                 "--no-session-persistence",
@@ -399,7 +403,7 @@ class AgentCommandTest(unittest.TestCase):
         )
 
     def test_a_role_with_no_allowed_tools_is_given_none(self):
-        role = Role("reader", "tenx:reader", "Read it.", (), 3)
+        role = Role("reader", "tenx:reader", "Read it.", (), 3, kind="cross-source")
         command = agent_command("claude", Path("/p"), role)
         self.assertNotIn("--allowedTools", command)
         self.assertEqual(
@@ -416,6 +420,33 @@ class AgentCommandTest(unittest.TestCase):
             ],
         )
         self.assertEqual(command[9:11], ["--max-turns", "3"])
+
+    def test_each_agent_is_capped_at_its_policy_cap(self):
+        def cap(role, rules=None):
+            command = agent_command("claude", Path("/p"), role, rules)
+            return command[command.index("--max-budget-usd") + 1]
+
+        self.assertEqual(cap(ENGINEER), "0.75")
+        self.assertEqual(cap(CROSS_SOURCE), "0.40")
+        self.assertEqual(cap(SCOUT), "0.10")
+        self.assertEqual(cap(scout_role("billing.customers")), "0.10")
+        rules = Policy(
+            run_usd=Decimal(1),
+            call_usd={
+                "engineer": Decimal("0.5"),
+                "cross-source": Decimal("0.25"),
+                "scout": Decimal("0.05"),
+            },
+        )
+        self.assertEqual(
+            [cap(role, rules) for role in (ENGINEER, CROSS_SOURCE, scout_role("crm.accounts"))],
+            ["0.5", "0.25", "0.05"],
+        )
+
+    def test_an_agent_the_policy_does_not_cap_is_refused(self):
+        role = Role("reviewer", "tenx:reviewer", "Review it.", (), 3)
+        with self.assertRaisesRegex(PolicyError, r"no cap for 'reviewer'"):
+            agent_command("claude", Path("/p"), role)
 
     def test_the_plugin_folder_holds_the_engineer_agent(self):
         self.assertTrue((PLUGIN_DIR / ".claude-plugin" / "plugin.json").is_file())

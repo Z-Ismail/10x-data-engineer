@@ -15,7 +15,8 @@ make test
 make engineer    # the cross-source agent, then the engineer builds the demo project; then the gate
 make engineer-alone    # the same without the cross-source agent
 make engineer-scouts   # the same as make engineer, with a scout for each raw table first
-make compare     # runs the engineer with and without the other agents, 128 runs
+make compare     # runs the engineer with and without the other agents, 128 runs;
+                 # needs COMPARE_FLAGS=--approve-cost (estimated above US$5)
 ```
 
 ## Demo data
@@ -334,7 +335,8 @@ hides it from the agent whatever command the agent runs.
 The agent runs in Claude Code without anyone at the keyboard. It may write
 files in its own folder and run `dbt`, and every other action is refused
 rather than asked about. It is pinned to the Sonnet model and stops after 60
-turns, US$5 of estimated usage or 30 minutes, whichever comes first.
+turns, US$0.75 of estimated usage or 30 minutes, whichever comes first (see
+[Spending policy](#spending-policy)).
 
 An earlier run of the engineer alone, before the cross-source agent ran by
 default:
@@ -410,7 +412,8 @@ must exist in the profiles. A checked answer is written as `JOINS.md` in the
 engineer's folder, and the engineer is told to read it before writing a
 model that combines sources. An answer that fails the check is not passed
 on, the engineer works without it, and the run says why. The agent is
-pinned to the Sonnet model and stops after 20 turns.
+pinned to the Sonnet model and stops after 20 turns or US$0.40 of estimated
+usage.
 
 ```
 cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 8 cautions
@@ -466,9 +469,9 @@ be a column of that table. The answers that pass are written together as
 `TABLE_NOTES.md` in the engineer's folder, and the engineer is told to read
 it before writing the staging models. An answer that fails its check is
 left out, and the run says why. Scouts are pinned to the Haiku model and
-stop after 8 turns. The cross-source agent still runs unless
-`--no-cross-source` is given; the scouts run first, and neither sees the
-other's notes.
+each stops after 8 turns or US$0.10 of estimated usage. The cross-source
+agent still runs unless `--no-cross-source` is given; the scouts run first,
+and neither sees the other's notes.
 
 ```
 scout billing.customers: success after 5 turns (exit 0); 7 findings, 4 questions
@@ -536,6 +539,21 @@ difference is not shown. With three arms compared with one baseline, the
 5%. Cost per pass is all the estimated cost of an arm's runs divided by its
 passes.
 
+Before any run starts, the comparison prices the runs it still has to do,
+from the [spending policy](#spending-policy): typically (engineer US$0.20,
+cross-source agent US$0.08 and each scout US$0.02 per call, measured on the
+demo data and rounded up) and at most (every call at its cap). A
+comparison estimated above US$5 stops there, writes nothing and runs
+nothing, unless `--approve-cost` is given; `make compare` passes it with
+`COMPARE_FLAGS=--approve-cost`. The default 128 runs are estimated at
+US$35.84, at most US$147.20:
+
+```
+error: 128 runs to do, estimated at US$35.84, at most US$147.20 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
+```
+
+A resumed comparison is priced on the runs that still lack a verdict.
+
 A comparison on the demo data, all 128 runs on one day with Claude Code
 2.1.308:
 
@@ -596,6 +614,53 @@ The tokens are listed per model because a session can use more than one: in
 the example above, Claude Code made a small request of its own on a second
 model. A figure that was not reported is shown as `-`, and the `run` row is
 only added up when every role reported.
+
+## Spending policy
+
+`tenx/policy.py` holds the limits on what agents may spend, in US$ of Claude
+Code's own estimates (on a subscription these are not bills; the limit that
+applies is your plan's usage):
+
+| Limit | Default |
+| --- | --- |
+| A run, all its agent calls together | US$2.00 |
+| One call of the engineer | US$0.75 |
+| One call of the cross-source agent | US$0.40 |
+| One call of a scout | US$0.10 |
+| A comparison that may start without `--approve-cost` | US$5.00, estimated |
+
+Each agent is started with its call cap as Claude Code's `--max-budget-usd`.
+Claude Code checks that cap after each model response, so one call can pass
+it by up to one response; checking a run's total before each call would
+therefore not cap the run. Instead, a run's budget reserves a call's whole
+cap before the call starts, and starts it only if what was spent, what is
+still reserved and the new reservation fit the run's ceiling; otherwise the
+call is not started and the run stops with `stopped: budget`. When the call
+ends, the reservation is settled with the cost Claude Code reported, or with
+the whole reservation when it reported none (a crash, a timeout) or did not
+know a model's price. A call that passed its cap is charged what it cost,
+and the report names it. An example with made-up figures, from the tests:
+
+```
+budget (US$, Claude Code's own estimates): ceiling 2.00, spent 1.222, still reserved 0.10
+
+call           cap  measured  charged  charged as
+scout a       0.10     0.012    0.012  measured
+cross-source  0.40         -     0.40  whole reservation
+engineer      0.75      0.81     0.81  measured
+engineer passed its cap by US$0.06: Claude Code checks the cap only after each model response
+```
+
+Amounts are kept as decimals, never binary floating point, so a call that
+fits the ceiling exactly is not refused by a rounding error, and the budget
+can be shared by agents running at the same time. A policy can be read from
+a JSON file with the fields `run_usd`, `call_usd` and `typical_usd` (each an
+object naming `engineer`, `cross-source` and `scout`) and
+`approve_above_usd`; unknown fields, malformed amounts and a call cap above
+the run's ceiling are refused. Today the per-call caps apply to every run
+and the approval to every comparison; the run ceiling, the reservations and
+the policy file come into use with the workflow being built, which will
+reserve and settle every agent call.
 
 ## Run artefacts
 
@@ -667,7 +732,7 @@ through another module.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, the run artefacts, and the capability interfaces |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, the run artefacts, the spending policy, and the capability interfaces |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
