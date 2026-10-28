@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -144,3 +145,123 @@ def load(path: Path) -> Policy:
     except json.JSONDecodeError as error:
         raise PolicyError(f"the policy {path} is not JSON: {error}") from error
     return from_dict(document)
+
+
+STOPPED = "stopped: budget"
+
+
+class BudgetStop(Exception):
+    """A call was not started, because its reservation does not fit the run's ceiling."""
+
+    status = STOPPED
+
+
+def measured(value) -> Decimal | None:
+    """A cost from Claude Code's report as a decimal, or None when it is not a cost.
+
+    The report's float is read through its shortest text form.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return Decimal(str(value))
+
+
+@dataclass(frozen=True)
+class Reservation:
+    number: int
+    role: str
+    kind: str
+    cap: Decimal
+
+
+@dataclass(frozen=True)
+class Settlement:
+    """What one call was charged to the run, and how that figure was found."""
+
+    reservation: Reservation
+    # The cost Claude Code reported, when it reported one it knew.
+    measured_usd: Decimal | None
+
+    @property
+    def charged_usd(self) -> Decimal:
+        # With no known cost, the whole reservation is charged: the call may
+        # have spent all of it, and nothing says it spent less.
+        if self.measured_usd is None:
+            return self.reservation.cap
+        return self.measured_usd
+
+    @property
+    def overshoot_usd(self) -> Decimal:
+        """How far the call passed its cap; Claude Code checks only after each response."""
+        return max(self.charged_usd - self.reservation.cap, Decimal(0))
+
+    def to_dict(self) -> dict:
+        return {
+            "role": self.reservation.role,
+            "cap_usd": str(self.reservation.cap),
+            "measured_usd": None if self.measured_usd is None else str(self.measured_usd),
+            "charged_usd": str(self.charged_usd),
+            "basis": "measured" if self.measured_usd is not None else "whole reservation",
+            "overshoot_usd": str(self.overshoot_usd),
+        }
+
+
+class Budget:
+    """One run's spending: reservations made before calls, settled after them.
+
+    Safe to use from several threads: the check and the reservation happen
+    together, so two calls cannot both take the last room under the ceiling.
+    """
+
+    def __init__(self, rules: Policy | None = None) -> None:
+        self.policy = rules or Policy()
+        self._lock = threading.Lock()
+        self._open: dict[int, Reservation] = {}
+        self._settled: list[Settlement] = []
+        self._next = 0
+
+    @property
+    def spent_usd(self) -> Decimal:
+        with self._lock:
+            return sum((s.charged_usd for s in self._settled), Decimal(0))
+
+    @property
+    def reserved_usd(self) -> Decimal:
+        with self._lock:
+            return sum((r.cap for r in self._open.values()), Decimal(0))
+
+    def reserve(self, role: str, kind: str) -> Reservation:
+        """Reserve one call's whole cap, or raise BudgetStop before the call starts."""
+        cap = self.policy.cap(kind)
+        with self._lock:
+            spent = sum((s.charged_usd for s in self._settled), Decimal(0))
+            reserved = sum((r.cap for r in self._open.values()), Decimal(0))
+            if spent + reserved + cap > self.policy.run_usd:
+                raise BudgetStop(
+                    f"{STOPPED}: {role} was not started; its cap of US${cap} with "
+                    f"US${spent} spent and US${reserved} reserved would pass the run's "
+                    f"ceiling of US${self.policy.run_usd}"
+                )
+            self._next += 1
+            reservation = Reservation(self._next, role, kind, cap)
+            self._open[reservation.number] = reservation
+            return reservation
+
+    def settle(self, reservation: Reservation, cost_usd, cost_known: bool) -> Settlement:
+        """Replace a reservation with what the call cost.
+
+        ``cost_usd`` is the cost Claude Code reported, and ``cost_known`` whether
+        it knew every model's price; otherwise the whole reservation is charged.
+        """
+        with self._lock:
+            if self._open.get(reservation.number) != reservation:
+                raise ValueError(f"reservation {reservation.number} is not open")
+            del self._open[reservation.number]
+            settlement = Settlement(reservation, measured(cost_usd) if cost_known else None)
+            self._settled.append(settlement)
+            return settlement
+
+    @property
+    def settlements(self) -> tuple[Settlement, ...]:
+        with self._lock:
+            return tuple(self._settled)

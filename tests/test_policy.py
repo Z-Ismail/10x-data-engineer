@@ -1,12 +1,23 @@
 import json
 import tempfile
+import threading
 import unittest
 from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar
 
 from tenx import policy
-from tenx.policy import Policy, PolicyError, amount, from_dict, load
+from tenx.policy import (
+    STOPPED,
+    Budget,
+    BudgetStop,
+    Policy,
+    PolicyError,
+    amount,
+    from_dict,
+    load,
+    measured,
+)
 
 
 class AmountTest(unittest.TestCase):
@@ -127,6 +138,127 @@ class LoadTest(unittest.TestCase):
             path.write_text("{run_usd: 1}")
             with self.assertRaisesRegex(PolicyError, r"is not JSON"):
                 load(path)
+
+
+def caps(run, engineer="0.75", cross_source="0.40", scout="0.10") -> Policy:
+    return Policy(
+        run_usd=Decimal(run),
+        call_usd={
+            "engineer": Decimal(engineer),
+            "cross-source": Decimal(cross_source),
+            "scout": Decimal(scout),
+        },
+    )
+
+
+class MeasuredTest(unittest.TestCase):
+    def test_report_figures(self):
+        self.assertEqual(measured(0.0455485), Decimal("0.0455485"))
+        self.assertEqual(measured(0), Decimal(0))
+        for value in (None, True, -0.1, "0.2", [0.1]):
+            with self.subTest(value=value):
+                self.assertIsNone(measured(value))
+
+
+class BudgetTest(unittest.TestCase):
+    def test_a_call_that_does_not_fit_is_stopped_before_it_starts(self):
+        budget = Budget(caps("1.00"))
+        engineer = budget.reserve("engineer", "engineer")
+        with self.assertRaises(BudgetStop) as stop:
+            budget.reserve("cross-source", "cross-source")
+        self.assertEqual(stop.exception.status, STOPPED)
+        self.assertEqual(
+            str(stop.exception),
+            "stopped: budget: cross-source was not started; its cap of US$0.40 with "
+            "US$0 spent and US$0.75 reserved would pass the run's ceiling of US$1.00",
+        )
+        # Nothing was reserved for the refused call.
+        self.assertEqual(budget.reserved_usd, Decimal("0.75"))
+        budget.settle(engineer, 0.5, True)
+        self.assertEqual(budget.spent_usd, Decimal("0.5"))
+        self.assertEqual(budget.reserved_usd, Decimal(0))
+        # Settled at its measured cost, the room it left is free again.
+        budget.reserve("cross-source", "cross-source")
+
+    def test_a_call_that_fits_exactly_starts(self):
+        # As floats, 0.1 + 0.2 > 0.3, which would refuse the second call.
+        self.assertGreater(0.1 + 0.2, 0.3)
+        budget = Budget(caps("0.3", cross_source="0.2", scout="0.1", engineer="0.1"))
+        budget.reserve("scout a", "scout")
+        budget.reserve("cross-source", "cross-source")
+        self.assertEqual(budget.reserved_usd, Decimal("0.3"))
+        with self.assertRaises(BudgetStop):
+            budget.reserve("scout b", "scout")
+
+    def test_ten_small_calls_fill_a_ceiling_exactly(self):
+        budget = Budget(caps("1.00", engineer="0.1", cross_source="0.1"))
+        for number in range(10):
+            reservation = budget.reserve(f"scout {number}", "scout")
+            budget.settle(reservation, 0.1, True)
+        self.assertEqual(budget.spent_usd, Decimal("1.0"))
+        # Added one by one as floats, ten 0.1s fall short of 1.0 (Python 3.12's
+        # sum() compensates, so the loop is written out).
+        total = 0.0
+        for _ in range(10):
+            total += 0.1
+        self.assertNotEqual(total, 1.0)
+        with self.assertRaises(BudgetStop):
+            budget.reserve("scout 10", "scout")
+
+    def test_a_call_without_a_known_cost_is_charged_its_whole_reservation(self):
+        budget = Budget(caps("10"))
+        cases = [(None, True), (0.12, False), ("0.12", True), (True, True)]
+        for cost, known in cases:
+            with self.subTest(cost=cost, known=known):
+                settled = budget.settle(budget.reserve("engineer", "engineer"), cost, known)
+                self.assertIsNone(settled.measured_usd)
+                self.assertEqual(settled.charged_usd, Decimal("0.75"))
+                self.assertEqual(settled.overshoot_usd, Decimal(0))
+        self.assertEqual(budget.spent_usd, Decimal("3.00"))
+
+    def test_a_call_over_its_cap_is_charged_what_it_cost(self):
+        budget = Budget(caps("2.00", scout="0.01"))
+        # The probe of 2026-10-28: a cap of US$0.01 stopped after one response at 0.0455485.
+        settled = budget.settle(budget.reserve("scout a", "scout"), 0.0455485, True)
+        self.assertEqual(settled.charged_usd, Decimal("0.0455485"))
+        self.assertEqual(settled.overshoot_usd, Decimal("0.0355485"))
+        self.assertEqual(budget.spent_usd, Decimal("0.0455485"))
+
+    def test_a_reservation_is_settled_once(self):
+        budget = Budget()
+        reservation = budget.reserve("engineer", "engineer")
+        budget.settle(reservation, 0.1, True)
+        with self.assertRaisesRegex(ValueError, r"reservation 1 is not open"):
+            budget.settle(reservation, 0.1, True)
+
+    def test_unknown_kind_is_refused_before_reserving(self):
+        budget = Budget()
+        with self.assertRaises(PolicyError):
+            budget.reserve("reviewer", "reviewer")
+        self.assertEqual(budget.reserved_usd, Decimal(0))
+
+    def test_threads_never_reserve_past_the_ceiling(self):
+        # Room for exactly 7 calls of US$0.10; 32 threads race for it, 50 times.
+        for _ in range(50):
+            budget = Budget(caps("0.70", engineer="0.1", cross_source="0.1"))
+            start = threading.Barrier(32)
+            granted, stopped = [], []
+
+            def call(number, budget=budget, start=start, granted=granted, stopped=stopped):
+                start.wait()
+                try:
+                    granted.append(budget.reserve(f"scout {number}", "scout"))
+                except BudgetStop:
+                    stopped.append(number)
+
+            threads = [threading.Thread(target=call, args=(n,)) for n in range(32)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual((len(granted), len(stopped)), (7, 25))
+            self.assertEqual(len({r.number for r in granted}), 7)
+            self.assertEqual(budget.reserved_usd, Decimal("0.70"))
 
 
 if __name__ == "__main__":
