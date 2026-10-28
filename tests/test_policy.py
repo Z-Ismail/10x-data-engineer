@@ -17,6 +17,7 @@ from tenx.policy import (
     from_dict,
     load,
     measured,
+    render,
 )
 
 
@@ -259,6 +260,54 @@ class BudgetTest(unittest.TestCase):
             self.assertEqual((len(granted), len(stopped)), (7, 25))
             self.assertEqual(len({r.number for r in granted}), 7)
             self.assertEqual(budget.reserved_usd, Decimal("0.70"))
+
+
+class ReportTest(unittest.TestCase):
+    def budget(self) -> Budget:
+        budget = Budget()
+        budget.settle(budget.reserve("scout a", "scout"), 0.012, True)
+        budget.settle(budget.reserve("cross-source", "cross-source"), None, True)
+        budget.settle(budget.reserve("engineer", "engineer"), 0.81, True)
+        budget.reserve("scout b", "scout")
+        return budget
+
+    def test_figures_add_up(self):
+        record = self.budget().to_dict()
+        # 0.012 measured + 0.40 whole reservation + 0.81 measured.
+        self.assertEqual(record["spent_usd"], "1.222")
+        self.assertEqual(record["reserved_usd"], "0.10")
+        self.assertEqual(record["ceiling_usd"], "2.00")
+        self.assertEqual(record["overshoot_usd"], "0.06")
+        self.assertEqual(record["open"], [{"role": "scout b", "cap_usd": "0.10"}])
+        self.assertEqual(
+            record["calls"][1],
+            {
+                "role": "cross-source",
+                "cap_usd": "0.40",
+                "measured_usd": None,
+                "charged_usd": "0.40",
+                "basis": "whole reservation",
+                "overshoot_usd": "0",
+            },
+        )
+        self.assertEqual(
+            [call["charged_usd"] for call in record["calls"]], ["0.012", "0.40", "0.81"]
+        )
+        json.dumps(record)
+
+    def test_text(self):
+        self.assertEqual(
+            render(self.budget()),
+            "budget (US$, Claude Code's own estimates): ceiling 2.00, spent 1.222, "
+            "still reserved 0.10\n"
+            "\n"
+            "call           cap  measured  charged  charged as\n"
+            "scout a       0.10     0.012    0.012  measured\n"
+            "cross-source  0.40         -     0.40  whole reservation\n"
+            "engineer      0.75      0.81     0.81  measured\n"
+            "engineer passed its cap by US$0.06: Claude Code checks the cap only "
+            "after each model response\n",
+        )
 
 
 if __name__ == "__main__":

@@ -193,7 +193,8 @@ class Settlement:
     @property
     def overshoot_usd(self) -> Decimal:
         """How far the call passed its cap; Claude Code checks only after each response."""
-        return max(self.charged_usd - self.reservation.cap, Decimal(0))
+        excess = self.charged_usd - self.reservation.cap
+        return excess if excess > 0 else Decimal(0)
 
     def to_dict(self) -> dict:
         return {
@@ -265,3 +266,52 @@ class Budget:
     def settlements(self) -> tuple[Settlement, ...]:
         with self._lock:
             return tuple(self._settled)
+
+    def to_dict(self) -> dict:
+        with self._lock:
+            settled = list(self._settled)
+            still_open = list(self._open.values())
+        spent = sum((s.charged_usd for s in settled), Decimal(0))
+        return {
+            "ceiling_usd": str(self.policy.run_usd),
+            "spent_usd": str(spent),
+            "reserved_usd": str(sum((r.cap for r in still_open), Decimal(0))),
+            "overshoot_usd": str(sum((s.overshoot_usd for s in settled), Decimal(0))),
+            "calls": [s.to_dict() for s in settled],
+            "open": [{"role": r.role, "cap_usd": str(r.cap)} for r in still_open],
+        }
+
+
+def render(budget: Budget) -> str:
+    """The run's spending as plain text: totals, a line per settled call, overshoots."""
+    record = budget.to_dict()
+    rows = [
+        [
+            call["role"],
+            call["cap_usd"],
+            "-" if call["measured_usd"] is None else call["measured_usd"],
+            call["charged_usd"],
+            call["basis"],
+        ]
+        for call in record["calls"]
+    ]
+    header = ["call", "cap", "measured", "charged", "charged as"]
+    widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
+    title = (
+        f"budget (US$, Claude Code's own estimates): ceiling {record['ceiling_usd']}, "
+        f"spent {record['spent_usd']}, still reserved {record['reserved_usd']}"
+    )
+    lines = [title, ""]
+    for row in [header, *rows]:
+        cells = [
+            cell.ljust(width) if i in (0, 4) else cell.rjust(width)
+            for i, (cell, width) in enumerate(zip(row, widths))
+        ]
+        lines.append("  ".join(cells).rstrip())
+    over = [call for call in record["calls"] if Decimal(call["overshoot_usd"]) > 0]
+    for call in over:
+        lines.append(
+            f"{call['role']} passed its cap by US${call['overshoot_usd']}: Claude Code "
+            "checks the cap only after each model response"
+        )
+    return "\n".join(lines) + "\n"
