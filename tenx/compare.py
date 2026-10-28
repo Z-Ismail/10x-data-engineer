@@ -24,6 +24,11 @@ Each run is an ordinary engineer run, in its own folder:
 A comparison that stops part way can be started again with the same
 command: runs that already have a gate verdict are kept, and the others are
 run again from an empty folder.
+
+Before any run starts, the runs still to do are priced: typically, from what
+each agent call usually costs, and at most, from each call's cap. A
+comparison estimated above US$5 does not start unless --approve-cost is
+given. The figures are Claude Code's own estimates, not bills.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from decimal import Decimal
 from math import comb, exp, lgamma, log
 from pathlib import Path
 
@@ -45,6 +51,8 @@ from tenx import artefacts
 from tenx.engineer import EngineerError
 from tenx.engineer import run as engineer_run
 from tenx.gate import GateError, load_declaration
+from tenx.policy import CROSS_SOURCE, ENGINEER, SCOUT, Policy
+from tenx.profile import discover
 
 # Each arm and how the engineer is run in it: (scouts, cross_source).
 ARMS = {
@@ -452,9 +460,46 @@ def report(out: Path) -> str:
     return text
 
 
-def _start(
+class CostNotApproved(ValueError):
+    """The comparison is estimated above the policy's limit and was not approved."""
+
+
+@dataclass(frozen=True)
+class Estimate:
+    """What the runs still to do are expected to cost, and the most they can reserve."""
+
+    runs: int
+    typical_usd: Decimal
+    ceiling_usd: Decimal
+
+    def describe(self) -> str:
+        runs = f"{self.runs} run{'s' if self.runs != 1 else ''}"
+        return (
+            f"{runs} to do, estimated at US${self.typical_usd}, at most "
+            f"US${self.ceiling_usd} at each agent call's cap (Claude Code's own estimates)"
+        )
+
+
+def agent_calls(arm: str, tables: int) -> list[str]:
+    """The kind of each agent call one run of the arm makes: a scout per raw table."""
+    scouts, cross_source = ARMS[arm]
+    return [SCOUT] * (tables if scouts else 0) + [CROSS_SOURCE] * cross_source + [ENGINEER]
+
+
+def estimate(trials: Sequence[Trial], tables: dict[str, int], rules: Policy) -> Estimate:
+    """Price the given runs from each dataset's number of raw tables."""
+    calls = [kind for t in trials for kind in agent_calls(t.arm, tables[t.dataset])]
+    return Estimate(
+        len(trials),
+        sum((rules.typical_usd[kind] for kind in calls), Decimal(0)),
+        sum((rules.cap(kind) for kind in calls), Decimal(0)),
+    )
+
+
+def _order(
     out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
 ) -> list[Trial]:
+    """The planned order: the one kept in out, or a new one. Writes nothing."""
     if (out / PLAN_FILE).is_file():
         document, order = read_plan(out)
         asked = (list(datasets), list(arms), trials, seed)
@@ -467,8 +512,18 @@ def _start(
         return order
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise ValueError(f"{out} must be empty or hold a comparison to resume")
-    out.mkdir(parents=True, exist_ok=True)
-    return write_plan(out, datasets, arms, trials, seed)
+    return plan(datasets, arms, trials, seed)
+
+
+def _start(
+    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+) -> list[Trial]:
+    """Check out and keep the plan there, so the comparison can resume."""
+    order = _order(out, datasets, arms, trials, seed)
+    if not (out / PLAN_FILE).is_file():
+        out.mkdir(parents=True, exist_ok=True)
+        write_plan(out, datasets, arms, trials, seed)
+    return order
 
 
 def run_comparison(
@@ -483,6 +538,7 @@ def run_comparison(
     claude: str = "claude",
     runner=None,
     progress=print,
+    approve_cost: bool = False,
 ) -> str:
     """Run every arm on every dataset, then report the comparison.
 
@@ -490,6 +546,9 @@ def run_comparison(
     that cannot start, or stops with an error, is reported and left without
     a verdict; the comparison carries on. `runner` stands in for the
     engineer runner in tests.
+
+    The runs still to do are priced first; above the policy's limit nothing
+    is written or run unless `approve_cost` is true.
     """
     runner = runner or engineer_run
     if not isinstance(parallel, int) or isinstance(parallel, bool) or parallel < 1:
@@ -501,6 +560,16 @@ def run_comparison(
         raise ValueError(f"the goal {goal} is not a file")
     load_declaration(checks)
     out = Path(out)
+    rules = Policy()
+    tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
+    order = _order(out, list(datasets), arms, trials, seed)
+    cost = estimate([t for t in order if outcome(out, t).gate is None], tables, rules)
+    if cost.typical_usd > rules.approve_above_usd and not approve_cost:
+        raise CostNotApproved(
+            f"{cost.describe()}; above US${rules.approve_above_usd}, so it needs approval: "
+            "run it again with --approve-cost to go ahead"
+        )
+    progress(cost.describe())
     order = _start(out, list(datasets), arms, trials, seed)
     pending = [trial for trial in order if outcome(out, trial).gate is None]
     lock = threading.Lock()
@@ -565,6 +634,11 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("--trials", type=int, default=4, help="runs of each arm on each dataset")
     start.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
     start.add_argument("--parallel", type=int, default=3, help="runs at the same time")
+    start.add_argument(
+        "--approve-cost",
+        action="store_true",
+        help="run even when the comparison is estimated above US$5",
+    )
     show = commands.add_parser("report", help="report a comparison from its runs so far")
     show.add_argument("out", type=Path, help="the comparison's folder")
     args = parser.parse_args(argv)
@@ -584,6 +658,7 @@ def main(argv: list[str] | None = None) -> int:
             trials=args.trials,
             seed=args.seed,
             parallel=args.parallel,
+            approve_cost=args.approve_cost,
         )
     except (ValueError, EngineerError, GateError) as error:
         print(f"error: {error}", file=sys.stderr)

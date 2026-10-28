@@ -43,10 +43,12 @@ engineer-scouts: demo-data
 # The engineer alone, with scouts, with the cross-source agent and with both,
 # each run COMPARE_TRIALS times on every demo dataset (128 runs by default).
 # Needs Claude Code, signed in. Run it again to resume after a stop; remove
-# runs/compare to start over.
+# runs/compare to start over. Estimated above US$5, it stops before any run
+# unless approved: make compare COMPARE_FLAGS=--approve-cost
 COMPARE_SEEDS ?= 1 7 42 2026
 COMPARE_SIZES ?= 200 1000
 COMPARE_TRIALS ?= 4
+COMPARE_FLAGS ?=
 COMPARE_DATA = runs/compare-data
 COMPARE_DATASETS = $(foreach seed,$(COMPARE_SEEDS),$(foreach size,$(COMPARE_SIZES),s$(seed)-$(size)))
 
@@ -57,7 +59,7 @@ compare:
 			--out $$folder/data --answers-out $$folder/answers || exit 1; \
 	done; done
 	$(PYTHON) -m tenx.compare run --goal demo/goal.md --checks tests/fixtures/demo_gate.json \
-		--out runs/compare --trials $(COMPARE_TRIALS) \
+		--out runs/compare --trials $(COMPARE_TRIALS) $(COMPARE_FLAGS) \
 		$(foreach name,$(COMPARE_DATASETS),--raw $(name)=$(COMPARE_DATA)/$(name)/data)
 
 clean:
