@@ -73,6 +73,7 @@ from tenx.gate import GateError, Result, load_declaration, passed, render, run_g
 from tenx.ledger import Ledger, role_usage
 from tenx.ledger import render as render_usage
 from tenx.overlap import overlap_folder, write_report
+from tenx.policy import Policy
 from tenx.ports import AgentRun, Role
 from tenx.profile import ProfileError, profile_folder
 from tenx.sample import sample
@@ -91,7 +92,6 @@ from tenx.scouts import notes_from_report as scout_notes_from_report
 from tenx.scouts import render as render_table_notes
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-MAX_BUDGET_USD = 5
 TIMEOUT_MINUTES = 30
 STOP_GRACE_SECONDS = 30
 
@@ -148,6 +148,7 @@ SCOUT = Role(
     allowed_tools=(),
     max_turns=8,
     json_schema=SCOUT_SCHEMA,
+    kind="scout",
 )
 
 
@@ -220,8 +221,15 @@ def stage_plugin(destination: Path) -> Path:
     return destination
 
 
-def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[str]:
-    """The Claude Code command line that runs one of the agents headless."""
+def agent_command(
+    claude: str, plugin_dir: Path, role: Role = ENGINEER, policy: Policy | None = None
+) -> list[str]:
+    """The Claude Code command line that runs one of the agents headless.
+
+    The agent's spending cap is the policy's cap for its kind of agent, so
+    that what a run reserves for the call is what Claude Code enforces.
+    """
+    cap = (policy or Policy()).cap(role.budget_kind)
     allowed = ["--allowedTools", *role.allowed_tools] if role.allowed_tools else []
     schema = ["--json-schema", json.dumps(role.json_schema)] if role.json_schema else []
     return [
@@ -238,7 +246,7 @@ def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[
         "--max-turns",
         str(role.max_turns),
         "--max-budget-usd",
-        str(MAX_BUDGET_USD),
+        str(cap),
         "--output-format",
         "json",
         "--no-session-persistence",
