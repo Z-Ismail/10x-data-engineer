@@ -1,7 +1,9 @@
 import json
 import tempfile
 import threading
+import time
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar
@@ -161,6 +163,14 @@ class MeasuredTest(unittest.TestCase):
                 self.assertIsNone(measured(value))
 
 
+class SlowDecimal(Decimal):
+    """A ceiling that pauses whenever a total is compared with it."""
+
+    def __lt__(self, other):
+        time.sleep(0.0005)
+        return Decimal.__lt__(self, other)
+
+
 class BudgetTest(unittest.TestCase):
     def test_a_call_that_does_not_fit_is_stopped_before_it_starts(self):
         budget = Budget(caps("1.00"))
@@ -240,8 +250,12 @@ class BudgetTest(unittest.TestCase):
 
     def test_threads_never_reserve_past_the_ceiling(self):
         # Room for exactly 7 calls of US$0.10; 32 threads race for it, 50 times.
+        # The ceiling pauses each time it is compared, so that without a lock
+        # other threads would check the same room before it is taken.
+        policy = caps("0.70", engineer="0.1", cross_source="0.1")
+        policy = replace(policy, run_usd=SlowDecimal(policy.run_usd))
         for _ in range(50):
-            budget = Budget(caps("0.70", engineer="0.1", cross_source="0.1"))
+            budget = Budget(policy)
             start = threading.Barrier(32)
             granted, stopped = [], []
 
