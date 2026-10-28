@@ -33,6 +33,15 @@ Notable changes to this project.
   platform's errors are raised as `PlatformError`. A test keeps the
   interfaces, and the workflow code that will use them, free of DuckDB, dbt
   and gate imports.
+- Spending policy (`tenx/policy.py`): a ceiling per run and a cap per agent
+  call, and a budget that reserves each call's whole cap before the call
+  starts, stops with `stopped: budget` when the reservation would pass the
+  ceiling, and settles each call with its reported cost (or its whole
+  reservation when it reported none). Amounts are decimals, so sums are
+  exact. The workflow being built will use it for every agent call.
+- `python -m tenx.compare run` prices the runs it still has to do before
+  starting, and refuses a comparison estimated above US$5 unless
+  `--approve-cost` is given (`make compare COMPARE_FLAGS=--approve-cost`).
 
 ### Fixed
 
@@ -47,6 +56,10 @@ Notable changes to this project.
 
 ### Changed
 
+- Each agent call's spending limit comes from the spending policy: US$0.75
+  for the engineer, US$0.40 for the cross-source agent and US$0.10 for each
+  scout, in place of US$5 for every agent. Measured runs cost well under
+  these.
 - README: rewritten around the product's aim, design and principles, with
   a roadmap table showing what is available today. The detailed description
   of each component, with example output, moved to `docs/components.md`,

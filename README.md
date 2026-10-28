@@ -114,6 +114,7 @@ if:
 | Specification | Machine-checked spec contract and `SPEC.md` | Available as code; the Architect agent is next |
 | Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available as code; the workflow that uses them is in progress |
+| Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available as code: the per-call caps and the comparison approval apply today; the run ceiling comes into use with the workflow |
 | Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress |
 | Build | Repair loop driven by the gate's report | Planned |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
@@ -163,10 +164,14 @@ isolation is tested, are in [docs/security.md](docs/security.md).
 ## Costs
 
 There is no hosted service: agents use your own Claude subscription or API
-key. Each agent call has a turn limit, a spending limit and a time limit,
-and every run records its tokens, turns, time and estimated cost by role.
-Dollar figures are Claude Code's estimates; on a subscription, the limit
-that applies is your plan's usage.
+key. Each agent call has a turn limit, a spending limit (US$0.75 for the
+engineer, US$0.40 for the cross-source agent) and a time limit, and every
+run records its tokens, turns, time and estimated cost by role. Claude Code
+checks a spending limit after each model response, so a call can pass it by
+up to one response. A measured comparison estimated above US$5 does not
+start without `--approve-cost`. Dollar figures are Claude Code's estimates;
+on a subscription, the limit that applies is your plan's usage. Details are
+in the [component reference](docs/components.md#spending-policy).
 
 ## Documentation
 
