@@ -718,12 +718,52 @@ The implementations wrap the existing modules and are tested against them on
 generated demo data: the same profile and overlap files byte for byte, the
 same dbt project files, the same build results, and the same gate results
 and report on a correct and a broken project. A test keeps `tenx/ports.py`,
-and the workflow's package `tenx/graph/` once it exists, free of imports of
-DuckDB, dbt, the gate, the profiler, the overlap report, the runner or the
-implementations themselves, whether written as an import statement or as a
-module name given to `importlib`; a second test imports them in a fresh
-interpreter and checks that none of those modules was loaded, directly or
-through another module.
+the run records in `tenx/domain.py` and the workflow's package `tenx/graph/`
+free of imports of DuckDB, dbt, the gate, the profiler, the overlap report,
+the runner or the implementations themselves, whether written as an import
+statement or as a module name given to `importlib`; a second test imports
+them in a fresh interpreter and checks that none of those modules was
+loaded, directly or through another module.
+
+## Run records and graph state
+
+The workflow being built saves its state after every step, so that a run
+stopped part way (a crash, a kill, a closed laptop) resumes where it
+stopped. `tenx/domain.py` holds the records the steps pass to one another,
+and `tenx/graph/` the state that carries them; the workflow's steps are not
+built yet.
+
+| Record | What it holds |
+| --- | --- |
+| `EngineeringRequest` | The run's raw folder, goal, hidden checks, output folder, which agents run, and whether it is sandboxed |
+| `ExecutionPlan` | The workflow and its steps, each at most once, in a fixed order |
+| `ArtefactRef` | A file or folder a step made, its SHA-256 (for a folder, of every file and its place) and the attempt that made it |
+| `AgentFinding`, `Evidence` | One claim an agent made, whether it is a fact, an inference, a hypothesis or a recommendation, how sure it is, and what it rests on |
+| `ValidationResult` | The validator's verdict, the number of checks, each check that did not pass, and where the full report is |
+| `CostRecord` | One agent call's tokens by model, turns, time and estimated cost, with its reservation, what the run was charged and any overshoot |
+| `ResourceBudget` | The spending policy the run works within |
+
+The state holds only JSON values, and each record goes in as its JSON form
+and is checked again by the step that reads it. Objects kept in the state
+would be rebuilt on resume by importing and calling their class, which the
+checkpoint library is moving to block; in its strict mode they come back as
+plain dictionaries, so a step that worked on a fresh run would fail only
+after a resume. Reading a record is strict: a count given as `true` or
+`"5"`, a field the record does not have, a missing field or an unknown
+choice is refused with the record and the field named. Money is decimal
+text, never a float: amounts from the policy follow its rule (at most four
+places), and measured costs keep every place Claude Code reported. A cost
+record whose charge or overshoot does not follow from its cost and
+reservation is refused.
+
+When steps run at the same time, their writes are joined: findings,
+verdicts and cost records are added to their lists; artefacts are joined by
+name, and a name may be given a new file only by a later attempt of the
+step that made it, so two steps disagreeing is an error rather than
+whichever wrote last; attempt counts only rise. Checkpoints go to one
+SQLite file per run and are read back allowing only the checkpoint
+library's own list of safe built-in types, so that a resume does not
+construct objects of any class a checkpoint file names.
 
 ## Repository layout
 
@@ -732,7 +772,8 @@ through another module.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, the run artefacts, the spending policy, and the capability interfaces |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, the run artefacts, the spending policy, the capability interfaces, and the run records |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
+| `tenx/graph/` | The workflow's state and checkpoints |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 

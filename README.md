@@ -115,7 +115,7 @@ if:
 | Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available as code; the workflow that uses them is in progress |
 | Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available as code: the per-call caps and the comparison approval apply today; the run ceiling comes into use with the workflow |
-| Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress |
+| Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the run's records and the state it saves after every step are available as code; the workflow itself is next |
 | Build | Repair loop driven by the gate's report | Planned |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
 | Review | Advisory reviewer, measured on planted defects | Planned |
@@ -132,7 +132,7 @@ agents; and on Linux, bubblewrap (`sudo apt install bubblewrap` on Debian
 and Ubuntu, `sudo dnf install bubblewrap` on Fedora) for the sandbox.
 
 ```
-make install    # the package, DuckDB and dbt
+make install    # the package, DuckDB, dbt and LangGraph
 make demo-data  # three demo source systems with planted defects
 make test
 make engineer   # the agents build the demo project, then the gate checks it
