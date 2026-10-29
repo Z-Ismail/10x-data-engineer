@@ -41,11 +41,14 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
 __all__ = [
+    "STEPS",
     "AgentFinding",
     "ArtefactRef",
     "Cost",
     "CostRecord",
+    "EngineeringRequest",
     "Evidence",
+    "ExecutionPlan",
     "ModelTokens",
     "Record",
     "RecordError",
@@ -315,3 +318,39 @@ class ResourceBudget(Record):
 
     def to_policy(self) -> _policy.Policy:
         return _policy.from_dict(json.loads(self.model_dump_json()))
+
+
+class EngineeringRequest(Record):
+    """What a run was asked to do: its sources, its goal, and how to run."""
+
+    run_id: Text
+    # Where the raw files are, the goal in plain words, and the checks the
+    # validator holds the work to, which no agent is shown.
+    raw: Text
+    goal: Text
+    declaration: Text
+    out: Text
+    cross_source: bool = True
+    scouts: bool = False
+    isolation: Literal["bubblewrap", "unisolated"] = "bubblewrap"
+
+
+# Every step a workflow can take, in the only order they can be taken.
+STEPS = ("profile", "overlap", "scouts", "cross-source", "engineer", "gate", "report")
+
+
+class ExecutionPlan(Record):
+    """The workflow chosen for a request, and its steps in order."""
+
+    workflow: Literal["build"]
+    steps: tuple[Literal[STEPS], ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _in_order(self):
+        positions = [STEPS.index(step) for step in self.steps]
+        if positions != sorted(set(positions)):
+            raise ValueError(
+                f"steps must each come once, in the order {', '.join(STEPS)}; "
+                f"got {', '.join(self.steps)}"
+            )
+        return self

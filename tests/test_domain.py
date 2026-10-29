@@ -13,7 +13,9 @@ from tenx.domain import (
     AgentFinding,
     ArtefactRef,
     CostRecord,
+    EngineeringRequest,
     Evidence,
+    ExecutionPlan,
     Record,
     RecordError,
     ResourceBudget,
@@ -362,6 +364,61 @@ class ResourceBudgetTest(unittest.TestCase):
             with self.subTest(expected=expected), self.assertRaises(RecordError) as caught:
                 ResourceBudget.load({**good, **changes})
             self.assertIn(expected, str(caught.exception))
+
+
+def request(**changes) -> dict:
+    value = {
+        "run_id": "run-1",
+        "raw": "demo/data",
+        "goal": "demo/goal.md",
+        "declaration": "tests/fixtures/demo_gate.json",
+        "out": "runs/demo",
+        "cross_source": True,
+        "scouts": False,
+        "isolation": "bubblewrap",
+    }
+    value.update(changes)
+    return value
+
+
+class RequestAndPlanTest(unittest.TestCase):
+    def test_a_request_reads_back_equal(self):
+        record = EngineeringRequest.load(request())
+        self.assertEqual(record.dump(), request())
+        short = {
+            k: v for k, v in request().items() if k not in ("cross_source", "scouts", "isolation")
+        }
+        self.assertEqual(EngineeringRequest.load(short), record)
+
+    def test_a_wrong_request_is_refused(self):
+        missing = request()
+        del missing["declaration"]
+        for value, expected in [
+            (request(cross_source="yes"), "cross_source:"),
+            (request(isolation="none"), "isolation:"),
+            (request(raw=""), "raw:"),
+            (missing, "declaration: Field required"),
+        ]:
+            with self.subTest(expected=expected), self.assertRaises(RecordError) as caught:
+                EngineeringRequest.load(value)
+            self.assertIn(expected, str(caught.exception))
+
+    def test_a_plan_takes_its_steps_once_in_order(self):
+        steps = ["profile", "overlap", "cross-source", "engineer", "gate", "report"]
+        plan = ExecutionPlan.load({"workflow": "build", "steps": steps})
+        self.assertEqual(plan.steps, tuple(steps))
+        self.assertEqual(plan.dump(), {"workflow": "build", "steps": steps})
+        for steps, expected in [
+            (["engineer", "profile"], "got engineer, profile"),
+            (["profile", "profile"], "got profile, profile"),
+            (["profile", "deploy"], "steps.1:"),
+            ([], "steps:"),
+        ]:
+            with self.subTest(steps=steps), self.assertRaises(RecordError) as caught:
+                ExecutionPlan.load({"workflow": "build", "steps": steps})
+            self.assertIn(expected, str(caught.exception))
+        with self.assertRaises(RecordError):
+            ExecutionPlan.load({"workflow": "operate", "steps": ["profile"]})
 
 
 if __name__ == "__main__":
