@@ -1,11 +1,11 @@
 """The interfaces, and the pipeline code built on them, reach no platform directly.
 
-``tenx/ports.py`` and everything under ``tenx/graph/`` may not import DuckDB,
-dbt, the gate, the profiler, the overlap report, the old runner (which
-imports the gate) or the adapters themselves. Two checks: the source is read
-for every way of writing an import, and a fresh interpreter that imports the
-interfaces is asked which modules it loaded, which also catches imports made
-indirectly.
+``tenx/ports.py``, the records in ``tenx/domain.py`` and everything under
+``tenx/graph/`` may not import DuckDB, dbt, the gate, the profiler, the
+overlap report, the old runner (which imports the gate) or the adapters
+themselves. Two checks: the source is read for every way of writing an
+import, and a fresh interpreter that imports the interfaces is asked which
+modules it loaded, which also catches imports made indirectly.
 """
 
 import ast
@@ -65,7 +65,11 @@ def forbidden_imports(source: str, package: str) -> list[str]:
 
 
 def guarded_files() -> list[Path]:
-    return [ROOT / "tenx" / "ports.py", *sorted((ROOT / "tenx" / "graph").rglob("*.py"))]
+    return [
+        ROOT / "tenx" / "ports.py",
+        ROOT / "tenx" / "domain.py",
+        *sorted((ROOT / "tenx" / "graph").rglob("*.py")),
+    ]
 
 
 def _package(path: Path) -> str:
@@ -139,6 +143,18 @@ class GuardedCodeTest(unittest.TestCase):
             with self.subTest(path=str(path.relative_to(ROOT))):
                 source = path.read_text(encoding="utf-8")
                 self.assertEqual(forbidden_imports(source, _package(path)), [])
+
+    def test_the_records_and_the_graph_state_are_guarded(self):
+        names = {path.relative_to(ROOT).as_posix() for path in guarded_files()}
+        self.assertLessEqual(
+            {
+                "tenx/domain.py",
+                "tenx/graph/__init__.py",
+                "tenx/graph/state.py",
+                "tenx/graph/checkpoints.py",
+            },
+            names,
+        )
 
     def test_a_copy_of_the_interfaces_with_a_forbidden_import_fails(self):
         source = (ROOT / "tenx" / "ports.py").read_text(encoding="utf-8")
