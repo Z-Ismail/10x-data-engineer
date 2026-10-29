@@ -20,9 +20,11 @@ from tenx.domain import (
     RecordError,
     ResourceBudget,
     Usd,
+    ValidationResult,
 )
 from tenx.ledger import role_usage
 from tenx.policy import Budget, Policy
+from tenx.ports import CheckResult, ValidationReport
 
 HASH = "a" * 64
 
@@ -419,6 +421,71 @@ class RequestAndPlanTest(unittest.TestCase):
             self.assertIn(expected, str(caught.exception))
         with self.assertRaises(RecordError):
             ExecutionPlan.load({"workflow": "operate", "steps": ["profile"]})
+
+
+def check(name, subject, status) -> CheckResult:
+    return CheckResult(name, subject, status, "detail", {"rows": 3})
+
+
+class ValidationResultTest(unittest.TestCase):
+    def test_a_report_gives_its_verdict_and_failures(self):
+        report = ValidationReport(
+            (
+                check("build", "project", "pass"),
+                check("rows", "stg_invoices", "fail"),
+                check("total", "stg_invoices", "pass"),
+                check("repeat", "project", "skip"),
+            ),
+            False,
+            "gate: FAIL",
+        )
+        saved = ArtefactRef(
+            name="gate-report", path="/r/gate.txt", kind="file", sha256=HASH, attempt=1
+        )
+        result = ValidationResult.of("duckdb gate", report, saved)
+        self.assertEqual(
+            result.dump(),
+            {
+                "validator": "duckdb gate",
+                "passed": False,
+                "checks": 4,
+                "failures": [
+                    {"check": "rows", "subject": "stg_invoices", "status": "fail"},
+                    {"check": "repeat", "subject": "project", "status": "skip"},
+                ],
+                "report": {
+                    "name": "gate-report",
+                    "path": "/r/gate.txt",
+                    "kind": "file",
+                    "sha256": HASH,
+                    "attempt": 1,
+                },
+            },
+        )
+        self.assertEqual(ValidationResult.load(result.dump()), result)
+        passing = ValidationReport((check("build", "project", "pass"),), True, "gate: PASS")
+        self.assertEqual(
+            ValidationResult.of("duckdb gate", passing).dump(),
+            {
+                "validator": "duckdb gate",
+                "passed": True,
+                "checks": 1,
+                "failures": [],
+                "report": None,
+            },
+        )
+
+    def test_a_verdict_that_disagrees_with_its_checks_is_refused(self):
+        failure = {"check": "rows", "subject": "stg_invoices", "status": "fail"}
+        for value in [
+            {"passed": True, "checks": 2, "failures": [failure]},
+            {"passed": False, "checks": 2, "failures": []},
+            {"passed": True, "checks": 0, "failures": []},
+            {"passed": False, "checks": 1, "failures": [failure, failure]},
+            {"passed": False, "checks": 1, "failures": [{**failure, "status": "pass"}]},
+        ]:
+            with self.subTest(value=value), self.assertRaises(RecordError):
+                ValidationResult.load({"validator": "duckdb gate", **value})
 
 
 if __name__ == "__main__":

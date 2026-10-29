@@ -36,6 +36,7 @@ from tenx import artefacts
 from tenx import policy as _policy
 from tenx.ledger import RoleUsage
 from tenx.policy import PolicyError, Settlement, amount
+from tenx.ports import ValidationReport
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -49,11 +50,13 @@ __all__ = [
     "EngineeringRequest",
     "Evidence",
     "ExecutionPlan",
+    "Failure",
     "ModelTokens",
     "Record",
     "RecordError",
     "ResourceBudget",
     "Usd",
+    "ValidationResult",
 ]
 
 
@@ -354,3 +357,49 @@ class ExecutionPlan(Record):
                 f"got {', '.join(self.steps)}"
             )
         return self
+
+
+class Failure(Record):
+    """One check that did not pass, and on what."""
+
+    check: Text
+    subject: Text
+    status: Literal["fail", "skip"]
+
+
+class ValidationResult(Record):
+    """A validator's verdict on one attempt, and where its full report is."""
+
+    validator: Text
+    passed: bool
+    checks: Count
+    failures: tuple[Failure, ...] = ()
+    report: ArtefactRef | None = None
+
+    @model_validator(mode="after")
+    def _agrees(self):
+        if len(self.failures) > self.checks:
+            raise ValueError(f"{len(self.failures)} failures among {self.checks} checks")
+        if self.passed != (self.checks > 0 and not self.failures):
+            raise ValueError(
+                f"passed is {self.passed} with {self.checks} checks and "
+                f"{len(self.failures)} failures"
+            )
+        return self
+
+    @classmethod
+    def of(
+        cls, validator: str, report: ValidationReport, saved: ArtefactRef | None = None
+    ) -> ValidationResult:
+        """The verdict of ``report``, with ``saved`` pointing at its text if it was written."""
+        return cls(
+            validator=validator,
+            passed=report.passed,
+            checks=len(report.results),
+            failures=tuple(
+                Failure(check=result.check, subject=result.subject, status=result.status)
+                for result in report.results
+                if result.status != "pass"
+            ),
+            report=saved,
+        )
