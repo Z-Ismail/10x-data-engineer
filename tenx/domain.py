@@ -33,6 +33,7 @@ from pydantic import (
 from pydantic import ValidationError as _PydanticError
 
 from tenx import artefacts
+from tenx import policy as _policy
 from tenx.ledger import RoleUsage
 from tenx.policy import PolicyError, Settlement, amount
 
@@ -48,6 +49,7 @@ __all__ = [
     "ModelTokens",
     "Record",
     "RecordError",
+    "ResourceBudget",
     "Usd",
 ]
 
@@ -289,3 +291,27 @@ class CostRecord(Record):
             cost_basis="estimate" if known else "unknown",
             **settled,
         )
+
+
+class ResourceBudget(Record):
+    """The spending policy a run works within, as it is kept in the state."""
+
+    run_usd: Usd
+    call_usd: dict[str, Usd]
+    typical_usd: dict[str, Usd]
+    approve_above_usd: Usd
+
+    @model_validator(mode="after")
+    def _is_a_policy(self):
+        try:
+            self.to_policy()
+        except PolicyError as error:
+            raise ValueError(str(error)) from None
+        return self
+
+    @classmethod
+    def of(cls, rules: _policy.Policy) -> ResourceBudget:
+        return cls.load(rules.to_dict())
+
+    def to_policy(self) -> _policy.Policy:
+        return _policy.from_dict(json.loads(self.model_dump_json()))

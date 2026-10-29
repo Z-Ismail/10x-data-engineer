@@ -16,10 +16,11 @@ from tenx.domain import (
     Evidence,
     Record,
     RecordError,
+    ResourceBudget,
     Usd,
 )
 from tenx.ledger import role_usage
-from tenx.policy import Budget
+from tenx.policy import Budget, Policy
 
 HASH = "a" * 64
 
@@ -324,6 +325,43 @@ class CostRecordTest(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(RecordError) as caught:
                 CostRecord.load({**good, field: bad})
             self.assertIn(f"CostRecord: {field}:", str(caught.exception))
+
+
+class ResourceBudgetTest(unittest.TestCase):
+    def test_the_policy_reads_back_equal(self):
+        rules = Policy(
+            run_usd=Decimal("3.5"),
+            call_usd={
+                "engineer": Decimal("1.25"),
+                "cross-source": Decimal("0.3"),
+                "scout": Decimal(0),
+            },
+            typical_usd={
+                "engineer": Decimal("0.21"),
+                "cross-source": Decimal("0.07"),
+                "scout": Decimal(0),
+            },
+            approve_above_usd=Decimal(7),
+        )
+        for policy in [Policy(), rules]:
+            with self.subTest(policy=policy):
+                budget = ResourceBudget.of(policy)
+                self.assertEqual(budget.to_policy(), policy)
+                self.assertEqual(ResourceBudget.load(budget.dump()), budget)
+        self.assertEqual(ResourceBudget.of(rules).dump()["call_usd"]["engineer"], "1.25")
+
+    def test_a_policy_that_could_not_run_is_refused(self):
+        good = ResourceBudget.of(Policy()).dump()
+        cases = [
+            ({"call_usd": {**good["call_usd"], "engineer": "3.00"}}, "more than the run's ceiling"),
+            ({"call_usd": {**good["call_usd"], "architect": "0.40"}}, "unknown kinds"),
+            ({"typical_usd": {"engineer": "0.20"}}, "is missing"),
+            ({"run_usd": "1e3"}, "run_usd:"),
+        ]
+        for changes, expected in cases:
+            with self.subTest(expected=expected), self.assertRaises(RecordError) as caught:
+                ResourceBudget.load({**good, **changes})
+            self.assertIn(expected, str(caught.exception))
 
 
 if __name__ == "__main__":
