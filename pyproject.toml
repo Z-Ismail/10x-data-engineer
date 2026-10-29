@@ -23,8 +23,8 @@ pipeline = [
 ]
 dev = ["pytest>=8", "ruff>=0.6"]
 
-[tool.setuptools]
-packages = ["tenx"]
+[tool.setuptools.packages.find]
+include = ["tenx*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
