@@ -42,9 +42,17 @@ Notable changes to this project.
 - `python -m tenx.compare run` prices the runs it still has to do before
   starting, and refuses a comparison estimated above US$5 unless
   `--approve-cost` is given (`make compare COMPARE_FLAGS=--approve-cost`).
+- Run records (`tenx/domain.py`) and the workflow's state (`tenx/graph/`):
+  the request, plan, artefacts, agent findings, validation verdicts, cost
+  records and spending policy a run carries between steps, kept as JSON and
+  read back strictly; rules for joining writes from steps that run at the
+  same time; and checkpoints in SQLite that are read back without
+  constructing objects. The workflow that uses them comes next.
 
 ### Fixed
 
+- A built wheel now contains `tenx.adapters` and `tenx.backends`; only
+  editable installs had them.
 - Agents in the sandbox can run shell commands when the runner is started
   from Claude Code's own shell. Claude Code moved each command into the
   memory cgroup it was already in, which the sandbox's read-only `/sys`
@@ -56,6 +64,9 @@ Notable changes to this project.
 
 ### Changed
 
+- `make install` also installs the new `graph` extra (LangGraph, its SQLite
+  checkpointer and Pydantic), pinned to one LangGraph minor version. The
+  core package still depends only on DuckDB.
 - Each agent call's spending limit comes from the spending policy: US$0.75
   for the engineer, US$0.40 for the cross-source agent and US$0.10 for each
   scout, in place of US$5 for every agent. Measured runs cost well under
