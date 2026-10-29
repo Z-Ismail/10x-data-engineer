@@ -7,7 +7,9 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from tenx.domain import ArtefactRef, Record, RecordError, Usd
+from pydantic import ValidationError
+
+from tenx.domain import AgentFinding, ArtefactRef, Evidence, Record, RecordError, Usd
 
 HASH = "a" * 64
 
@@ -26,6 +28,22 @@ def is_json_only(value) -> bool:
     return False
 
 
+def finding(**changes) -> dict:
+    value = {
+        "agent": "cross-source",
+        "claim": "billing customers match CRM accounts on the email domain",
+        "kind": "inference",
+        "evidence": [{"kind": "file", "ref": "overlap.txt", "detail": "79% of domains found"}],
+        "confidence": "high",
+        "assets": ["customers.email", "accounts.email"],
+        "next_action": "match on the domain after lower case and trimming",
+        "risks": ["free mail domains would match unrelated customers"],
+        "open_questions": [],
+    }
+    value.update(changes)
+    return value
+
+
 class AmountTest(unittest.TestCase):
     def test_amounts_follow_the_policy_rule(self):
         self.assertEqual(Priced.load({"usd": "0.10"}).usd, Decimal("0.10"))
@@ -34,17 +52,78 @@ class AmountTest(unittest.TestCase):
         self.assertEqual(Priced.load({"usd": 0.1}).usd, Decimal("0.1"))
         self.assertEqual(Priced.load({"usd": 2}).dump(), {"usd": "2"})
 
-    def test_values_that_are_not_json_are_refused(self):
-        for bad in [Decimal(1), {1, 2}, float("nan"), Path("x")]:
-            with self.subTest(bad=bad), self.assertRaises(RecordError) as caught:
-                Priced.load({"usd": bad})
-            self.assertIn("not a valid Priced: not JSON", str(caught.exception))
-
     def test_bad_amounts_are_refused_with_the_field(self):
         for bad in ["1e3", "-1", "NaN", True, "0.12345", "", None, [1]]:
             with self.subTest(bad=bad), self.assertRaises(RecordError) as caught:
                 Priced.load({"usd": bad})
             self.assertIn("not a valid Priced: usd:", str(caught.exception))
+
+
+class RecordTest(unittest.TestCase):
+    def test_a_finding_reads_back_equal_and_is_json_only(self):
+        record = AgentFinding.load(finding())
+        dumped = record.dump()
+        self.assertTrue(is_json_only(dumped))
+        self.assertEqual(dumped, finding())
+        self.assertEqual(AgentFinding.load(dumped), record)
+        self.assertEqual(
+            record.evidence,
+            (Evidence(kind="file", ref="overlap.txt", detail="79% of domains found"),),
+        )
+
+    def test_defaults_are_written_out(self):
+        record = AgentFinding.load(
+            {"agent": "qa", "claim": "c", "kind": "fact", "confidence": "low"}
+        )
+        self.assertEqual(
+            record.dump(),
+            {
+                "agent": "qa",
+                "claim": "c",
+                "kind": "fact",
+                "evidence": [],
+                "confidence": "low",
+                "assets": [],
+                "next_action": "",
+                "risks": [],
+                "open_questions": [],
+            },
+        )
+
+    def test_records_cannot_be_changed(self):
+        record = AgentFinding.load(finding())
+        with self.assertRaises(ValidationError):
+            record.claim = "something else"
+
+    def test_wrong_values_are_refused_with_the_field(self):
+        cases = {
+            "kind: Input should be": finding(kind="guess"),
+            "confidence: Input should be": finding(confidence="certain"),
+            "claim: String should have at least 1 character": finding(claim=""),
+            "agent: Input should be a valid string": finding(agent=7),
+            "evidence: Input should be a valid array": finding(evidence={"kind": "file"}),
+            "evidence.0.kind: Input should be": finding(evidence=[{"kind": "log", "ref": "x"}]),
+            "evidence.0.extra: Extra inputs are not permitted": finding(
+                evidence=[{"kind": "file", "ref": "x", "extra": 1}]
+            ),
+            "surprise: Extra inputs are not permitted": finding(surprise=True),
+            "assets.0: Input should be a valid string": finding(assets=[1]),
+        }
+        for expected, value in cases.items():
+            with self.subTest(expected=expected), self.assertRaises(RecordError) as caught:
+                AgentFinding.load(value)
+            self.assertIn(expected, str(caught.exception))
+        missing = finding()
+        del missing["claim"]
+        with self.assertRaises(RecordError) as caught:
+            AgentFinding.load(missing)
+        self.assertIn("claim: Field required", str(caught.exception))
+
+    def test_values_that_are_not_json_are_refused(self):
+        for bad in [Decimal(1), {1, 2}, float("nan"), Path("x")]:
+            with self.subTest(bad=bad), self.assertRaises(RecordError) as caught:
+                AgentFinding.load(finding(next_action=bad))
+            self.assertIn("not a valid AgentFinding: not JSON", str(caught.exception))
 
 
 class ArtefactRefTest(unittest.TestCase):

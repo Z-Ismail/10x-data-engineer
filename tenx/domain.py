@@ -31,7 +31,9 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
 __all__ = [
+    "AgentFinding",
     "ArtefactRef",
+    "Evidence",
     "Record",
     "RecordError",
     "Usd",
@@ -127,3 +129,28 @@ class ArtefactRef(Record):
         if self.kind == "folder":
             return path.is_dir() and _folder_hash(path) == self.sha256
         return path.is_file() and artefacts.file_hash(path) == self.sha256
+
+
+class Evidence(Record):
+    """What a finding rests on: a file, a query and its result, or a check."""
+
+    kind: Literal["file", "query", "check"]
+    # The file's path, the query's text or the check's name.
+    ref: Text
+    # What it showed: the lines read, the query's result or the check's detail.
+    detail: str = ""
+
+
+class AgentFinding(Record):
+    """One claim an agent made, how sure it is, and what it rests on."""
+
+    agent: Text
+    claim: Text
+    kind: Literal["fact", "inference", "hypothesis", "recommendation"]
+    evidence: tuple[Evidence, ...] = ()
+    confidence: Literal["high", "medium", "low"]
+    # Tables, columns or models the claim is about.
+    assets: tuple[Text, ...] = ()
+    next_action: str = ""
+    risks: tuple[Text, ...] = ()
+    open_questions: tuple[Text, ...] = ()
