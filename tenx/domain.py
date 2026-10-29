@@ -17,15 +17,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
 from pydantic import ValidationError as _PydanticError
 
 from tenx import artefacts
-from tenx.policy import PolicyError, amount
+from tenx.ledger import RoleUsage
+from tenx.policy import PolicyError, Settlement, amount
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -33,7 +42,10 @@ if TYPE_CHECKING:
 __all__ = [
     "AgentFinding",
     "ArtefactRef",
+    "Cost",
+    "CostRecord",
     "Evidence",
+    "ModelTokens",
     "Record",
     "RecordError",
     "Usd",
@@ -58,7 +70,30 @@ Usd = Annotated[
     BeforeValidator(_usd),
     PlainSerializer(lambda value: format(value, "f"), return_type=str),
 ]
+
+
+def _cost(value) -> Decimal:
+    # A measured cost keeps every place it was reported with. A float is read
+    # through its shortest text, as the policy reads costs from reports.
+    # Pydantic reports only ValueError as a field's error, so no TypeError here.
+    if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+        raise ValueError(f"a cost must be a number of US dollars, not {value!r}")  # noqa: TRY004
+    if isinstance(value, float):
+        value = Decimal(str(value))
+    text = format(value, "f") if isinstance(value, Decimal) else str(value).strip()
+    if not re.fullmatch(r"\d+(\.\d+)?", text):
+        raise ValueError(f"a cost must be plain decimal US dollars of at least 0, not {value!r}")
+    return Decimal(text)
+
+
+# A measured cost in US dollars: plain decimal text of at least 0, any places.
+Cost = Annotated[
+    Decimal,
+    BeforeValidator(_cost),
+    PlainSerializer(lambda value: format(value, "f"), return_type=str),
+]
 Text = Annotated[str, Field(min_length=1)]
+Count = Annotated[int, Field(ge=0)]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -154,3 +189,103 @@ class AgentFinding(Record):
     next_action: str = ""
     risks: tuple[Text, ...] = ()
     open_questions: tuple[Text, ...] = ()
+
+
+class ModelTokens(Record):
+    """The tokens one model used in an agent call, by type."""
+
+    model: Text
+    input: Count | None
+    cache_write: Count | None
+    cache_read: Count | None
+    output: Count | None
+    cost_basis: str | None = None
+
+
+class CostRecord(Record):
+    """What one agent call used and cost, and what the run was charged for it.
+
+    A figure that was not reported is null, never 0. On a Claude Code sign-in
+    the cost is Claude Code's estimate, not a bill.
+    """
+
+    run_id: Text
+    node: Text
+    role: Text
+    attempt: Count
+    backend: Text
+    outcome: Text
+    turns: Count | None = None
+    duration_ms: Count | None = None
+    refused_calls: Count | None = None
+    models: tuple[ModelTokens, ...] = ()
+    estimated_usd: Cost | None = None
+    cost_basis: Literal["estimate", "billed", "unknown"]
+    # The call's reservation, what the run was charged and how far past its cap.
+    reserved_usd: Usd | None = None
+    charged_usd: Cost | None = None
+    overshoot_usd: Cost | None = None
+
+    @model_validator(mode="after")
+    def _adds_up(self):
+        settled = (self.reserved_usd, self.charged_usd, self.overshoot_usd)
+        if all(value is None for value in settled):
+            return self
+        if any(value is None for value in settled):
+            raise ValueError("a settled call needs its reservation, charge and overshoot")
+        if self.estimated_usd is not None and self.cost_basis != "unknown":
+            charged = self.estimated_usd
+        else:
+            charged = self.reserved_usd
+        overshoot = max(charged - self.reserved_usd, Decimal(0))
+        if (self.charged_usd, self.overshoot_usd) != (charged, overshoot):
+            raise ValueError(
+                f"charged {self.charged_usd} with overshoot {self.overshoot_usd} does not "
+                f"follow from the cost and reservation (charged {charged}, overshoot {overshoot})"
+            )
+        return self
+
+    @classmethod
+    def of(
+        cls,
+        run_id: str,
+        node: str,
+        attempt: int,
+        backend: str,
+        usage: RoleUsage,
+        settlement: Settlement | None = None,
+    ) -> CostRecord:
+        """The record of one call, from its ledger usage and its settlement if any."""
+        known = usage.cost_known
+        settled = {}
+        if settlement is not None:
+            settled = {
+                "reserved_usd": settlement.reservation.cap,
+                "charged_usd": settlement.charged_usd,
+                "overshoot_usd": settlement.overshoot_usd,
+            }
+        return cls(
+            run_id=run_id,
+            node=node,
+            role=usage.role,
+            attempt=attempt,
+            backend=backend,
+            outcome=usage.outcome,
+            turns=usage.turns,
+            duration_ms=usage.duration_ms,
+            refused_calls=usage.refused,
+            models=tuple(
+                ModelTokens(
+                    model=model.model,
+                    input=model.input,
+                    cache_write=model.cache_write,
+                    cache_read=model.cache_read,
+                    output=model.output,
+                    cost_basis=model.cost_basis,
+                )
+                for model in usage.models
+            ),
+            estimated_usd=Decimal(str(usage.cost_usd)) if known else None,
+            cost_basis="estimate" if known else "unknown",
+            **settled,
+        )

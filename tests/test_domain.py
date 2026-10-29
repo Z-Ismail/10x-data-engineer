@@ -9,7 +9,17 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from tenx.domain import AgentFinding, ArtefactRef, Evidence, Record, RecordError, Usd
+from tenx.domain import (
+    AgentFinding,
+    ArtefactRef,
+    CostRecord,
+    Evidence,
+    Record,
+    RecordError,
+    Usd,
+)
+from tenx.ledger import role_usage
+from tenx.policy import Budget
 
 HASH = "a" * 64
 
@@ -186,6 +196,134 @@ class ArtefactRefTest(unittest.TestCase):
     def test_a_missing_path_is_refused(self):
         with self.assertRaises(FileNotFoundError):
             ArtefactRef.of("goal", self.folder / "missing.md")
+
+
+def report(cost, basis="list", subtype="success") -> dict:
+    return {
+        "subtype": subtype,
+        "num_turns": 18,
+        "duration_ms": 34600,
+        "total_cost_usd": cost,
+        "permission_denials": [],
+        "modelUsage": {
+            "claude-sonnet": {
+                "inputTokens": 20,
+                "cacheCreationInputTokens": 5000,
+                "cacheReadInputTokens": 120000,
+                "outputTokens": 3000,
+                "costBasis": basis,
+            },
+            "claude-haiku": {
+                "inputTokens": 1177,
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 0,
+                "outputTokens": 40,
+                "costBasis": "list",
+            },
+        },
+    }
+
+
+def settled(kind, usage):
+    budget = Budget()
+    reservation = budget.reserve(usage.role, kind)
+    return budget.settle(reservation, usage.cost_usd, usage.cost_known)
+
+
+class CostRecordTest(unittest.TestCase):
+    def record(self, usage, settlement=None) -> CostRecord:
+        return CostRecord.of("run-1", "engineer", 2, "claude-code", usage, settlement)
+
+    def test_a_measured_call_is_charged_its_cost(self):
+        usage = role_usage("engineer", report(0.1116))
+        record = self.record(usage, settled("engineer", usage))
+        self.assertEqual(
+            record.dump(),
+            {
+                "run_id": "run-1",
+                "node": "engineer",
+                "role": "engineer",
+                "attempt": 2,
+                "backend": "claude-code",
+                "outcome": "success",
+                "turns": 18,
+                "duration_ms": 34600,
+                "refused_calls": 0,
+                "models": [
+                    {
+                        "model": "claude-sonnet",
+                        "input": 20,
+                        "cache_write": 5000,
+                        "cache_read": 120000,
+                        "output": 3000,
+                        "cost_basis": "list",
+                    },
+                    {
+                        "model": "claude-haiku",
+                        "input": 1177,
+                        "cache_write": 0,
+                        "cache_read": 0,
+                        "output": 40,
+                        "cost_basis": "list",
+                    },
+                ],
+                "estimated_usd": "0.1116",
+                "cost_basis": "estimate",
+                "reserved_usd": "0.75",
+                "charged_usd": "0.1116",
+                "overshoot_usd": "0",
+            },
+        )
+        self.assertEqual(CostRecord.load(record.dump()), record)
+
+    def test_a_call_past_its_cap_shows_the_overshoot(self):
+        # 0.8123 against the engineer's cap of 0.75: 0.0623 over.
+        usage = role_usage("engineer", report(0.8123, subtype="error_max_budget_usd"))
+        dumped = self.record(usage, settled("engineer", usage)).dump()
+        self.assertEqual(
+            (dumped["charged_usd"], dumped["overshoot_usd"], dumped["outcome"]),
+            ("0.8123", "0.0623", "error_max_budget_usd"),
+        )
+        # A cost reported with more places than the policy's keeps them all.
+        usage = role_usage("scout", report(0.0455485))
+        dumped = self.record(usage, settled("scout", usage)).dump()
+        self.assertEqual((dumped["charged_usd"], dumped["overshoot_usd"]), ("0.0455485", "0"))
+
+    def test_a_call_with_no_known_cost_is_charged_its_reservation(self):
+        for usage in [
+            role_usage("engineer", None, "timed out"),
+            role_usage("engineer", report(0.2, basis="unknown")),
+        ]:
+            with self.subTest(outcome=usage.outcome):
+                dumped = self.record(usage, settled("engineer", usage)).dump()
+                self.assertEqual((dumped["estimated_usd"], dumped["cost_basis"]), (None, "unknown"))
+                self.assertEqual((dumped["charged_usd"], dumped["overshoot_usd"]), ("0.75", "0"))
+        dumped = self.record(role_usage("engineer", None, "timed out")).dump()
+        self.assertEqual((dumped["turns"], dumped["models"]), (None, []))
+
+    def test_a_call_not_reserved_has_no_settlement(self):
+        dumped = self.record(role_usage("engineer", report(0.1))).dump()
+        self.assertEqual(
+            (dumped["reserved_usd"], dumped["charged_usd"], dumped["overshoot_usd"]),
+            (None, None, None),
+        )
+
+    def test_figures_that_do_not_add_up_are_refused(self):
+        usage = role_usage("engineer", report(0.1116))
+        good = self.record(usage, settled("engineer", usage)).dump()
+        for changes in [
+            {"charged_usd": "0.75"},
+            {"overshoot_usd": "0.01"},
+            {"charged_usd": None},
+            {"reserved_usd": "0.10"},
+            {"cost_basis": "unknown"},
+        ]:
+            with self.subTest(changes=changes), self.assertRaises(RecordError):
+                CostRecord.load({**good, **changes})
+        for field, bad in [("turns", True), ("estimated_usd", "-0.1"), ("cost_basis", "list")]:
+            with self.subTest(field=field), self.assertRaises(RecordError) as caught:
+                CostRecord.load({**good, field: bad})
+            self.assertIn(f"CostRecord: {field}:", str(caught.exception))
 
 
 if __name__ == "__main__":
