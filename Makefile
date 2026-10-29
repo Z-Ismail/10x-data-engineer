@@ -3,7 +3,7 @@ PYTHON ?= python3
 .PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts compare clean
 
 install:
-	$(PYTHON) -m pip install -e ".[pipeline]"
+	$(PYTHON) -m pip install -e ".[pipeline,graph]"
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v
