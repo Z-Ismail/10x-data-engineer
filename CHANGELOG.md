@@ -47,7 +47,19 @@ Notable changes to this project.
   records and spending policy a run carries between steps, kept as JSON and
   read back strictly; rules for joining writes from steps that run at the
   same time; and checkpoints in SQLite that are read back without
-  constructing objects. The workflow that uses them comes next.
+  constructing objects.
+- A graph run, `python -m tenx.run run | resume | status`
+  (`make engineer-graph`): the same steps as `tenx.engineer` (profile,
+  overlap, the cross-source agent, the engineer, the gate) as a LangGraph
+  graph saved to `<out>/checkpoints.sqlite` after every step. A run stopped
+  part way resumes at the step it was in without running finished steps
+  again; an agent call that completed from the same inputs is used rather
+  than made again, and a call cut off is charged its whole reservation.
+  Every agent call reserves its cap first, and the run stops with
+  `stopped: budget` before a call that would pass the ceiling (US$2.00, or
+  `--policy`). A platform that cannot do a step stops the run before
+  anything runs. Agent calls and gate runs each work in an attempt folder of
+  their own. `make engineer` still uses the earlier runner.
 
 ### Fixed
 

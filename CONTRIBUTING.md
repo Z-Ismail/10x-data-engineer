@@ -45,4 +45,5 @@ all of them 128 times and takes one to two hours.
 | `demo/` | Generator for the three demo source systems, and their goal |
 | `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the spec contract's check, the run artefacts, the spending policy, and the capability interfaces |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
+| `tenx/graph/`, `tenx/run.py` | The graph run: its steps, state and checkpoints, and its command line |
 | `tests/` | Tests, and the dbt project the gate is tested against |

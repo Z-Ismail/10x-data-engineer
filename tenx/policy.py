@@ -262,6 +262,24 @@ class Budget:
             self._settled.append(settlement)
             return settlement
 
+    def restore(self, role: str, kind: str, cap, measured_usd) -> Settlement:
+        """Put back a call settled before the run stopped, so a resumed run counts it.
+
+        ``cap`` is what was reserved for it and ``measured_usd`` the known cost
+        it was settled at, or None if it was charged its whole reservation.
+        The call already ran, so the ceiling is not checked again; the next
+        reservation is checked against it.
+        """
+        known = None if measured_usd is None else Decimal(str(measured_usd))
+        if known is not None and known < 0:
+            raise ValueError(f"a measured cost cannot be negative: {measured_usd}")
+        with self._lock:
+            self._next += 1
+            reservation = Reservation(self._next, role, kind, amount(cap, f"{role} cap"))
+            settlement = Settlement(reservation, known)
+            self._settled.append(settlement)
+            return settlement
+
     @property
     def settlements(self) -> tuple[Settlement, ...]:
         with self._lock:

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts compare clean
+.PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph compare clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -27,6 +27,14 @@ engineer: demo-data
 	rm -rf runs/demo
 	$(PYTHON) -m tenx.engineer --raw demo/data --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/demo
+
+# The same run as make engineer, as a graph saved after every step. Needs
+# Claude Code, signed in. If it stops part way, carry it on with:
+# python -m tenx.run resume --out runs/demo-graph
+engineer-graph: demo-data
+	rm -rf runs/demo-graph
+	$(PYTHON) -m tenx.run run --raw demo/data --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/demo-graph
 
 # The engineer alone, without the cross-source agent. Needs Claude Code, signed in.
 engineer-alone: demo-data
