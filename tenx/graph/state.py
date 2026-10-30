@@ -94,3 +94,4 @@ class GraphState(TypedDict, total=False):
     costs: Annotated[list[dict], operator.add]  # CostRecord
     attempts: Annotated[dict[str, int], merge_attempts]  # step -> attempts so far
     status: Literal["running", "passed", "failed", "stopped"]
+    reason: str  # why a stopped run stopped, in a sentence
