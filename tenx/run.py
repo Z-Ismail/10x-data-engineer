@@ -200,7 +200,9 @@ def describe(out: Path) -> str:
     done = ", ".join(f"{step} {number}" for step, number in (state.get("attempts") or {}).items())
     lines.append(f"attempts: {done or 'none'}")
     charged = sum(CostRecord.load(cost).charged_usd or 0 for cost in state.get("costs") or [])
-    lines.append(f"charged to the budget: US${charged} (Claude Code's estimates, not a bill)")
+    # Claude Code reports costs with float noise (0.05569760000000001); shown as the ledger does.
+    shown = f"{charged:.4f}"
+    lines.append(f"charged to the budget: US${shown} (Claude Code's estimates, not a bill)")
     return "\n".join(lines) + "\n"
 
 
