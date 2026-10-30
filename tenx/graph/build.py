@@ -39,9 +39,10 @@ from tenx.domain import (
     Evidence,
     ExecutionPlan,
     ResourceBudget,
+    ValidationResult,
 )
 from tenx.graph.state import FAILED, PASSED, RUNNING, STOPPED, GraphState, plain
-from tenx.ledger import role_usage
+from tenx.ledger import Ledger, role_usage
 from tenx.policy import Budget, BudgetStop
 from tenx.ports import (
     OVERLAP,
@@ -65,6 +66,9 @@ CHECKPOINT_FILE = "checkpoints.sqlite"
 AGENT_FILE = "agent.json"
 GOAL_FILE = "GOAL.md"
 SOURCE_PROFILES_DIR = "source_profiles"
+GATE_REPORT_FILE = "report.txt"
+USAGE_FILE = "usage.json"
+BUDGET_FILE = "budget.json"
 PROFILE_DIR = "profile"
 OVERLAP_DIR = "overlap"
 
@@ -343,8 +347,101 @@ def cross_source_node(toolkit: Toolkit):
     return cross_source
 
 
+def engineer_node(toolkit: Toolkit):
+    """The engineer agent, in a project made afresh for each attempt."""
+
+    def engineer(state: GraphState) -> dict:
+        request = _request(state)
+        found = state["artefacts"]
+        profiles = Path(found["profiles"]["path"])
+        files = {"goal": Path(request.goal), "profiles": profiles}
+        if "joins" in found:
+            files["joins"] = Path(found["joins"]["path"])
+
+        def prepare(work: Path) -> None:
+            shutil.copytree(profiles, work / SOURCE_PROFILES_DIR)
+            shutil.copyfile(request.goal, work / GOAL_FILE)
+            toolkit.engine.scaffold(work, Path(request.raw))
+            if "joins" in files:
+                shutil.copyfile(files["joins"], work / NOTES_FILE)
+
+        call = call_agent(toolkit, state, ENGINEER_STEP, files, prepare, raw=True)
+        if call.stopped:
+            return call.update
+        number = call.update["attempts"][ENGINEER_STEP]
+        project = ArtefactRef.of("project", call.folder / artefacts.WORK_DIR, attempt=number)
+        return plain({**call.update, "artefacts": {"project": project.dump()}})
+
+    return engineer
+
+
+def gate_node(toolkit: Toolkit):
+    """The validator builds the engineer's project afresh and checks it, in the sandbox."""
+
+    def gate(state: GraphState) -> dict:
+        request = _request(state)
+        project = Path(state["artefacts"]["project"]["path"])
+        declaration = Path(request.declaration)
+        attempt = artefacts.start(
+            Path(request.out),
+            state["run_id"],
+            GATE_STEP,
+            artefacts.input_files({"project": project, "declaration": declaration}),
+            {"validator": toolkit.validator.name, "sandbox": toolkit.sandbox.name},
+        )
+        report = toolkit.validator.validate(
+            project.resolve(),
+            Path(request.raw).resolve(),
+            declaration,
+            attempt.work.resolve(),
+            toolkit.sandbox,
+            toolkit.hidden,
+        )
+        artefacts.write_text(attempt.folder / GATE_REPORT_FILE, report.text)
+        artefacts.finish(attempt, artefacts.COMPLETE, [GATE_REPORT_FILE])
+        saved = ArtefactRef.of("gate report", attempt.folder / GATE_REPORT_FILE, attempt.number)
+        verdict = ValidationResult.of(toolkit.validator.name, report, saved)
+        return plain(
+            {
+                "artefacts": {"gate report": saved.dump()},
+                "validations": [verdict.dump()],
+                "attempts": {GATE_STEP: attempt.number},
+            }
+        )
+
+    return gate
+
+
+def ledger(toolkit: Toolkit, state: GraphState) -> Ledger:
+    """Each agent's usage in the attempt the run used, in the order they ran."""
+    out = Path(_request(state).out)
+    outcomes = {
+        (cost["node"], cost["attempt"]): cost["outcome"] for cost in state.get("costs") or []
+    }
+    roles = []
+    for step in (CROSS_SOURCE_STEP, ENGINEER_STEP):
+        number = (state.get("attempts") or {}).get(step)
+        if number is None:
+            continue
+        folder = out / step / f"{artefacts.ATTEMPT_PREFIX}{number}"
+        missing = outcomes.get((step, number), "no report")
+        roles.append(role_usage(toolkit.roles[step].name, _report_in(folder), missing))
+    validations = state.get("validations") or []
+    if validations:
+        verdict = "PASS" if validations[-1]["passed"] else "FAIL"
+    else:
+        verdict = "not run"
+    return Ledger(tuple(roles), verdict, toolkit.sandbox.name)
+
+
 def report_node(toolkit: Toolkit):
+    """Write the run's usage and spending, and say whether it passed."""
+
     def report(state: GraphState) -> dict:
+        out = Path(_request(state).out)
+        ledger(toolkit, state).write(out / USAGE_FILE)
+        spending = json.dumps(toolkit.budget.to_dict(), indent=2) + "\n"
+        artefacts.write_text(out / BUDGET_FILE, spending)
         if state.get("status") == STOPPED:
             return {}
         validations = state.get("validations") or []
@@ -372,6 +469,8 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
         PROFILE_STEP: profile_node(toolkit),
         OVERLAP_STEP: overlap_node(toolkit),
         CROSS_SOURCE_STEP: cross_source_node(toolkit),
+        ENGINEER_STEP: engineer_node(toolkit),
+        GATE_STEP: gate_node(toolkit),
         REPORT_STEP: report_node(toolkit),
         **(nodes or {}),
     }

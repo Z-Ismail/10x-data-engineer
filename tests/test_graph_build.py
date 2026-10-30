@@ -10,7 +10,14 @@ from graph_fakes import ANSWER, Fakes, GraphCase, report
 
 from tenx import artefacts
 from tenx.cross_source import render as render_notes
-from tenx.domain import AgentFinding, ArtefactRef, CostRecord, ExecutionPlan, ResourceBudget
+from tenx.domain import (
+    AgentFinding,
+    ArtefactRef,
+    CostRecord,
+    ExecutionPlan,
+    ResourceBudget,
+    ValidationResult,
+)
 from tenx.graph.build import cross_source_node, overlap_node, profile_node, steps_for
 from tenx.policy import Budget, Policy
 
@@ -244,3 +251,87 @@ class CrossSourceTest(GraphCase, unittest.TestCase):
         self.assertEqual(fakes.calls.count("cross-source"), 2)
         self.assertEqual(second["attempts"], {"cross-source": 2})
         self.assertEqual([cost["attempt"] for cost in second["costs"]], [2])
+
+
+class RunTest(GraphCase, unittest.TestCase):
+    """Whole runs with stand-in ports, from the plan to the report."""
+
+    def test_a_run_that_passes(self):
+        fakes = Fakes()
+        state = self.invoke(fakes.toolkit(self.out), self.request())
+        self.assertEqual(
+            fakes.calls,
+            ["profile", "overlap", "cross-source", "scaffold", "engineer", "gate"],
+        )
+        self.assertEqual(
+            fakes.seen["engineer"],
+            [
+                "GOAL.md",
+                "JOINS.md",
+                "dbt_project.yml",
+                "models",
+                "source_profiles",
+                "source_profiles/shop.orders.json",
+                "source_profiles/shop.orders.txt",
+            ],
+        )
+        self.assertEqual(state["status"], "passed")
+        project = self.out / "engineer" / "attempt-1" / "work"
+        self.assertEqual(state["artefacts"]["project"]["path"], str(project))
+        self.assertTrue((project / "models" / "orders.sql").is_file())
+        [verdict] = [ValidationResult.load(item) for item in state["validations"]]
+        self.assertEqual((verdict.passed, verdict.checks, verdict.failures), (True, 2, ()))
+        self.assertEqual(Path(verdict.report.path).read_text(), "gate pass\n")
+        self.assertEqual(state["attempts"], {"cross-source": 1, "engineer": 1, "gate": 1})
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(usage["gate"], "PASS")
+        self.assertEqual(usage["sandbox"], "none")
+        self.assertEqual(
+            [(role["role"], role["turns"], role["cost_usd"]) for role in usage["roles"]],
+            [("cross-source", 9, 0.07), ("engineer", 18, 0.11)],
+        )
+        spending = json.loads((self.out / "budget.json").read_text())
+        # 0.07 + 0.11, each well under its cap.
+        self.assertEqual((spending["spent_usd"], spending["overshoot_usd"]), ("0.18", "0"))
+        charged = sum(Decimal(cost["charged_usd"]) for cost in state["costs"])
+        self.assertEqual(charged, Decimal("0.18"))
+
+    def test_a_run_that_fails_the_gate(self):
+        fakes = Fakes()
+        fakes.verdict = False
+        state = self.invoke(fakes.toolkit(self.out), self.request())
+        self.assertEqual(state["status"], "failed")
+        [verdict] = [ValidationResult.load(item) for item in state["validations"]]
+        self.assertEqual(
+            [(f.check, f.subject, f.status) for f in verdict.failures], [("rows", "orders", "fail")]
+        )
+        self.assertEqual(json.loads((self.out / "usage.json").read_text())["gate"], "FAIL")
+
+    def test_a_run_without_the_cross_source_agent(self):
+        fakes = Fakes()
+        state = self.invoke(fakes.toolkit(self.out), self.request(cross_source=False))
+        self.assertEqual(fakes.calls, ["profile", "scaffold", "engineer", "gate"])
+        self.assertNotIn("JOINS.md", fakes.seen["engineer"])
+        self.assertEqual(state["status"], "passed")
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual([role["role"] for role in usage["roles"]], ["engineer"])
+
+    def test_a_ceiling_reached_stops_the_run_before_the_engineer(self):
+        fakes = Fakes()
+        toolkit = fakes.toolkit(self.out, policy=Policy(run_usd=Decimal("0.80")))
+        state = self.invoke(toolkit, self.request())
+        self.assertEqual(fakes.calls, ["profile", "overlap", "cross-source"])
+        self.assertEqual(state["status"], "stopped")
+        # 0.07 charged for the cross-source call; 0.07 + 0.75 = 0.82 > 0.80.
+        self.assertEqual(
+            state["reason"],
+            "stopped: budget: engineer was not started; its cap of US$0.75 with "
+            "US$0.07 spent and US$0 reserved would pass the run's ceiling of US$0.80",
+        )
+        self.assertFalse((self.out / "engineer").exists())
+        self.assertEqual(state["validations"], [])
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(usage["gate"], "not run")
+        self.assertEqual([role["role"] for role in usage["roles"]], ["cross-source"])
+        spending = json.loads((self.out / "budget.json").read_text())
+        self.assertEqual((spending["spent_usd"], spending["reserved_usd"]), ("0.07", "0"))
