@@ -4,6 +4,10 @@ The stand-in is the one the old runner's tests use: the engineer copies the
 reference models, which pass the gate, and the cross-source agent answers
 with a fixed answer. Runs are unisolated, as there, because the stand-in
 records what it saw outside its folder; the sandbox has its own tests.
+
+The recovery test kills the run with SIGKILL from inside the engineer's
+call, the way a crash or a closed laptop ends it, then resumes it in a new
+process.
 """
 
 import json
@@ -13,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from test_engineer import ANSWER, DECLARATION, DEMO_GOAL, REFERENCE_MODELS, STUB
@@ -133,6 +138,43 @@ class CommandLineTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("no run is saved in", done.stderr)
                 self.assertFalse((self.root / "nothing").exists())
+
+    def test_a_run_killed_in_the_engineer_resumes_there(self):
+        killed = self.start(kill=True)
+        self.assertEqual(killed.returncode, -9, killed.stderr)
+        status = self.tenx("status", "--out", str(self.out))
+        self.assertIn("status: stopped part way; next step: engineer\n", status.stdout)
+        self.assertIn("attempts: cross-source 1\n", status.stdout)
+        profiles = sorted((self.out / "profile").iterdir())
+        made = {path.name: path.stat().st_mtime_ns for path in profiles}
+        cross_source = self.record.with_name("record.json.cross-source")
+        cross_source.unlink()
+        resumed = self.tenx("resume", "--out", str(self.out))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn("gate: PASS (24 passed, 0 failed, 0 not run)", resumed.stdout)
+        # Profile, overlap and the cross-source agent did not run again.
+        self.assertFalse(cross_source.exists())
+        self.assertEqual({p.name: p.stat().st_mtime_ns for p in profiles}, made)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "cross-source").iterdir()), ["attempt-1"]
+        )
+        # The engineer started again, in a new attempt with a clean project.
+        seen = json.loads(self.record.read_text())
+        self.assertEqual(Path(seen["cwd"]), self.out / "engineer" / "attempt-2" / "work")
+        self.assertNotIn("models/staging", seen["files"])
+        # The killed call is charged its whole reservation: 0.1204 + 0.75 + 0.0812.
+        spending = json.loads((self.out / "budget.json").read_text())
+        self.assertEqual(Decimal(spending["spent_usd"]), Decimal("0.9516"))
+        self.assertEqual(
+            [(call["role"], call["basis"]) for call in spending["calls"]],
+            [
+                ("cross-source", "measured"),
+                ("engineer", "whole reservation"),
+                ("engineer", "measured"),
+            ],
+        )
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual([role["turns"] for role in usage["roles"]], [9, 7])
 
 
 if __name__ == "__main__":
