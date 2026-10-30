@@ -412,26 +412,26 @@ def gate_node(toolkit: Toolkit):
     return gate
 
 
-def ledger(toolkit: Toolkit, state: GraphState) -> Ledger:
+def ledger(state: GraphState, roles: Mapping[str, Role], sandbox: str) -> Ledger:
     """Each agent's usage in the attempt the run used, in the order they ran."""
     out = Path(_request(state).out)
     outcomes = {
         (cost["node"], cost["attempt"]): cost["outcome"] for cost in state.get("costs") or []
     }
-    roles = []
+    used = []
     for step in (CROSS_SOURCE_STEP, ENGINEER_STEP):
         number = (state.get("attempts") or {}).get(step)
         if number is None:
             continue
         folder = out / step / f"{artefacts.ATTEMPT_PREFIX}{number}"
         missing = outcomes.get((step, number), "no report")
-        roles.append(role_usage(toolkit.roles[step].name, _report_in(folder), missing))
+        used.append(role_usage(roles[step].name, _report_in(folder), missing))
     validations = state.get("validations") or []
     if validations:
         verdict = "PASS" if validations[-1]["passed"] else "FAIL"
     else:
         verdict = "not run"
-    return Ledger(tuple(roles), verdict, toolkit.sandbox.name)
+    return Ledger(tuple(used), verdict, sandbox)
 
 
 def report_node(toolkit: Toolkit):
@@ -439,7 +439,7 @@ def report_node(toolkit: Toolkit):
 
     def report(state: GraphState) -> dict:
         out = Path(_request(state).out)
-        ledger(toolkit, state).write(out / USAGE_FILE)
+        ledger(state, toolkit.roles, toolkit.sandbox.name).write(out / USAGE_FILE)
         spending = json.dumps(toolkit.budget.to_dict(), indent=2) + "\n"
         artefacts.write_text(out / BUDGET_FILE, spending)
         if state.get("status") == STOPPED:
