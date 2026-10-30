@@ -15,6 +15,7 @@ make test
 make engineer    # the cross-source agent, then the engineer builds the demo project; then the gate
 make engineer-alone    # the same without the cross-source agent
 make engineer-scouts   # the same as make engineer, with a scout for each raw table first
+make engineer-graph    # the same as make engineer, as a graph that can be resumed
 make compare     # runs the engineer with and without the other agents, 128 runs;
                  # needs COMPARE_FLAGS=--approve-cost (estimated above US$5)
 ```
@@ -725,13 +726,111 @@ statement or as a module name given to `importlib`; a second test imports
 them in a fresh interpreter and checks that none of those modules was
 loaded, directly or through another module.
 
+## Graph run
+
+```
+python -m tenx.run run --raw demo/data --goal demo/goal.md \
+    --checks tests/fixtures/demo_gate.json --out runs/demo-graph
+python -m tenx.run status --out runs/demo-graph
+python -m tenx.run resume --out runs/demo-graph
+```
+
+`tenx.run` does what `python -m tenx.engineer` does (profile the raw files,
+compare their columns, the cross-source agent, the engineer, then the gate)
+as the steps of a [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview)
+graph. The graph's state is written to `<out>/checkpoints.sqlite` after each
+step, before the next one starts. If the run stops part way, because the
+process was killed, the machine was shut down or a step failed, `resume`
+carries it on from the step it was in: finished steps do not run again.
+`status` says whether a run passed, failed or stopped, and if it stopped
+part way, which step a resume will run and what went wrong. `make engineer`
+still uses the earlier runner; the two are being compared before the graph
+replaces it.
+
+`run` takes the same options as `tenx.engineer` (`--no-cross-source`,
+`--unisolated`) and `--policy`, a JSON spending policy with a ceiling and
+caps (see [Spending policy](#spending-policy)). Scouts are not part of the
+graph run. `resume` and `status` read the request back from the checkpoint,
+so a resumed run uses the same inputs, sandbox setting and policy it started
+with. Exit status: 0 passed, 1 failed the gate, 2 refused or stopped by an
+error (resume tries the step again), 3 stopped by the budget or by a
+platform that cannot do a step.
+
+Each step reaches sources, builds, checks and agents only through the
+[capability interfaces](#capability-interfaces); `tenx.run` chooses the
+DuckDB, dbt and Claude Code implementations and hands them to the graph.
+Before anything runs, the plan step asks each implementation for every
+capability the run's steps need, and stops the run with, for example,
+"fake gate cannot validate a project" if one is missing.
+
+Every agent call reserves its cap from the run's budget before it starts,
+and the run stops with `stopped: budget` before a call that would pass the
+ceiling (US$2.00 by default). After a resume, every call settled before the
+stop counts against the ceiling again.
+
+Agent calls and gate runs each get an attempt folder:
+
+```
+runs/demo-graph/
+    checkpoints.sqlite
+    plugin/                     the add-on as loaded for the run
+    profile/  overlap/          the profiles and the overlap report
+    cross-source/attempt-1/     manifest.json, agent.json, JOINS.md, work/
+    engineer/attempt-1/         manifest.json, agent.json, work/ (the project)
+    gate/attempt-1/             manifest.json, report.txt, work/ (the gate's databases)
+    usage.json                  tokens, turns, time and cost by role
+    budget.json                 each call's reservation, charge and overshoot
+```
+
+An agent sees only its attempt's `work/` folder (in the sandbox), never the
+manifest beside it. When a resumed run comes to an agent step, it first
+looks at the attempts already on disk. An attempt that completed from
+exactly the same inputs (the goal, profiles, overlap report, `JOINS.md`,
+the agent's instructions, its tools, turns and cap, the backend and the
+sandbox) is used as it is, and no call is made. Any other attempt left by
+the stop is charged to the budget: what its report says it cost, or its
+whole reservation when it left no report, since nothing says it spent less.
+The step then runs again in a new attempt with a fresh folder. Profile and
+overlap are plain code and are run again from nothing.
+
+A run killed during the engineer's call on the demo data, then resumed
+(the project's path shortened, and the gate's checks and the usage table
+left out):
+
+```
+$ python -m tenx.run status --out runs/graph-kill
+run: graph-kill
+status: stopped part way; next step: engineer
+resume with: python -m tenx.run resume --out runs/graph-kill
+attempts: cross-source 1
+charged to the budget: US$0.0557 (Claude Code's estimates, not a bill)
+
+$ python -m tenx.run resume --out runs/graph-kill
+status: passed
+project: runs/graph-kill/engineer/attempt-2/work
+
+gate: PASS (24 passed, 0 failed, 0 not run)
+
+$ python -m tenx.run status --out runs/graph-kill
+run: graph-kill
+status: passed
+attempts: cross-source 1, engineer 2, gate 1
+charged to the budget: US$0.8980 (Claude Code's estimates, not a bill)
+```
+
+The cross-source agent did not run again. The killed engineer call left no
+report, so it was charged its whole US$0.75 reservation; the second call
+cost US$0.0923. In the sandbox, killing the run also ends the agent it had
+started (bubblewrap's `--die-with-parent`). A run started with
+`--unisolated` and then killed leaves its agent running until the agent
+finishes, and that agent's cost is not known to the run.
+
 ## Run records and graph state
 
-The workflow being built saves its state after every step, so that a run
-stopped part way (a crash, a kill, a closed laptop) resumes where it
+The graph run (above) saves its state after every step, so that a
+run stopped part way (a crash, a kill, a closed laptop) resumes where it
 stopped. `tenx/domain.py` holds the records the steps pass to one another,
-and `tenx/graph/` the state that carries them; the workflow's steps are not
-built yet.
+and `tenx/graph/` the state that carries them.
 
 | Record | What it holds |
 | --- | --- |
@@ -774,6 +873,7 @@ construct objects of any class a checkpoint file names.
 | `demo/` | Demo data generator, and the goal for the demo data |
 | `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, the run artefacts, the spending policy, the capability interfaces, and the run records |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
-| `tenx/graph/` | The workflow's state and checkpoints |
+| `tenx/graph/` | The graph run: its steps, its state and checkpoints |
+| `tenx/run.py` | The graph run's command line: run, resume, status |
 | `tests/` | Tests, and the dbt project the gate is tested against |
 
