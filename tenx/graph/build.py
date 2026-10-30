@@ -19,16 +19,30 @@ that goes wrong is raised, and the run can be resumed at that step.
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
 
-from tenx.domain import ArtefactRef, EngineeringRequest, ExecutionPlan, ResourceBudget
+from tenx import artefacts
+from tenx.cross_source import NOTES_FILE, NotesError, notes_from_report
+from tenx.cross_source import render as render_notes
+from tenx.domain import (
+    AgentFinding,
+    ArtefactRef,
+    CostRecord,
+    EngineeringRequest,
+    Evidence,
+    ExecutionPlan,
+    ResourceBudget,
+)
 from tenx.graph.state import FAILED, PASSED, RUNNING, STOPPED, GraphState, plain
-from tenx.policy import Budget
+from tenx.ledger import role_usage
+from tenx.policy import Budget, BudgetStop
 from tenx.ports import (
     OVERLAP,
     PROFILE,
@@ -48,6 +62,9 @@ from tenx.ports import (
 )
 
 CHECKPOINT_FILE = "checkpoints.sqlite"
+AGENT_FILE = "agent.json"
+GOAL_FILE = "GOAL.md"
+SOURCE_PROFILES_DIR = "source_profiles"
 PROFILE_DIR = "profile"
 OVERLAP_DIR = "overlap"
 
@@ -156,6 +173,176 @@ def overlap_node(toolkit: Toolkit):
     return overlap
 
 
+def _report_in(folder: Path) -> dict | None:
+    try:
+        report = json.loads((folder / AGENT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def _record(toolkit, state, step, number, usage, settlement) -> dict:
+    return CostRecord.of(
+        state["run_id"], step, number, toolkit.backend.name, usage, settlement
+    ).dump()
+
+
+@dataclass(frozen=True)
+class Call:
+    """What one agent step ended with: the attempt it used, its report, the update."""
+
+    folder: Path | None
+    report: dict | None
+    update: dict
+
+    @property
+    def stopped(self) -> bool:
+        return self.update.get("status") == STOPPED
+
+
+def agent_inputs(toolkit: Toolkit, step: str, request: EngineeringRequest, files: dict):
+    """The files and values that decide what an agent step does, and so its action ID."""
+    role = toolkit.roles[step]
+    prompt = toolkit.plugin / "agents" / f"{role.agent.split(':')[-1]}.md"
+    values = {
+        "role": role.name,
+        "agent": role.agent,
+        "prompt": role.prompt,
+        "allowed_tools": json.dumps(list(role.allowed_tools)),
+        "max_turns": str(role.max_turns),
+        "schema": json.dumps(role.json_schema, sort_keys=True),
+        "cap_usd": str(toolkit.budget.policy.cap(role.budget_kind)),
+        "backend": toolkit.backend.name,
+        "sandbox": toolkit.sandbox.name,
+        "raw": str(Path(request.raw).resolve()),
+    }
+    return artefacts.input_files({**files, "prompt": prompt}), values
+
+
+def call_agent(
+    toolkit: Toolkit,
+    state: GraphState,
+    step: str,
+    files: dict,
+    prepare: Callable[[Path], None],
+    raw: bool = False,
+) -> Call:
+    """Run one agent step: charge attempts a crash left, reuse a finished one, or call.
+
+    An attempt on disk with no cost in the state was made by an execution of
+    this step that never finished. It is charged now: its measured cost if
+    its report is there, its whole reservation if not. If it also completed
+    from exactly these inputs, it is used as it is and no call is made.
+    Otherwise the call's reservation is made first; if it does not fit, the
+    run stops before the call.
+    """
+    request = _request(state)
+    role = toolkit.roles[step]
+    out = Path(request.out)
+    hashed, values = agent_inputs(toolkit, step, request, files)
+    recorded = {cost["attempt"] for cost in state.get("costs") or [] if cost["node"] == step}
+    found = artefacts.reusable(out, state["run_id"], step, hashed, values)
+    cap = toolkit.budget.policy.cap(role.budget_kind)
+    costs = []
+    for number in artefacts.attempt_numbers(out, step):
+        if number in recorded:
+            continue
+        folder = out / step / f"{artefacts.ATTEMPT_PREFIX}{number}"
+        usage = role_usage(role.name, _report_in(folder), "interrupted")
+        known = Decimal(str(usage.cost_usd)) if usage.cost_known else None
+        settlement = toolkit.budget.restore(role.name, role.budget_kind, cap, known)
+        costs.append(_record(toolkit, state, step, number, usage, settlement))
+    if found is not None:
+        update = {"costs": costs, "attempts": {step: found.number}}
+        return Call(found.folder, _report_in(found.folder), plain(update))
+    try:
+        reservation = toolkit.budget.reserve(role.name, role.budget_kind)
+    except BudgetStop as stop:
+        return Call(None, None, _stop(str(stop), costs=costs))
+    attempt = artefacts.start(out, state["run_id"], step, hashed, values)
+    prepare(attempt.work)
+    agent = toolkit.backend.run(
+        role,
+        attempt.work.resolve(),
+        attempt.folder / AGENT_FILE,
+        toolkit.timeout,
+        toolkit.sandbox,
+        toolkit.mounts(attempt.work.resolve(), raw),
+    )
+    missing = "timed out" if agent.timed_out_after is not None else "no report"
+    usage = role_usage(role.name, agent.report, missing)
+    settlement = toolkit.budget.settle(reservation, usage.cost_usd, usage.cost_known)
+    costs.append(_record(toolkit, state, step, attempt.number, usage, settlement))
+    if agent.report is not None:
+        artefacts.finish(attempt, artefacts.COMPLETE, [AGENT_FILE])
+    else:
+        artefacts.finish(attempt, artefacts.FAILED)
+    update = {"costs": costs, "attempts": {step: attempt.number}}
+    return Call(attempt.folder, agent.report, plain(update))
+
+
+def _profiles(state: GraphState) -> list[dict]:
+    folder = Path(state["artefacts"]["profiles"]["path"])
+    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(folder.glob("*.json"))]
+
+
+def _findings(notes: dict, joins: str) -> list[dict]:
+    found = [
+        AgentFinding(
+            agent=CROSS_SOURCE_STEP,
+            claim=f"{join['left']} joins {join['right']} ({join['cardinality']}): "
+            f"{join['prepare']}",
+            kind="recommendation",
+            confidence="medium",
+            evidence=(Evidence(kind="file", ref=joins, detail=join["evidence"]),),
+            assets=(join["left"], join["right"]),
+            risks=(join["unmatched"],),
+        )
+        for join in notes["joins"]
+    ]
+    found += [
+        AgentFinding(agent=CROSS_SOURCE_STEP, claim=caution, kind="hypothesis", confidence="low")
+        for caution in notes["cautions"]
+    ]
+    return [finding.dump() for finding in found]
+
+
+def cross_source_node(toolkit: Toolkit):
+    """The cross-source agent; its checked answer becomes JOINS.md for the engineer."""
+
+    def cross_source(state: GraphState) -> dict:
+        request = _request(state)
+        profiles = Path(state["artefacts"]["profiles"]["path"])
+        overlap = Path(state["artefacts"]["overlap"]["path"])
+        files = {"goal": Path(request.goal), "profiles": profiles, "overlap": overlap}
+
+        def prepare(work: Path) -> None:
+            shutil.copyfile(request.goal, work / GOAL_FILE)
+            shutil.copytree(profiles, work / SOURCE_PROFILES_DIR)
+            shutil.copytree(overlap, work / SOURCE_PROFILES_DIR, dirs_exist_ok=True)
+
+        call = call_agent(toolkit, state, CROSS_SOURCE_STEP, files, prepare)
+        if call.stopped:
+            return call.update
+        try:
+            notes = notes_from_report(call.report, _profiles(state))
+        except NotesError as problem:
+            claim = f"no notes for the engineer: {problem}"
+            finding = AgentFinding(
+                agent=CROSS_SOURCE_STEP, claim=claim, kind="fact", confidence="high"
+            )
+            return plain({**call.update, "findings": [finding.dump()]})
+        joins = call.folder / NOTES_FILE
+        artefacts.write_text(joins, render_notes(notes))
+        number = call.update["attempts"][CROSS_SOURCE_STEP]
+        ref = ArtefactRef.of("joins", joins, attempt=number).dump()
+        return plain(
+            {**call.update, "artefacts": {"joins": ref}, "findings": _findings(notes, str(joins))}
+        )
+
+    return cross_source
+
+
 def report_node(toolkit: Toolkit):
     def report(state: GraphState) -> dict:
         if state.get("status") == STOPPED:
@@ -184,6 +371,7 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
         PLAN: plan_node(toolkit),
         PROFILE_STEP: profile_node(toolkit),
         OVERLAP_STEP: overlap_node(toolkit),
+        CROSS_SOURCE_STEP: cross_source_node(toolkit),
         REPORT_STEP: report_node(toolkit),
         **(nodes or {}),
     }

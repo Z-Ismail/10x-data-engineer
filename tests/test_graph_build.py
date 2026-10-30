@@ -2,13 +2,28 @@
 
 import json
 import unittest
+from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
-from graph_fakes import Fakes, GraphCase
+from graph_fakes import ANSWER, Fakes, GraphCase, report
 
-from tenx.domain import ArtefactRef, ExecutionPlan, ResourceBudget
-from tenx.graph.build import steps_for
-from tenx.policy import Policy
+from tenx import artefacts
+from tenx.cross_source import render as render_notes
+from tenx.domain import AgentFinding, ArtefactRef, CostRecord, ExecutionPlan, ResourceBudget
+from tenx.graph.build import cross_source_node, overlap_node, profile_node, steps_for
+from tenx.policy import Budget, Policy
+
+
+class Dying:
+    """A backend whose process dies part way through the agent's call."""
+
+    def __init__(self, backend) -> None:
+        self.name = backend.name
+        self.capabilities = backend.capabilities
+
+    def run(self, *args, **kwargs):
+        raise SystemExit("killed")
 
 
 def _noted(fakes: Fakes, name: str):
@@ -98,3 +113,134 @@ class PlanTest(GraphCase, unittest.TestCase):
         fakes = Fakes()
         self.invoke(fakes.toolkit(self.out), self.request(), self.stubs(fakes))
         self.assertFalse(stale.exists())
+
+
+class CrossSourceTest(GraphCase, unittest.TestCase):
+    """The cross-source step, called directly on a state made by the steps before it."""
+
+    def state(self, toolkit, **changes) -> dict:
+        state = {"run_id": "run", "request": self.request(**changes).dump(), "costs": []}
+        state["artefacts"] = {
+            **profile_node(toolkit)(state)["artefacts"],
+            **overlap_node(toolkit)(state)["artefacts"],
+        }
+        return state
+
+    def test_a_checked_answer_becomes_joins_for_the_engineer(self):
+        fakes = Fakes()
+        toolkit = fakes.toolkit(self.out)
+        update = cross_source_node(toolkit)(self.state(toolkit))
+        self.assertEqual(fakes.calls, ["profile", "overlap", "cross-source"])
+        self.assertEqual(
+            fakes.seen["cross-source"],
+            [
+                "GOAL.md",
+                "source_profiles",
+                "source_profiles/overlap.json",
+                "source_profiles/overlap.txt",
+                "source_profiles/shop.orders.json",
+                "source_profiles/shop.orders.txt",
+            ],
+        )
+        folder = self.out / "cross-source" / "attempt-1"
+        self.assertEqual((folder / "JOINS.md").read_text(), render_notes(ANSWER))
+        self.assertEqual(update["artefacts"]["joins"]["path"], str(folder / "JOINS.md"))
+        self.assertEqual(update["attempts"], {"cross-source": 1})
+        self.assertEqual(artefacts.load(folder).status, "complete")
+        [cost] = [CostRecord.load(cost) for cost in update["costs"]]
+        self.assertEqual(
+            (cost.node, cost.attempt, cost.outcome, cost.turns), ("cross-source", 1, "success", 9)
+        )
+        self.assertEqual(
+            (cost.reserved_usd, cost.charged_usd, cost.overshoot_usd),
+            (Decimal("0.40"), Decimal("0.07"), Decimal(0)),
+        )
+        findings = [AgentFinding.load(finding) for finding in update["findings"]]
+        self.assertEqual([finding.kind for finding in findings], ["recommendation", "hypothesis"])
+        self.assertEqual(findings[0].assets, ("shop.orders.email", "shop.orders.id"))
+        self.assertEqual(findings[1].claim, "Check for shared domains.")
+        self.assertEqual(toolkit.budget.spent_usd, Decimal("0.07"))
+
+    def test_an_answer_that_fails_its_check_is_not_passed_on(self):
+        fakes = Fakes()
+        bad = {**ANSWER, "joins": [{**ANSWER["joins"][0], "right": "shop.orders.nope"}]}
+        fakes.reports["cross-source"] = report(0.07, 9, bad)
+        toolkit = fakes.toolkit(self.out)
+        update = cross_source_node(toolkit)(self.state(toolkit))
+        self.assertNotIn("artefacts", update)
+        self.assertFalse((self.out / "cross-source" / "attempt-1" / "JOINS.md").exists())
+        [finding] = update["findings"]
+        self.assertEqual(
+            finding["claim"],
+            "no notes for the engineer: join 1 names 'shop.orders.nope', "
+            "which is not a column in the profiles",
+        )
+        self.assertEqual(len(update["costs"]), 1)
+
+    def test_a_call_with_no_report_is_charged_its_whole_reservation(self):
+        fakes = Fakes()
+        fakes.reports["cross-source"] = None
+        toolkit = fakes.toolkit(self.out)
+        update = cross_source_node(toolkit)(self.state(toolkit))
+        [cost] = [CostRecord.load(cost) for cost in update["costs"]]
+        self.assertEqual((cost.outcome, cost.charged_usd), ("no report", Decimal("0.40")))
+        self.assertEqual(artefacts.load(self.out / "cross-source" / "attempt-1").status, "failed")
+        self.assertIn("gave no report", update["findings"][0]["claim"])
+
+    def test_a_call_that_does_not_fit_the_ceiling_is_never_made(self):
+        fakes = Fakes()
+        budget = Budget()
+        budget.restore("engineer", "engineer", "0.75", Decimal("1.70"))
+        toolkit = fakes.toolkit(self.out, budget=budget)
+        update = cross_source_node(toolkit)(self.state(toolkit))
+        self.assertNotIn("cross-source", fakes.calls)
+        self.assertEqual(update["status"], "stopped")
+        self.assertEqual(
+            update["reason"],
+            "stopped: budget: cross-source was not started; its cap of US$0.40 with "
+            "US$1.70 spent and US$0 reserved would pass the run's ceiling of US$2.00",
+        )
+        self.assertFalse((self.out / "cross-source").exists())
+
+    def test_a_finished_attempt_is_reused_after_a_crash_and_charged_once(self):
+        fakes = Fakes()
+        state = self.state(fakes.toolkit(self.out))
+        first = cross_source_node(fakes.toolkit(self.out))(state)
+        # The process died before the step was saved; a new one runs it again.
+        again = Fakes()
+        toolkit = again.toolkit(self.out)
+        second = cross_source_node(toolkit)(state)
+        self.assertEqual(again.calls, [])
+        self.assertEqual(second["costs"], first["costs"])
+        self.assertEqual(second["artefacts"], first["artefacts"])
+        self.assertEqual(toolkit.budget.spent_usd, Decimal("0.07"))
+
+    def test_an_attempt_cut_off_is_charged_in_full_and_a_new_one_made(self):
+        fakes = Fakes()
+        state = self.state(fakes.toolkit(self.out))
+        killed = fakes.toolkit(self.out)
+        killed = replace(killed, backend=Dying(killed.backend))
+        with self.assertRaises(SystemExit):
+            cross_source_node(killed)(state)
+        toolkit = fakes.toolkit(self.out)
+        update = cross_source_node(toolkit)(state)
+        costs = [CostRecord.load(cost) for cost in update["costs"]]
+        self.assertEqual(
+            [(cost.attempt, cost.outcome, cost.charged_usd) for cost in costs],
+            [(1, "interrupted", Decimal("0.40")), (2, "success", Decimal("0.07"))],
+        )
+        self.assertEqual(update["attempts"], {"cross-source": 2})
+        # 0.40 + 0.07
+        self.assertEqual(toolkit.budget.spent_usd, Decimal("0.47"))
+
+    def test_an_edited_goal_gives_a_new_attempt(self):
+        fakes = Fakes()
+        toolkit = fakes.toolkit(self.out)
+        state = self.state(toolkit)
+        first = cross_source_node(toolkit)(state)
+        self.goal.write_text("Build orders and customers.\n")
+        state = {**state, "costs": first["costs"]}
+        second = cross_source_node(toolkit)(state)
+        self.assertEqual(fakes.calls.count("cross-source"), 2)
+        self.assertEqual(second["attempts"], {"cross-source": 2})
+        self.assertEqual([cost["attempt"] for cost in second["costs"]], [2])
