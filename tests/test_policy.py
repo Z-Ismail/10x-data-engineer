@@ -242,6 +242,39 @@ class BudgetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"reservation 1 is not open"):
             budget.settle(reservation, 0.1, True)
 
+    def test_a_restored_budget_counts_what_was_charged_before(self):
+        # A run that settled two calls, then stopped.
+        before = Budget(caps("1.50"))
+        before.settle(before.reserve("cross-source", "cross-source"), 0.0734, True)
+        before.settle(before.reserve("engineer", "engineer"), None, False)
+        # The same run resumed: its charges are put back from their records.
+        after = Budget(caps("1.50"))
+        restored = [
+            after.restore("cross-source", "cross-source", "0.40", Decimal("0.0734")),
+            after.restore("engineer", "engineer", "0.75", None),
+        ]
+        self.assertEqual([s.to_dict() for s in restored], [s.to_dict() for s in before.settlements])
+        # 0.0734 + 0.75 = 0.8234 charged; 0.8234 + 0.75 = 1.5734 > 1.50.
+        self.assertEqual(after.spent_usd, Decimal("0.8234"))
+        for budget in (before, after):
+            with self.assertRaises(BudgetStop) as stop:
+                budget.reserve("engineer", "engineer")
+            self.assertIn("US$0.8234 spent", str(stop.exception))
+        # 0.8234 + 0.40 = 1.2234 fits.
+        after.reserve("cross-source", "cross-source")
+
+    def test_restoring_keeps_an_overshoot_and_skips_the_ceiling(self):
+        budget = Budget(caps("0.50", engineer="0.40", scout="0.01"))
+        settled = budget.restore("scout a", "scout", "0.01", Decimal("0.0455485"))
+        self.assertEqual(settled.overshoot_usd, Decimal("0.0355485"))
+        # Restored past the ceiling: the call ran; only new reservations are refused.
+        budget.restore("engineer", "engineer", "0.40", Decimal("0.4623"))
+        self.assertEqual(budget.spent_usd, Decimal("0.5078485"))
+        with self.assertRaises(BudgetStop):
+            budget.reserve("scout b", "scout")
+        with self.assertRaises(ValueError):
+            budget.restore("scout c", "scout", "0.01", Decimal("-0.01"))
+
     def test_unknown_kind_is_refused_before_reserving(self):
         budget = Budget()
         with self.assertRaises(PolicyError):
