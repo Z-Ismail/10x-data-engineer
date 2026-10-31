@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph compare clean
+.PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph equivalence compare clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -35,6 +35,12 @@ engineer-graph: demo-data
 	rm -rf runs/demo-graph
 	$(PYTHON) -m tenx.run run --raw demo/data --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/demo-graph
+
+# The old runner and the graph on the eight comparison datasets, with a
+# stand-in for Claude Code that answers the same way every time: every
+# project, note, report and usage figure must be identical. No model calls.
+equivalence:
+	$(PYTHON) tests/equivalence.py
 
 # The engineer alone, without the cross-source agent. Needs Claude Code, signed in.
 engineer-alone: demo-data
