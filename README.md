@@ -115,7 +115,7 @@ if:
 | Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available: the graph run works only through them |
 | Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available: the per-call caps and the comparison approval apply to every run; the run ceiling applies to graph runs (`python -m tenx.run`) |
-| Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the build workflow runs as a graph that is saved after every step and can be resumed (`python -m tenx.run`), with the run ceiling enforced; it is being compared with the current runner before it replaces it. Approvals and the other roles come later |
+| Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the build workflow runs as a graph that is saved after every step and can be resumed (`python -m tenx.run`), with the run ceiling enforced; with a stand-in for Claude Code it leaves byte-identical projects, notes, reports and usage to the current runner's on eight demo datasets (`make equivalence`); a live comparison comes before it replaces that runner. Approvals and the other roles come later |
 | Build | Repair loop driven by the gate's report | Planned |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
 | Review | Advisory reviewer, measured on planted defects | Planned |
@@ -137,6 +137,7 @@ make demo-data  # three demo source systems with planted defects
 make test
 make engineer   # the agents build the demo project, then the gate checks it
 make engineer-graph  # the same as a graph run that can be resumed if it stops
+make equivalence     # the graph against the current runner, with a stand-in for Claude Code
 ```
 
 The demo data is a billing system, a CRM and a product event log for the

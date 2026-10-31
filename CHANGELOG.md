@@ -60,6 +60,13 @@ Notable changes to this project.
   `--policy`). A platform that cannot do a step stops the run before
   anything runs. Agent calls and gate runs each work in an attempt folder of
   their own. `make engineer` still uses the earlier runner.
+- An equivalence check, `make equivalence`: the graph run and the earlier
+  runner on the same inputs, with a stand-in for Claude Code that answers
+  the same way every time, must leave byte-identical projects, notes, agent
+  reports, usage and gate reports (`tenx/equivalence.py` maps one folder
+  layout onto the other; any file outside the map is a difference). It runs
+  on the eight comparison datasets in CI, and on six behaviours of the
+  stand-in, a resumed graph run among them, in the tests.
 
 ### Fixed
 
