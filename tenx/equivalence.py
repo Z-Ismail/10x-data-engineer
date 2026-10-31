@@ -28,6 +28,8 @@ from pathlib import Path
 
 ATTEMPT = re.compile(r"attempt-(\d+)")
 STEPS = ("cross-source", "engineer", "gate")
+# Characters shown either side of the first change in a differing line.
+CONTEXT = 30
 GRAPH_ONLY_FILES = (
     "budget.json",
     "checkpoints.sqlite",
@@ -97,7 +99,13 @@ def _first_difference(old: bytes, new: bytes) -> str:
         return f"sizes {len(old)} and {len(new)} bytes"
     for number, (left, right) in enumerate(zip(old_lines, new_lines), start=1):
         if left != right:
-            return f"line {number}: {left!r} against {right!r}"
+            # Reports are one long line, so show the text around the first change.
+            at = next(
+                i for i, pair in enumerate(zip(left + "\0", right + "\0")) if len(set(pair)) > 1
+            )
+            start = max(0, at - CONTEXT)
+            near = (left[start : at + CONTEXT], right[start : at + CONTEXT])
+            return f"line {number}, character {at + 1}: {near[0]!r} against {near[1]!r}"
     if len(old_lines) != len(new_lines):
         return f"{len(old_lines)} lines against {len(new_lines)}"
     return "line endings differ"

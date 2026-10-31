@@ -115,7 +115,7 @@ class CompareRunsTest(unittest.TestCase):
             (
                 (
                     "differs: project/models/a.sql and engineer/attempt-1/work/models/a.sql, "
-                    "line 1: 'select 1' against 'select 2'"
+                    "line 1, character 8: 'select 1' against 'select 2'"
                 ),
             ),
         )
@@ -172,9 +172,9 @@ class CompareRunsTest(unittest.TestCase):
             found.differences,
             (
                 (
-                    "differs: (gate report as printed) and gate/attempt-1/report.txt, line 1: "
-                    "'gate: FAIL (1 passed, 1 failed, 0 not run)' against "
-                    "'gate: PASS (2 passed, 0 failed, 0 not run)'"
+                    "differs: (gate report as printed) and gate/attempt-1/report.txt, "
+                    "line 1, character 7: 'gate: FAIL (1 passed, 1 failed, 0 no' against "
+                    "'gate: PASS (2 passed, 0 failed, 0 no'"
                 ),
             ),
         )
