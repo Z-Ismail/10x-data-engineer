@@ -1,14 +1,23 @@
 """The byte-for-byte comparison of an old-runner run with a graph run.
 
 The map is tested on small handmade run folders, each written as the
-runner would lay it out, with one thing changed per test.
+runner would lay it out, with one thing changed per test. Then both runners
+run on a small demo dataset with the stand-in claude of tests/equivalence.py,
+in the sandbox, skipped where bubblewrap cannot run unless
+TENX_REQUIRE_SANDBOX is set.
 """
 
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+from equivalence import DECLARATION, ROOT, SCENARIOS, run_pair
+
+from demo.generate import generate
 from tenx.equivalence import compare_runs, latest_attempts
+from tenx.sandbox import SandboxError, default_sandbox
 
 REPORT = "gate: PASS (2 passed, 0 failed, 0 not run)\n"
 
@@ -215,6 +224,82 @@ class CompareRunsTest(unittest.TestCase):
                 ),
             ),
         )
+
+
+def _sandbox_problem() -> str:
+    try:
+        default_sandbox()
+    except SandboxError as error:
+        return str(error)
+    return ""
+
+
+SANDBOX_PROBLEM = _sandbox_problem()
+
+
+@unittest.skipIf(
+    SANDBOX_PROBLEM and not os.environ.get("TENX_REQUIRE_SANDBOX"), "no working sandbox"
+)
+class ScenarioTest(unittest.TestCase):
+    """Both runners on one small demo dataset, in the sandbox, with the stand-in."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.raw = cls.root / "data"
+        generate(11, 20, cls.raw, cls.root / "answers")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def pair(self, name: str, unisolated: bool = False):
+        folder = self.root / f"{name.replace(' ', '-')}-{'unisolated' if unisolated else 'sandbox'}"
+        found = run_pair(self.raw, folder, SCENARIOS[name], unisolated)
+        self.assertTrue(found.comparison.identical, found.comparison.render())
+        return found
+
+    def record(self, report: Path) -> dict:
+        return json.loads(json.loads(report.read_text())["result"])
+
+    def usage(self, found) -> dict:
+        return json.loads((found.graph / "usage.json").read_text())
+
+    def test_a_passing_run(self):
+        found = self.pair("pass")
+        self.assertEqual(found.graph_exits, [0])
+        # Project: goal, notes, 2 dbt files, 8 profile files, 8 model files (20).
+        # Cross-source folder: goal, 8 profile files, 2 overlap files (11). profile/ (8),
+        # overlap/ (2), the add-on (4), 5 single files and the gate's file names (1).
+        self.assertEqual(len(found.comparison.compared), 20 + 11 + 8 + 2 + 4 + 5 + 1)
+        usage = self.usage(found)
+        self.assertEqual(usage["gate"], "PASS")
+        self.assertEqual([role["role"] for role in usage["roles"]], ["cross-source", "engineer"])
+        self.assertEqual(usage["sandbox"], "bubblewrap")
+        engineer = self.record(found.old / "agent.json")
+        cross_source = self.record(found.old / "cross_source.json")
+        raw = str(self.raw.resolve())
+        # The sandbox shows the raw files to the engineer only, and the add-on to both.
+        for record, sees_raw in ((engineer, True), (cross_source, False)):
+            visible = record["visible"]
+            self.assertEqual(visible[raw], sees_raw)
+            self.assertFalse(visible[str(DECLARATION)])
+            self.assertFalse(visible[str(Path(ROOT) / "README.md")])
+            plugin = [path for path in visible if path.endswith("agents/engineer.md")]
+            self.assertEqual([visible[path] for path in plugin], [True])
+            self.assertEqual(record["environment"]["CLAUDE_CODE_TOOL_MEMORY_LIMIT"], "none")
+            self.assertIsNone(record["environment"]["DBT_PROFILES_DIR"])
+        self.assertIn("JOINS.md", engineer["seen"])
+        self.assertNotIn("models/staging/stg_billing__invoices.sql", engineer["seen"])
+
+    def test_the_probe_sees_what_an_unisolated_run_shows(self):
+        # Positive control: without the sandbox the declaration is visible.
+        found = self.pair("pass", unisolated=True)
+        record = self.record(found.old / "cross_source.json")
+        self.assertTrue(record["visible"][str(DECLARATION)])
+        self.assertTrue(record["visible"][str(self.raw.resolve())])
+        self.assertEqual(self.usage(found)["sandbox"], "none")
 
 
 if __name__ == "__main__":
