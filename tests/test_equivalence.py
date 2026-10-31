@@ -301,6 +301,49 @@ class ScenarioTest(unittest.TestCase):
         self.assertTrue(record["visible"][str(self.raw.resolve())])
         self.assertEqual(self.usage(found)["sandbox"], "none")
 
+    def test_a_run_that_fails_the_gate(self):
+        found = self.pair("fail")
+        self.assertEqual(found.graph_exits, [1])
+        self.assertEqual(self.usage(found)["gate"], "FAIL")
+        report = (found.graph / "gate" / "attempt-1" / "report.txt").read_text()
+        failed = [line.split()[1:3] for line in report.splitlines() if line.startswith("FAIL")]
+        self.assertEqual(
+            failed, [["rows", "stg_billing__invoices"], ["total", "stg_billing__invoices"]]
+        )
+
+    def test_an_answer_that_fails_its_check(self):
+        found = self.pair("no notes")
+        self.assertEqual(found.graph_exits, [0])
+        self.assertFalse((found.old / "project" / "JOINS.md").exists())
+        self.assertNotIn("JOINS.md", self.record(found.old / "agent.json")["seen"])
+
+    def test_an_engineer_with_no_report(self):
+        found = self.pair("no report")
+        self.assertEqual(found.graph_exits, [1])
+        usage = self.usage(found)
+        self.assertEqual(usage["gate"], "FAIL")
+        self.assertEqual(
+            [(role["role"], role["outcome"]) for role in usage["roles"]],
+            [("cross-source", "success"), ("engineer", "no report")],
+        )
+
+    def test_the_engineer_alone(self):
+        found = self.pair("engineer alone")
+        self.assertEqual(found.graph_exits, [0])
+        self.assertEqual([role["role"] for role in self.usage(found)["roles"]], ["engineer"])
+        self.assertFalse((found.old / "cross_source").exists())
+        self.assertFalse((found.graph / "cross-source").exists())
+
+    def test_a_graph_killed_in_the_engineer_and_resumed(self):
+        # Against an old run that was never interrupted.
+        found = self.pair("resumed")
+        self.assertEqual(found.graph_exits, [-9, 0])
+        earlier = [name for name in found.comparison.graph_only if "engineer/attempt-1/" in name]
+        self.assertIn("engineer/attempt-1/work/HANGING", earlier)
+        spending = json.loads((found.graph / "budget.json").read_text())
+        # 0.1204 measured, the killed call's whole 0.75, then 0.0812 measured.
+        self.assertEqual(spending["spent_usd"], "0.9516")
+
 
 if __name__ == "__main__":
     unittest.main()
