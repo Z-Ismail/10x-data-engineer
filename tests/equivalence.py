@@ -274,8 +274,10 @@ def main(argv: list[str] | None = None) -> int:
                 for name in args.scenarios:
                     root = Path(tmp) / f"{seed}-{size}-{name.replace(' ', '-')}"
                     pair = run_pair(data / "raw", root, SCENARIOS[name], args.unisolated)
+                    usage = json.loads((pair.graph / "usage.json").read_text(encoding="utf-8"))
                     verdict = pair.comparison.render()
-                    print(f"seed {seed}, {size} companies, {name}: {verdict}", end="")
+                    where = f"seed {seed}, {size} companies, {name} (gate {usage['gate']})"
+                    print(f"{where}: {verdict}", end="")
                     different += not pair.comparison.identical
                     shutil.rmtree(root)
     print(f"{different} of {len(args.seeds) * len(args.sizes) * len(args.scenarios)} differ")
