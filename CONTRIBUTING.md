@@ -25,6 +25,11 @@ demo data, install Claude Code, sign in and run `make engineer`,
 `make engineer-alone` or `make engineer-scouts`. `make compare` runs
 all of them 128 times and takes one to two hours.
 
+`make equivalence` runs the graph run and the earlier runner on the eight
+comparison datasets with a stand-in for Claude Code, and fails if what they
+leave behind differs by a byte; it takes about seven minutes and needs
+bubblewrap.
+
 ## Guidelines
 
 - One logical change per commit, with its tests.
@@ -46,4 +51,4 @@ all of them 128 times and takes one to two hours.
 | `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the spec contract's check, the run artefacts, the spending policy, and the capability interfaces |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/`, `tenx/run.py` | The graph run: its steps, state and checkpoints, and its command line |
-| `tests/` | Tests, and the dbt project the gate is tested against |
+| `tests/` | Tests, the dbt project the gate is tested against, and the equivalence check (`tests/equivalence.py`) |

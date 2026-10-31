@@ -16,6 +16,7 @@ make engineer    # the cross-source agent, then the engineer builds the demo pro
 make engineer-alone    # the same without the cross-source agent
 make engineer-scouts   # the same as make engineer, with a scout for each raw table first
 make engineer-graph    # the same as make engineer, as a graph that can be resumed
+make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
 make compare     # runs the engineer with and without the other agents, 128 runs;
                  # needs COMPARE_FLAGS=--approve-cost (estimated above US$5)
 ```
@@ -825,6 +826,64 @@ started (bubblewrap's `--die-with-parent`). A run started with
 `--unisolated` and then killed leaves its agent running until the agent
 finishes, and that agent's cost is not known to the run.
 
+### Equivalence with the earlier runner
+
+```
+make equivalence
+python tests/equivalence.py --seeds 42 --sizes 200 --scenarios pass fail resumed
+```
+
+Before the graph replaces `tenx.engineer`, it must behave exactly like it.
+`make equivalence` runs both on the same inputs with a stand-in for Claude
+Code that answers the same way every time (no model calls, no cost), then
+compares what each left behind, byte for byte (`tenx/equivalence.py`):
+
+| Earlier runner | Graph run |
+| --- | --- |
+| `project/` | `engineer/attempt-<n>/work/` |
+| `cross_source/` | `cross-source/attempt-<n>/work/` |
+| `project/source_profiles/` | `profile/` |
+| the overlap files in `cross_source/source_profiles/` | `overlap/` |
+| `project/JOINS.md` | `cross-source/attempt-<n>/JOINS.md` |
+| `agent.json`, `cross_source.json` | each attempt's `agent.json` |
+| `plugin/`, `usage.json` | `plugin/`, `usage.json` |
+| the gate's report, as printed | `gate/attempt-<n>/report.txt` |
+| `gate/` (file names only) | `gate/attempt-<n>/work/` (file names only) |
+
+`budget.json`, the checkpoints, the attempt manifests and, after a resume,
+the earlier attempts belong to the graph alone. Any other file, in either
+run, counts as a difference. The gate's working folders are compared by
+name only, since their databases and dbt logs differ between any two
+builds. The stand-in also writes into its report the command it was given,
+a hash of every file in its folder when it started, the environment
+variables the runner set, and which of a few paths it could see, so the two
+reports differ if the command, the agent's starting folder or the sandbox
+differ. Both runs use the same output folder in turn, so paths written into
+the artefacts match too.
+
+By default it runs the eight comparison datasets (seeds 1, 7, 42 and 2026
+at 200 and 1,000 companies) with two behaviours of the stand-in: the
+reference models (gate PASS) and models that keep test-mode invoices (gate
+FAIL). The other behaviours are an answer from the cross-source agent that
+fails its check, an engineer that leaves no report, the engineer alone, and
+a graph run killed during the engineer's call and resumed, compared with an
+earlier-runner run that was never stopped; the tests run all six on a small
+dataset. The exit status is 1 if any pair differs. On 2026-10-31 (the
+output below shortened):
+
+```
+$ make equivalence
+seed 1, 200 companies, pass (gate PASS): identical: 51 files compared, 5 graph only
+seed 1, 200 companies, fail (gate FAIL): identical: 51 files compared, 5 graph only
+...
+seed 2026, 1000 companies, fail (gate FAIL): identical: 51 files compared, 5 graph only
+0 of 16 differ
+```
+
+It shows that the graph changed how a run is carried out, not what it
+produces. Whether real agents do as well in the graph will be measured
+separately, with live runs.
+
 ## Run records and graph state
 
 The graph run (above) saves its state after every step, so that a
@@ -875,5 +934,5 @@ construct objects of any class a checkpoint file names.
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |
-| `tests/` | Tests, and the dbt project the gate is tested against |
+| `tests/` | Tests, the dbt project the gate is tested against, and the equivalence check (`tests/equivalence.py`) |
 
