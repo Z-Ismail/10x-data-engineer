@@ -47,7 +47,7 @@ from decimal import Decimal
 from math import comb, exp, lgamma, log
 from pathlib import Path
 
-from tenx import artefacts
+from tenx import artefacts, parity
 from tenx.engineer import EngineerError
 from tenx.engineer import run as engineer_run
 from tenx.gate import GateError, load_declaration
@@ -482,10 +482,210 @@ def _table(header: list[str], rows: list[list[str]], left: int) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class PairedSummary:
+    """The paired verdicts, the pass-rate difference and the cost of each runner."""
+
+    datasets: list[str]
+    trials: int
+    pairs: parity.Pairs
+    interval: tuple[float, float] | None
+    verdict: str
+    cost_per_pass: dict[str, float | None]
+    cost_interval: tuple[float, float] | None
+    cost_verdict: str
+    parity: str
+    by_dataset: dict[str, parity.Pairs]
+    left_out: tuple[str, ...]
+    planned: int
+
+    def to_dict(self) -> dict:
+        def counts(pairs: parity.Pairs) -> dict:
+            return {
+                "both_pass": pairs.both,
+                "only_default_passes": pairs.first_only,
+                "only_graph_passes": pairs.second_only,
+                "neither_passes": pairs.neither,
+            }
+
+        n = self.pairs.n
+
+        def finite(value: float | None) -> float | str | None:
+            return "infinity" if value == float("inf") else value
+
+        return {
+            "mode": PAIRED,
+            "datasets": self.datasets,
+            "trials": self.trials,
+            "planned_pairs": self.planned,
+            "pairs": counts(self.pairs),
+            "pass_rate": {
+                "default": (self.pairs.both + self.pairs.first_only) / n if n else None,
+                "graph": (self.pairs.both + self.pairs.second_only) / n if n else None,
+            },
+            "difference": self.pairs.difference if n else None,
+            "interval_95": list(self.interval) if self.interval else None,
+            "margin": parity.MARGIN,
+            "verdict": self.verdict,
+            "cost_per_pass_usd": {k: finite(v) for k, v in self.cost_per_pass.items()},
+            "cost_ratio_interval_95": (
+                [finite(v) for v in self.cost_interval] if self.cost_interval else None
+            ),
+            "cost_limit": parity.COST_LIMIT,
+            "cost_verdict": self.cost_verdict,
+            "parity": self.parity,
+            "by_dataset": {name: counts(pairs) for name, pairs in self.by_dataset.items()},
+            "pairs_left_out": list(self.left_out),
+        }
+
+
+def _count(pairs: list[tuple[Outcome, Outcome]]) -> parity.Pairs:
+    verdicts = [(d.gate == "PASS", g.gate == "PASS") for d, g in pairs]
+    return parity.Pairs(
+        both=verdicts.count((True, True)),
+        first_only=verdicts.count((True, False)),
+        second_only=verdicts.count((False, True)),
+        neither=verdicts.count((False, False)),
+    )
+
+
+def summarise_paired(out: Path) -> PairedSummary:
+    """Count the pairs where both runs have a verdict, and compare the runners on them."""
+    document, order = read_plan(out)
+    found = {(t.dataset, t.trial, t.arm): outcome(out, t) for t in order}
+    keys = sorted({(t.dataset, t.trial) for t in order}, key=lambda k: (k[1], k[0]))
+    counted, left_out = [], []
+    for dataset, trial in keys:
+        first, second = (found[(dataset, trial, arm)] for arm in PAIRED_ARMS)
+        if first.gate is None or second.gate is None:
+            left_out.append(f"{dataset}/{trial}")
+        else:
+            counted.append((first, second))
+    pairs = _count(counted)
+    low_high = parity.interval(pairs) if counted else None
+    verdict = parity.verdict(*low_high) if low_high else "no pairs"
+    costs = [
+        parity.PairCost(d.gate == "PASS", d.cost_usd, g.gate == "PASS", g.cost_usd)
+        for d, g in counted
+    ]
+    known = bool(costs) and all(c.first_usd is not None and c.second_usd is not None for c in costs)
+    per_pass = {arm: None for arm in PAIRED_ARMS}
+    cost_low_high = None
+    cost_verdict = parity.UNKNOWN
+    if known:
+        per_pass = {
+            "default": parity.cost_per_pass(
+                [c.first_usd for c in costs], pairs.both + pairs.first_only
+            ),
+            "graph": parity.cost_per_pass(
+                [c.second_usd for c in costs], pairs.both + pairs.second_only
+            ),
+        }
+        cost_low_high = parity.cost_interval(costs, seed=document.get("seed", 0))
+        cost_verdict = parity.cost_verdict(*cost_low_high)
+    datasets = document["datasets"]
+    return PairedSummary(
+        datasets=datasets,
+        trials=document["trials"],
+        pairs=pairs,
+        interval=low_high,
+        verdict=verdict,
+        cost_per_pass=per_pass,
+        cost_interval=cost_low_high,
+        cost_verdict=cost_verdict,
+        parity=parity.parity(verdict, cost_verdict) if low_high else "no pairs",
+        by_dataset={
+            name: _count([(d, g) for d, g in counted if d.trial.dataset == name])
+            for name in datasets
+        },
+        left_out=tuple(left_out),
+        planned=len(keys),
+    )
+
+
+def _points(value: float) -> str:
+    return f"{100 * value:+.1f}"
+
+
+def _ratio(value: float) -> str:
+    return "infinite" if value == float("inf") else f"{value:.3f}"
+
+
+def render_paired(summary: PairedSummary) -> str:
+    """The paired comparison as plain text."""
+    pairs = summary.pairs
+    trials = f"{summary.trials} trial{'s' if summary.trials != 1 else ''}"
+    lines = [
+        (
+            f"paired comparison: {len(summary.datasets)} datasets, {trials} each, "
+            f"{pairs.n} of {summary.planned} pairs have both gate verdicts"
+        ),
+        (
+            "difference = default's pass rate minus graph's; the graph is non-inferior "
+            f"when the 95% interval lies below +{100 * parity.MARGIN:.0f} points"
+        ),
+        "",
+    ]
+    if not pairs.n:
+        return "\n".join(lines + ["no pairs to compare yet"]) + "\n"
+    rows = [
+        ["both pass", str(pairs.both)],
+        ["only default passes", str(pairs.first_only)],
+        ["only graph passes", str(pairs.second_only)],
+        ["neither passes", str(pairs.neither)],
+    ]
+    lines += _table(["pairs", "count"], rows, left=1)
+    low, high = summary.interval
+    default_rate = (pairs.both + pairs.first_only) / pairs.n
+    graph_rate = (pairs.both + pairs.second_only) / pairs.n
+    lines += [
+        "",
+        f"pass rate: default {_percent(default_rate)}, graph {_percent(graph_rate)}",
+        (
+            f"difference: {_points(pairs.difference)} points, 95% interval (Tango) "
+            f"{_points(low)} to {_points(high)}"
+        ),
+        f"pass rate verdict: {summary.verdict}",
+    ]
+    if summary.verdict == parity.NON_INFERIOR and low > 0:
+        lines.append("  (the graph's pass rate is lower, by less than the margin)")
+    cost = summary.cost_per_pass
+    lines.append("")
+    if summary.cost_interval is None:
+        lines.append("cost per pass: unknown (a counted run's cost was not reported)")
+    else:
+        cost_low, cost_high = summary.cost_interval
+        shown = {arm: "-" if v == float("inf") else _money(v) for arm, v in cost.items()}
+        lines += [
+            f"US$ per pass: default {shown['default']}, graph {shown['graph']}",
+            (
+                "graph / default: 95% interval (bootstrap over pairs) "
+                f"{_ratio(cost_low)} to {_ratio(cost_high)}; limit {parity.COST_LIMIT:.2f}"
+            ),
+        ]
+    lines += [f"cost verdict: {summary.cost_verdict}", "", f"parity: {summary.parity}"]
+    lines += ["", "pairs by dataset (both, only default, only graph, neither)", ""]
+    rows = [
+        [name, *(str(v) for v in (p.both, p.first_only, p.second_only, p.neither))]
+        for name, p in summary.by_dataset.items()
+    ]
+    lines += _table(["dataset", "both", "default", "graph", "neither"], rows, left=1)
+    if summary.left_out:
+        lines += ["", "pairs without both gate verdicts, not counted:"]
+        lines += [f"  {name}" for name in summary.left_out]
+    lines += ["", "cost is Claude Code's own estimate, not a bill"]
+    return "\n".join(lines) + "\n"
+
+
 def report(out: Path) -> str:
     """Summarise the comparison in out, and write it there as text and JSON."""
-    summary = summarise(out)
-    text = render(summary)
+    document, _ = read_plan(out)
+    if document.get("mode") == PAIRED:
+        summary = summarise_paired(out)
+        text = render_paired(summary)
+    else:
+        summary = summarise(out)
+        text = render(summary)
     artefacts.write_text(Path(out) / REPORT_TEXT, text)
     artefacts.write_text(Path(out) / REPORT_JSON, json.dumps(summary.to_dict(), indent=2) + "\n")
     return text
