@@ -11,7 +11,15 @@ same figures.
 
     python -m tenx.compare run --raw NAME=FOLDER [--raw NAME=FOLDER ...]
         --goal <file> --checks <file> --out <folder> [--trials 4] [--parallel 3]
+    python -m tenx.compare paired --raw NAME=FOLDER [--raw NAME=FOLDER ...]
+        --goal <file> --checks <file> --out <folder> [--trials 8] [--parallel 3]
     python -m tenx.compare report <folder>
+
+``paired`` compares two runners rather than arms: today's runner and the
+same run as a graph, each with the cross-source agent, on the same datasets
+and trials, the two runs of a pair next to each other. The pairs are
+compared by Tango's interval on the difference in pass rates against a
+10-point margin fixed in advance, and by the cost per pass (tenx.parity).
 
 Each run is an ordinary engineer run, in its own folder:
 
@@ -775,6 +783,50 @@ def _start(
     return order
 
 
+def _check_inputs(datasets: dict[str, Path], goal: Path, checks: Path, parallel: int) -> None:
+    if not isinstance(parallel, int) or isinstance(parallel, bool) or parallel < 1:
+        raise ValueError(f"parallel must be a whole number of at least 1, not {parallel!r}")
+    for name, folder in datasets.items():
+        if not Path(folder).is_dir():
+            raise ValueError(f"the raw folder for {name}, {folder}, is not a folder")
+    if not Path(goal).is_file():
+        raise ValueError(f"the goal {goal} is not a file")
+    load_declaration(checks)
+
+
+def _execute(out: Path, order: list[Trial], call, parallel: int, progress) -> None:
+    """Run every planned run without a verdict, at most `parallel` at a time.
+
+    `call(trial, folder)` makes one run in an empty folder; an error is
+    reported and the run left without a verdict.
+    """
+    pending = [trial for trial in order if outcome(out, trial).gate is None]
+    lock = threading.Lock()
+    finished = [len(order) - len(pending)]
+
+    def one(trial: Trial) -> None:
+        folder = out / RUNS_DIR / trial.folder
+        if folder.exists():
+            shutil.rmtree(folder)
+        try:
+            call(trial, folder)
+            gate = outcome(out, trial).gate
+            note = f"gate {gate}" if gate else "no gate verdict"
+        except (ArmError, EngineerError, GateError, OSError) as error:
+            note = f"error: {error}"
+        with lock:
+            finished[0] += 1
+            progress(f"[{finished[0]}/{len(order)}] {trial.folder}: {note}")
+
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        for future in [pool.submit(one, trial) for trial in pending]:
+            future.result()
+
+
+class ArmError(Exception):
+    """A run of one arm of a paired comparison stopped with an error."""
+
+
 def run_comparison(
     datasets: dict[str, Path],
     goal: Path,
@@ -800,14 +852,7 @@ def run_comparison(
     is written or run unless `approve_cost` is true.
     """
     runner = runner or engineer_run
-    if not isinstance(parallel, int) or isinstance(parallel, bool) or parallel < 1:
-        raise ValueError(f"parallel must be a whole number of at least 1, not {parallel!r}")
-    for name, folder in datasets.items():
-        if not Path(folder).is_dir():
-            raise ValueError(f"the raw folder for {name}, {folder}, is not a folder")
-    if not Path(goal).is_file():
-        raise ValueError(f"the goal {goal} is not a file")
-    load_declaration(checks)
+    _check_inputs(datasets, goal, checks, parallel)
     out = Path(out)
     rules = Policy()
     tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
@@ -820,36 +865,87 @@ def run_comparison(
         )
     progress(cost.describe())
     order = _start(out, list(datasets), arms, trials, seed)
-    pending = [trial for trial in order if outcome(out, trial).gate is None]
-    lock = threading.Lock()
-    finished = [len(order) - len(pending)]
 
-    def one(trial: Trial) -> None:
-        folder = out / RUNS_DIR / trial.folder
-        if folder.exists():
-            shutil.rmtree(folder)
+    def call(trial: Trial, folder: Path) -> None:
         scouts, cross_source = ARMS[trial.arm]
-        try:
-            runner(
-                datasets[trial.dataset],
-                goal,
-                checks,
-                folder,
-                claude=claude,
-                scouts=scouts,
-                cross_source=cross_source,
-            )
-            gate = outcome(out, trial).gate
-            note = f"gate {gate}" if gate else "no gate verdict"
-        except (EngineerError, GateError, OSError) as error:
-            note = f"error: {error}"
-        with lock:
-            finished[0] += 1
-            progress(f"[{finished[0]}/{len(order)}] {trial.folder}: {note}")
+        runner(
+            datasets[trial.dataset],
+            goal,
+            checks,
+            folder,
+            claude=claude,
+            scouts=scouts,
+            cross_source=cross_source,
+        )
 
-    with ThreadPoolExecutor(max_workers=parallel) as pool:
-        for future in [pool.submit(one, trial) for trial in pending]:
-            future.result()
+    _execute(out, order, call, parallel, progress)
+    return report(out)
+
+
+def run_default(raw: Path, goal: Path, checks: Path, out: Path, claude: str) -> None:
+    """Today's runner with the cross-source agent, as make engineer runs it."""
+    engineer_run(raw, goal, checks, out, claude=claude, cross_source=True)
+
+
+def run_graph(raw: Path, goal: Path, checks: Path, out: Path, claude: str) -> None:
+    """The same run as a graph. Imported here, so other modes do not need the graph extra."""
+    from tenx.policy import PolicyError
+    from tenx.ports import PlatformError
+    from tenx.run import RunError, start
+    from tenx.sandbox import SandboxError
+
+    try:
+        start(raw, goal, checks, out, cross_source=True, claude=claude)
+    except (RunError, PlatformError, SandboxError, PolicyError) as error:
+        raise ArmError(str(error)) from error
+
+
+PAIRED_RUNNERS = {"default": run_default, "graph": run_graph}
+
+
+def run_paired(
+    datasets: dict[str, Path],
+    goal: Path,
+    checks: Path,
+    out: Path,
+    trials: int = 8,
+    seed: int = 0,
+    parallel: int = 3,
+    claude: str = "claude",
+    runners: dict | None = None,
+    progress=print,
+    approve_cost: bool = False,
+) -> str:
+    """Run the default runner and the graph on every dataset, trials times, then report.
+
+    Each pair's two runs are next to each other in the order. A run that
+    cannot start, or stops with an error, is reported and left without a
+    verdict, and its pair is not counted; the comparison carries on and a
+    second start runs it again. `runners` stands in for the two runners in
+    tests. Priced first; above the policy's limit nothing is written or run
+    unless `approve_cost` is true.
+    """
+    runners = runners or PAIRED_RUNNERS
+    if set(runners) != set(PAIRED_ARMS):
+        raise ValueError(f"a runner is needed for each of {', '.join(PAIRED_ARMS)}")
+    _check_inputs(datasets, goal, checks, parallel)
+    out = Path(out)
+    rules = Policy()
+    tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
+    order = _order(out, list(datasets), PAIRED_ARMS, trials, seed, PAIRED)
+    cost = estimate([t for t in order if outcome(out, t).gate is None], tables, rules)
+    if cost.typical_usd > rules.approve_above_usd and not approve_cost:
+        raise CostNotApproved(
+            f"{cost.describe()}; above US${rules.approve_above_usd}, so it needs approval: "
+            "run it again with --approve-cost to go ahead"
+        )
+    progress(cost.describe())
+    order = _start(out, list(datasets), PAIRED_ARMS, trials, seed, PAIRED)
+
+    def call(trial: Trial, folder: Path) -> None:
+        runners[trial.arm](datasets[trial.dataset], goal, checks, folder, claude)
+
+    _execute(out, order, call, parallel, progress)
     return report(out)
 
 
@@ -888,6 +984,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run even when the comparison is estimated above US$5",
     )
+    paired = commands.add_parser(
+        "paired",
+        help="run the default runner and the graph on the same datasets, or resume, then report",
+    )
+    paired.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; give one --raw per dataset",
+    )
+    paired.add_argument("--goal", type=Path, required=True, help="what to build, in plain English")
+    paired.add_argument(
+        "--checks", type=Path, required=True, help="the gate's JSON declaration of what to expect"
+    )
+    paired.add_argument("--out", type=Path, required=True, help="folder for the comparison")
+    paired.add_argument("--trials", type=int, default=8, help="pairs on each dataset")
+    paired.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
+    paired.add_argument("--parallel", type=int, default=3, help="runs at the same time")
+    paired.add_argument(
+        "--approve-cost",
+        action="store_true",
+        help="run even when the comparison is estimated above US$5",
+    )
     show = commands.add_parser("report", help="report a comparison from its runs so far")
     show.add_argument("out", type=Path, help="the comparison's folder")
     args = parser.parse_args(argv)
@@ -898,17 +1019,29 @@ def main(argv: list[str] | None = None) -> int:
         datasets = dict(args.raw)
         if len(datasets) != len(args.raw):
             raise ValueError("each dataset may be named only once")
-        text = run_comparison(
-            datasets,
-            args.goal,
-            args.checks,
-            args.out,
-            arms=args.arms,
-            trials=args.trials,
-            seed=args.seed,
-            parallel=args.parallel,
-            approve_cost=args.approve_cost,
-        )
+        if args.command == "paired":
+            text = run_paired(
+                datasets,
+                args.goal,
+                args.checks,
+                args.out,
+                trials=args.trials,
+                seed=args.seed,
+                parallel=args.parallel,
+                approve_cost=args.approve_cost,
+            )
+        else:
+            text = run_comparison(
+                datasets,
+                args.goal,
+                args.checks,
+                args.out,
+                arms=args.arms,
+                trials=args.trials,
+                seed=args.seed,
+                parallel=args.parallel,
+                approve_cost=args.approve_cost,
+            )
     except (ValueError, EngineerError, GateError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

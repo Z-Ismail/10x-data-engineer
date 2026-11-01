@@ -1,10 +1,14 @@
 """Tests for the paired comparison of the default runner and the graph."""
 
+import io
 import json
 import tempfile
+import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 from tenx import parity
 from tenx.compare import (
@@ -14,21 +18,31 @@ from tenx.compare import (
     REPORT_JSON,
     REPORT_TEXT,
     RUNS_DIR,
+    ArmError,
+    CostNotApproved,
     PairedSummary,
     Trial,
     agent_calls,
     estimate,
+    main,
     paired_plan,
     read_plan,
     render_paired,
     report,
+    run_default,
+    run_graph,
+    run_paired,
     summarise_paired,
     write_plan,
 )
+from tenx.engineer import EngineerError
 from tenx.parity import PairCost, Pairs
 from tenx.policy import CROSS_SOURCE, ENGINEER, Policy
 
 DATASETS = ["s1-200", "s7-1000", "s42-200"]
+ROOT = Path(__file__).resolve().parent.parent
+DECLARATION = ROOT / "tests" / "fixtures" / "demo_gate.json"
+GOAL = ROOT / "demo" / "goal.md"
 
 
 class PairedPlanTest(unittest.TestCase):
@@ -232,6 +246,167 @@ cost is Claude Code's own estimate, not a bill
         text = render_paired(summary)
         self.assertIn("pass rate verdict: non-inferior\n  (the graph's pass rate is lower", text)
         self.assertIn("parity: non-inferior", text)
+
+
+class FakeRunner:
+    """Stands in for one runner: records its calls and leaves the verdict `gates` names.
+
+    "error" raises the runner's error, "none" leaves no usage.json.
+    """
+
+    def __init__(self, arm: str, calls: list, gates=None):
+        self.arm, self.calls, self.gates = arm, calls, gates or {}
+        self.lock = threading.Lock()
+
+    def __call__(self, raw, goal, checks, out, claude):
+        with self.lock:
+            self.calls.append((self.arm, Path(out), Path(raw), claude))
+        dataset, _, trial = Path(out).parts[-3:]
+        gate = self.gates.get(f"{dataset}/{trial}", "PASS")
+        Path(out).mkdir(parents=True)
+        if gate == "error":
+            raise ArmError("the run stopped") if self.arm == "graph" else EngineerError("no claude")
+        if gate != "none":
+            (Path(out) / "usage.json").write_text(
+                json.dumps({"gate": gate, "roles": [{"cost_usd": 0.2, "cost_known": True}]}),
+                encoding="utf-8",
+            )
+
+
+class RunPairedTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.out = root / "paired"
+        self.datasets = {}
+        for name in ("s1-200", "s7-1000"):
+            folder = root / "data" / name
+            folder.mkdir(parents=True)
+            for number in range(4):
+                (folder / f"table_{number}.csv").write_text("id\n1\n", encoding="utf-8")
+            self.datasets[name] = folder
+        self.lines = []
+        self.calls = []
+
+    def runners(self, default=None, graph=None):
+        return {
+            "default": FakeRunner("default", self.calls, default),
+            "graph": FakeRunner("graph", self.calls, graph),
+        }
+
+    def paired(self, runners, **options):
+        options.setdefault("trials", 2)
+        return run_paired(
+            self.datasets,
+            GOAL,
+            DECLARATION,
+            self.out,
+            runners=runners,
+            progress=self.lines.append,
+            claude="my-claude",
+            **options,
+        )
+
+    def test_runs_both_runners_on_every_pair_in_the_planned_order(self):
+        text = self.paired(self.runners(graph={"s7-1000/2": "FAIL"}), parallel=1)
+        order = paired_plan(list(self.datasets), 2)
+        expected = [
+            (t.arm, self.out / RUNS_DIR / t.folder, self.datasets[t.dataset], "my-claude")
+            for t in order
+        ]
+        self.assertEqual(self.calls, expected)
+        self.assertIn("4 of 4 pairs have both gate verdicts", text)
+        self.assertEqual(summarise_paired(self.out).pairs, Pairs(3, 1, 0, 0))
+        self.assertEqual(self.lines[0][:41], "8 runs to do, estimated at US$2.24, at mo")
+        self.assertEqual(len(self.lines), 9)
+
+    def test_errors_leave_their_pair_out_and_a_second_start_runs_them_again(self):
+        self.paired(self.runners(default={"s1-200/1": "error"}, graph={"s7-1000/2": "none"}))
+        summary = summarise_paired(self.out)
+        self.assertEqual(summary.left_out, ("s1-200/1", "s7-1000/2"))
+        self.assertTrue(any("s1-200/default/1: error: no claude" in line for line in self.lines))
+        self.assertTrue(any("s7-1000/graph/2: no gate verdict" in line for line in self.lines))
+        self.calls.clear()
+        self.paired(self.runners())
+        rerun = sorted((arm, out.relative_to(self.out / RUNS_DIR)) for arm, out, _, _ in self.calls)
+        self.assertEqual(
+            rerun, [("default", Path("s1-200/default/1")), ("graph", Path("s7-1000/graph/2"))]
+        )
+        self.assertEqual(summarise_paired(self.out).pairs, Pairs(4, 0, 0, 0))
+
+    def test_a_graph_error_is_reported(self):
+        self.paired(self.runners(graph={"s1-200/1": "error"}))
+        self.assertTrue(
+            any("s1-200/graph/1: error: the run stopped" in line for line in self.lines)
+        )
+
+    def test_refuses_an_arm_comparison_folder_and_missing_runners(self):
+        self.out.mkdir()
+        write_plan(self.out, list(self.datasets), ["alone"], 2, 0)
+        with self.assertRaisesRegex(ValueError, "another kind"):
+            self.paired(self.runners())
+        with self.assertRaisesRegex(ValueError, "a runner is needed"):
+            self.paired({"default": FakeRunner("default", self.calls)})
+        self.assertEqual(self.calls, [])
+
+    def test_an_expensive_comparison_is_refused_before_anything_starts(self):
+        # 2 datasets x 5 trials x 2 runners = 20 runs at US$0.28 = US$5.60.
+        with self.assertRaises(CostNotApproved) as refusal:
+            self.paired(self.runners(), trials=5)
+        self.assertTrue(str(refusal.exception).startswith("20 runs to do, estimated at US$5.60,"))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.out.exists())
+        self.paired(self.runners(), trials=5, approve_cost=True)
+        self.assertEqual(len(self.calls), 20)
+
+    def test_command_line(self):
+        argv = ["paired", "--goal", str(GOAL), "--checks", str(DECLARATION)]
+        for name, folder in self.datasets.items():
+            argv += ["--raw", f"{name}={folder}"]
+        argv += ["--out", str(self.out)]
+        with (
+            mock.patch.dict("tenx.compare.PAIRED_RUNNERS", self.runners()),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(main(argv), 2)  # 8 trials by default: 32 runs, US$8.96
+        self.assertIn("32 runs to do, estimated at US$8.96", errors.getvalue())
+        self.assertEqual(self.calls, [])
+        with (
+            mock.patch.dict("tenx.compare.PAIRED_RUNNERS", self.runners()),
+            redirect_stdout(io.StringIO()) as printed,
+        ):
+            self.assertEqual(main([*argv, "--approve-cost"]), 0)
+        self.assertEqual(len(self.calls), 32)
+        text = (self.out / REPORT_TEXT).read_text(encoding="utf-8")
+        self.assertTrue(printed.getvalue().endswith("\n" + text))
+        self.assertIn("parity: inconclusive", text)  # 16 pairs cannot show a 10-point margin
+        with redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(main(["report", str(self.out)]), 0)
+        self.assertEqual(printed.getvalue(), text)
+
+
+class RunnersTest(unittest.TestCase):
+    def test_the_default_runner_runs_the_cross_source_agent(self):
+        with mock.patch("tenx.compare.engineer_run") as engineer:
+            run_default(Path("raw"), Path("goal"), Path("checks"), Path("out"), "c")
+        engineer.assert_called_once_with(
+            Path("raw"), Path("goal"), Path("checks"), Path("out"), claude="c", cross_source=True
+        )
+
+    def test_the_graph_runner_runs_the_cross_source_agent(self):
+        with mock.patch("tenx.run.start") as start:
+            run_graph(Path("raw"), Path("goal"), Path("checks"), Path("out"), "c")
+        start.assert_called_once_with(
+            Path("raw"), Path("goal"), Path("checks"), Path("out"), cross_source=True, claude="c"
+        )
+
+    def test_the_graph_runners_refusal_becomes_an_arm_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "something").write_text("x", encoding="utf-8")
+            with self.assertRaisesRegex(ArmError, "must be empty"):
+                run_graph(ROOT / "demo", GOAL, DECLARATION, Path(folder), "claude")
 
 
 if __name__ == "__main__":
