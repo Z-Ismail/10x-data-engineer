@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -22,8 +23,11 @@ from tenx.compare import (
     REPORT_JSON,
     REPORT_TEXT,
     RUNS_DIR,
+    CostNotApproved,
     Tally,
     Trial,
+    agent_calls,
+    estimate,
     interval,
     main,
     plan,
@@ -35,6 +39,7 @@ from tenx.compare import (
     write_plan,
 )
 from tenx.engineer import EngineerError
+from tenx.policy import Policy
 
 
 def beta_pdf(x: float, a: int, b: int) -> float:
@@ -517,7 +522,12 @@ class RunComparisonTest(ComparisonFolders):
         self.assertIn("comparison: 2 datasets, 2 trials each, 16 of 16 runs", text)
         self.assertIn("alone         baseline      4       3   75%", text)
         self.assertEqual((self.out / "comparison.txt").read_text(encoding="utf-8"), text)
-        self.assertEqual(len(self.lines), 16)
+        self.assertEqual(len(self.lines), 17)
+        self.assertEqual(
+            self.lines[0],
+            "16 runs to do, estimated at US$3.84, at most US$15.20 at each agent "
+            "call's cap (Claude Code's own estimates)",
+        )
         self.assertIn("s1-200/alone/1: gate FAIL", "\n".join(self.lines))
         self.assertTrue(self.lines[-1].startswith("[16/16] "), self.lines[-1])
 
@@ -578,7 +588,130 @@ class RunComparisonTest(ComparisonFolders):
         self.assertFalse(self.out.exists())
 
 
+class EstimateTest(unittest.TestCase):
+    def test_the_calls_each_arm_makes(self):
+        self.assertEqual(agent_calls("alone", 4), ["engineer"])
+        self.assertEqual(agent_calls("scouts", 2), ["scout", "scout", "engineer"])
+        self.assertEqual(agent_calls("cross-source", 4), ["cross-source", "engineer"])
+        self.assertEqual(agent_calls("both", 1), ["scout", "cross-source", "engineer"])
+        self.assertEqual(agent_calls("both", 0), ["cross-source", "engineer"])
+
+    def test_figures_worked_out_by_hand(self):
+        # Typical per run with t tables: alone 0.20, scouts 0.20 + 0.02t,
+        # cross-source 0.28, both 0.28 + 0.02t; at the caps: alone 0.75,
+        # scouts 0.75 + 0.10t, cross-source 1.15, both 1.15 + 0.10t.
+        order = plan(["a", "b"], list(ARMS), 1)
+        cost = estimate(order, {"a": 4, "b": 3}, Policy())
+        self.assertEqual(cost.runs, 8)
+        self.assertEqual(cost.typical_usd, Decimal("2.20"))  # 1.12 + 1.08
+        self.assertEqual(cost.ceiling_usd, Decimal("9.00"))  # 4.60 + 4.40
+
+    def test_the_demo_comparison(self):
+        # Eight datasets of four tables, four trials of every arm: 128 runs.
+        names = [f"s{seed}-{size}" for seed in (1, 7, 42, 2026) for size in (200, 1000)]
+        cost = estimate(plan(names, list(ARMS), 4), dict.fromkeys(names, 4), Policy())
+        self.assertEqual(
+            (cost.runs, cost.typical_usd, cost.ceiling_usd),
+            (128, Decimal("35.84"), Decimal("147.20")),
+        )
+
+
+def add_tables(folder: Path, count: int) -> None:
+    for number in range(count):
+        (folder / f"table_{number}.csv").write_text("id\n1\n", encoding="utf-8")
+
+
+class ApprovalTest(ComparisonFolders):
+    def test_an_expensive_comparison_is_refused_before_anything_starts(self):
+        for folder in self.datasets.values():
+            add_tables(folder, 4)
+        engineer = FakeEngineer()
+        with self.assertRaises(CostNotApproved) as refusal:
+            self.compare(engineer, trials=3)
+        self.assertEqual(
+            str(refusal.exception),
+            "24 runs to do, estimated at US$6.72, at most US$27.60 at each agent call's cap "
+            "(Claude Code's own estimates); above US$5.00, so it needs approval: "
+            "run it again with --approve-cost to go ahead",
+        )
+        self.assertEqual(engineer.calls, [])
+        self.assertEqual(self.lines, [])
+        self.assertFalse(self.out.exists())
+
+    def test_an_approved_comparison_runs(self):
+        for folder in self.datasets.values():
+            add_tables(folder, 4)
+        engineer = FakeEngineer()
+        self.compare(engineer, trials=3, approve_cost=True)
+        self.assertEqual(len(engineer.calls), 24)
+        self.assertTrue(self.lines[0].startswith("24 runs to do, estimated at US$6.72,"))
+
+    def test_a_cheaper_comparison_needs_no_approval(self):
+        for folder in self.datasets.values():
+            add_tables(folder, 4)
+        engineer = FakeEngineer()
+        self.compare(engineer, trials=2)
+        self.assertEqual(len(engineer.calls), 16)
+        self.assertTrue(self.lines[0].startswith("16 runs to do, estimated at US$4.48,"))
+
+    def test_exactly_the_limit_needs_no_approval(self):
+        del self.datasets["s7-1000"]
+        engineer = FakeEngineer()
+        # 25 runs of the engineer alone at US$0.20 is US$5.00 exactly.
+        self.compare(engineer, arms=("alone",), trials=25)
+        self.assertEqual(len(engineer.calls), 25)
+        self.out = self.out.parent / "another"
+        with self.assertRaisesRegex(CostNotApproved, r"^26 runs to do, estimated at US\$5.20"):
+            self.compare(FakeEngineer(), arms=("alone",), trials=26)
+
+    def test_a_resumed_comparison_is_priced_on_the_runs_left(self):
+        del self.datasets["s7-1000"]
+        failed = {f"s1-200/alone/{n}": "error" for n in range(1, 27)}
+        self.compare(FakeEngineer(failed), arms=("alone",), trials=26, approve_cost=True)
+        # All 26 still lack a verdict: US$5.20 again, so not without approval.
+        with self.assertRaises(CostNotApproved):
+            self.compare(FakeEngineer(), arms=("alone",), trials=26)
+        self.compare(
+            FakeEngineer({"s1-200/alone/26": "error"}),
+            arms=("alone",),
+            trials=26,
+            approve_cost=True,
+        )
+        engineer = FakeEngineer()
+        self.compare(engineer, arms=("alone",), trials=26)
+        self.assertEqual(len(engineer.calls), 1)
+        self.assertEqual(
+            self.lines[-2],
+            "1 run to do, estimated at US$0.20, at most US$0.75 at each agent call's cap "
+            "(Claude Code's own estimates)",
+        )
+
+
 class CommandLineTest(ComparisonFolders):
+    def test_an_expensive_comparison_needs_the_flag(self):
+        for folder in self.datasets.values():
+            add_tables(folder, 4)
+        argv = ["run", "--goal", str(DEMO_GOAL), "--checks", str(DECLARATION)]
+        for name, folder in self.datasets.items():
+            argv += ["--raw", f"{name}={folder}"]
+        argv += ["--out", str(self.out), "--trials", "3"]
+        engineer = FakeEngineer()
+        with (
+            mock.patch("tenx.compare.engineer_run", engineer),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(main(argv), 2)
+        self.assertIn("needs approval: run it again with --approve-cost", errors.getvalue())
+        self.assertEqual(engineer.calls, [])
+        with (
+            mock.patch("tenx.compare.engineer_run", engineer),
+            redirect_stdout(io.StringIO()) as printed,
+        ):
+            self.assertEqual(main([*argv, "--approve-cost"]), 0)
+        self.assertEqual(len(engineer.calls), 24)
+        self.assertTrue(printed.getvalue().startswith("24 runs to do, estimated at US$6.72,"))
+
     def test_run_then_report(self):
         engineer = FakeEngineer({"s7-1000/scouts/1": "FAIL"})
         argv = ["run", "--goal", str(DEMO_GOAL), "--checks", str(DECLARATION)]

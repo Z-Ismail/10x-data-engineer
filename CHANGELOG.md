@@ -24,9 +24,64 @@ Notable changes to this project.
   never leaves a half-written report, profile, note or ledger. Also new, for
   resuming runs later: input hashes, attempt folders with manifests, and the
   rule for when an earlier attempt can be reused.
+- Capability interfaces (`tenx/ports.py`) for what a run needs from a
+  platform: profiling sources, scaffolding and building a project,
+  validating it, and running an agent. DuckDB and dbt (`tenx/adapters/`)
+  and Claude Code (`tenx/backends/`) are the first implementations and
+  behave exactly as the code they wrap. An implementation asked for
+  something it cannot do refuses with `UnsupportedCapability`, and its
+  platform's errors are raised as `PlatformError`. A test keeps the
+  interfaces, and the workflow code that will use them, free of DuckDB, dbt
+  and gate imports.
+- Spending policy (`tenx/policy.py`): a ceiling per run and a cap per agent
+  call, and a budget that reserves each call's whole cap before the call
+  starts, stops with `stopped: budget` when the reservation would pass the
+  ceiling, and settles each call with its reported cost (or its whole
+  reservation when it reported none). Amounts are decimals, so sums are
+  exact. The workflow being built will use it for every agent call.
+- `python -m tenx.compare run` prices the runs it still has to do before
+  starting, and refuses a comparison estimated above US$5 unless
+  `--approve-cost` is given (`make compare COMPARE_FLAGS=--approve-cost`).
+- Run records (`tenx/domain.py`) and the workflow's state (`tenx/graph/`):
+  the request, plan, artefacts, agent findings, validation verdicts, cost
+  records and spending policy a run carries between steps, kept as JSON and
+  read back strictly; rules for joining writes from steps that run at the
+  same time; and checkpoints in SQLite that are read back without
+  constructing objects.
+- A graph run, `python -m tenx.run run | resume | status`
+  (`make engineer-graph`): the same steps as `tenx.engineer` (profile,
+  overlap, the cross-source agent, the engineer, the gate) as a LangGraph
+  graph saved to `<out>/checkpoints.sqlite` after every step. A run stopped
+  part way resumes at the step it was in without running finished steps
+  again; an agent call that completed from the same inputs is used rather
+  than made again, and a call cut off is charged its whole reservation.
+  Every agent call reserves its cap first, and the run stops with
+  `stopped: budget` before a call that would pass the ceiling (US$2.00, or
+  `--policy`). A platform that cannot do a step stops the run before
+  anything runs. Agent calls and gate runs each work in an attempt folder of
+  their own. `make engineer` still uses the earlier runner.
+- An equivalence check, `make equivalence`: the graph run and the earlier
+  runner on the same inputs, with a stand-in for Claude Code that answers
+  the same way every time, must leave byte-identical projects, notes, agent
+  reports, usage and gate reports (`tenx/equivalence.py` maps one folder
+  layout onto the other; any file outside the map is a difference). It runs
+  on the eight comparison datasets in CI, and on six behaviours of the
+  stand-in, a resumed graph run among them, in the tests.
+- A paired comparison of the graph run with the earlier runner,
+  `python -m tenx.compare paired` and `make parity`: both run with the
+  cross-source agent on the same datasets and trials, the two runs of a pair
+  next to each other. The difference in pass rates gets Tango's 95% score
+  interval for paired proportions against a 10-point margin fixed in
+  advance, with three verdicts (non-inferior, inferior, inconclusive), and
+  the graph's cost per pass is compared with a bootstrap interval against a
+  10% limit (`tenx/parity.py`). It resumes, and is priced and refused above
+  US$5 without `--approve-cost`; the 64 pairs of `make parity` are estimated
+  at US$35.84.
 
 ### Fixed
 
+- A built wheel now contains `tenx.adapters` and `tenx.backends`; only
+  editable installs had them.
 - Agents in the sandbox can run shell commands when the runner is started
   from Claude Code's own shell. Claude Code moved each command into the
   memory cgroup it was already in, which the sandbox's read-only `/sys`
@@ -38,6 +93,13 @@ Notable changes to this project.
 
 ### Changed
 
+- `make install` also installs the new `graph` extra (LangGraph, its SQLite
+  checkpointer and Pydantic), pinned to one LangGraph minor version. The
+  core package still depends only on DuckDB.
+- Each agent call's spending limit comes from the spending policy: US$0.75
+  for the engineer, US$0.40 for the cross-source agent and US$0.10 for each
+  scout, in place of US$5 for every agent. Measured runs cost well under
+  these.
 - README: rewritten around the product's aim, design and principles, with
   a roadmap table showing what is available today. The detailed description
   of each component, with example output, moved to `docs/components.md`,

@@ -73,6 +73,8 @@ from tenx.gate import GateError, Result, load_declaration, passed, render, run_g
 from tenx.ledger import Ledger, role_usage
 from tenx.ledger import render as render_usage
 from tenx.overlap import overlap_folder, write_report
+from tenx.policy import Policy
+from tenx.ports import AgentRun, Role
 from tenx.profile import ProfileError, profile_folder
 from tenx.sample import sample
 from tenx.sandbox import (
@@ -90,7 +92,6 @@ from tenx.scouts import notes_from_report as scout_notes_from_report
 from tenx.scouts import render as render_table_notes
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-MAX_BUDGET_USD = 5
 TIMEOUT_MINUTES = 30
 STOP_GRACE_SECONDS = 30
 
@@ -120,18 +121,6 @@ class EngineerError(Exception):
     """The run could not start or its inputs are unusable."""
 
 
-@dataclass(frozen=True)
-class Role:
-    """One agent of the add-on, and how the runner starts it."""
-
-    name: str
-    agent: str
-    prompt: str
-    allowed_tools: tuple[str, ...]
-    max_turns: int
-    json_schema: dict | None = None
-
-
 ENGINEER = Role(
     name="engineer",
     agent="tenx:engineer",
@@ -159,6 +148,7 @@ SCOUT = Role(
     allowed_tools=(),
     max_turns=8,
     json_schema=SCOUT_SCHEMA,
+    kind="scout",
 )
 
 
@@ -219,32 +209,6 @@ def prepare_project(project: Path, raw: Path, goal: Path) -> list[dict]:
     return profiles
 
 
-def _duration(seconds: float) -> str:
-    if seconds >= 60 and seconds % 60 == 0:
-        minutes = int(seconds // 60)
-        return f"{minutes} minute{'s' if minutes != 1 else ''}"
-    return f"{seconds:g} seconds"
-
-
-@dataclass(frozen=True)
-class AgentRun:
-    exit_code: int | None
-    report: dict | None
-    timed_out_after: float | None = None
-    message: str = ""
-
-    def describe(self) -> str:
-        if self.timed_out_after is not None:
-            return f"stopped: did not finish within {_duration(self.timed_out_after)}"
-        if self.report is None:
-            reason = f": {self.message}" if self.message else ""
-            return f"exited {self.exit_code} without a report{reason}"
-        outcome = self.report.get("subtype") or "unknown"
-        turns = self.report.get("num_turns")
-        detail = f"{outcome} after {turns} turns" if turns is not None else outcome
-        return f"{detail} (exit {self.exit_code})"
-
-
 def stage_plugin(destination: Path) -> Path:
     """Copy the add-on's manifest and agents to destination for the run.
 
@@ -257,8 +221,15 @@ def stage_plugin(destination: Path) -> Path:
     return destination
 
 
-def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[str]:
-    """The Claude Code command line that runs one of the agents headless."""
+def agent_command(
+    claude: str, plugin_dir: Path, role: Role = ENGINEER, policy: Policy | None = None
+) -> list[str]:
+    """The Claude Code command line that runs one of the agents headless.
+
+    The agent's spending cap is the policy's cap for its kind of agent, so
+    that what a run reserves for the call is what Claude Code enforces.
+    """
+    cap = (policy or Policy()).cap(role.budget_kind)
     allowed = ["--allowedTools", *role.allowed_tools] if role.allowed_tools else []
     schema = ["--json-schema", json.dumps(role.json_schema)] if role.json_schema else []
     return [
@@ -275,7 +246,7 @@ def agent_command(claude: str, plugin_dir: Path, role: Role = ENGINEER) -> list[
         "--max-turns",
         str(role.max_turns),
         "--max-budget-usd",
-        str(MAX_BUDGET_USD),
+        str(cap),
         "--output-format",
         "json",
         "--no-session-persistence",

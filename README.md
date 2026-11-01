@@ -113,7 +113,9 @@ if:
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
 | Specification | Machine-checked spec contract and `SPEC.md` | Available as code; the Architect agent is next |
 | Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
-| Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress |
+| Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available: the graph run works only through them |
+| Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available: the per-call caps and the comparison approval apply to every run; the run ceiling applies to graph runs (`python -m tenx.run`) |
+| Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the build workflow runs as a graph that is saved after every step and can be resumed (`python -m tenx.run`), with the run ceiling enforced; with a stand-in for Claude Code it leaves byte-identical projects, notes, reports and usage to the current runner's on eight demo datasets (`make equivalence`). A paired comparison with real agents against the current runner (`make parity`, 64 pairs, a predeclared 10-point margin) is built; it has not been run, and the graph replaces that runner only on a non-inferior verdict. Approvals and the other roles come later |
 | Build | Repair loop driven by the gate's report | Planned |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
 | Review | Advisory reviewer, measured on planted defects | Planned |
@@ -130,10 +132,13 @@ agents; and on Linux, bubblewrap (`sudo apt install bubblewrap` on Debian
 and Ubuntu, `sudo dnf install bubblewrap` on Fedora) for the sandbox.
 
 ```
-make install    # the package, DuckDB and dbt
+make install    # the package, DuckDB, dbt and LangGraph
 make demo-data  # three demo source systems with planted defects
 make test
 make engineer   # the agents build the demo project, then the gate checks it
+make engineer-graph  # the same as a graph run that can be resumed if it stops
+make equivalence     # the graph against the current runner, with a stand-in for Claude Code
+make parity          # the graph against the current runner with real agents (needs approval)
 ```
 
 The demo data is a billing system, a CRM and a product event log for the
@@ -162,10 +167,14 @@ isolation is tested, are in [docs/security.md](docs/security.md).
 ## Costs
 
 There is no hosted service: agents use your own Claude subscription or API
-key. Each agent call has a turn limit, a spending limit and a time limit,
-and every run records its tokens, turns, time and estimated cost by role.
-Dollar figures are Claude Code's estimates; on a subscription, the limit
-that applies is your plan's usage.
+key. Each agent call has a turn limit, a spending limit (US$0.75 for the
+engineer, US$0.40 for the cross-source agent) and a time limit, and every
+run records its tokens, turns, time and estimated cost by role. Claude Code
+checks a spending limit after each model response, so a call can pass it by
+up to one response. A measured comparison estimated above US$5 does not
+start without `--approve-cost`. Dollar figures are Claude Code's estimates;
+on a subscription, the limit that applies is your plan's usage. Details are
+in the [component reference](docs/components.md#spending-policy).
 
 ## Documentation
 

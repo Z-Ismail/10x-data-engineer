@@ -47,6 +47,30 @@ jobs:
       - name: Compare columns across demo tables
         run: make overlap
 
+  equivalence:
+    # The old runner and the graph give byte-identical outputs on the eight
+    # comparison datasets, with a stand-in for Claude Code; no model calls.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: make install
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
+            | sudo tee /etc/apparmor.d/bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          bwrap --ro-bind / / --unshare-pid --die-with-parent true
+      - name: Compare the graph with the old runner
+        run: make equivalence
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10

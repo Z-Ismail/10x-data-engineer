@@ -49,6 +49,12 @@ there is no tested sandbox yet, so the runner refuses there too.
 `--unisolated` runs the agents without a sandbox; the run's report and
 `usage.json` then say so.
 
+The graph run (`python -m tenx.run`) uses the same sandbox for its agents
+and the gate's builds. Its checkpoint file, attempt manifests and spending
+records are in the run folder, which no agent can see. If the run is
+killed, bubblewrap stops the agent it had started (`--die-with-parent`); a
+run started with `--unisolated` leaves that agent running until it ends.
+
 What the sandbox does not cover yet:
 
 - The agents and the gate's builds keep network access, which Claude Code

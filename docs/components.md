@@ -15,7 +15,12 @@ make test
 make engineer    # the cross-source agent, then the engineer builds the demo project; then the gate
 make engineer-alone    # the same without the cross-source agent
 make engineer-scouts   # the same as make engineer, with a scout for each raw table first
-make compare     # runs the engineer with and without the other agents, 128 runs
+make engineer-graph    # the same as make engineer, as a graph that can be resumed
+make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
+make parity      # the graph against the earlier runner with real agents, 64 pairs;
+                 # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
+make compare     # runs the engineer with and without the other agents, 128 runs;
+                 # needs COMPARE_FLAGS=--approve-cost (estimated above US$5)
 ```
 
 ## Demo data
@@ -334,7 +339,8 @@ hides it from the agent whatever command the agent runs.
 The agent runs in Claude Code without anyone at the keyboard. It may write
 files in its own folder and run `dbt`, and every other action is refused
 rather than asked about. It is pinned to the Sonnet model and stops after 60
-turns, US$5 of estimated usage or 30 minutes, whichever comes first.
+turns, US$0.75 of estimated usage or 30 minutes, whichever comes first (see
+[Spending policy](#spending-policy)).
 
 An earlier run of the engineer alone, before the cross-source agent ran by
 default:
@@ -410,7 +416,8 @@ must exist in the profiles. A checked answer is written as `JOINS.md` in the
 engineer's folder, and the engineer is told to read it before writing a
 model that combines sources. An answer that fails the check is not passed
 on, the engineer works without it, and the run says why. The agent is
-pinned to the Sonnet model and stops after 20 turns.
+pinned to the Sonnet model and stops after 20 turns or US$0.40 of estimated
+usage.
 
 ```
 cross-source: success after 9 turns (exit 0); JOINS.md: 2 joins, 8 cautions
@@ -466,9 +473,9 @@ be a column of that table. The answers that pass are written together as
 `TABLE_NOTES.md` in the engineer's folder, and the engineer is told to read
 it before writing the staging models. An answer that fails its check is
 left out, and the run says why. Scouts are pinned to the Haiku model and
-stop after 8 turns. The cross-source agent still runs unless
-`--no-cross-source` is given; the scouts run first, and neither sees the
-other's notes.
+each stops after 8 turns or US$0.10 of estimated usage. The cross-source
+agent still runs unless `--no-cross-source` is given; the scouts run first,
+and neither sees the other's notes.
 
 ```
 scout billing.customers: success after 5 turns (exit 0); 7 findings, 4 questions
@@ -536,6 +543,21 @@ difference is not shown. With three arms compared with one baseline, the
 5%. Cost per pass is all the estimated cost of an arm's runs divided by its
 passes.
 
+Before any run starts, the comparison prices the runs it still has to do,
+from the [spending policy](#spending-policy): typically (engineer US$0.20,
+cross-source agent US$0.08 and each scout US$0.02 per call, measured on the
+demo data and rounded up) and at most (every call at its cap). A
+comparison estimated above US$5 stops there, writes nothing and runs
+nothing, unless `--approve-cost` is given; `make compare` passes it with
+`COMPARE_FLAGS=--approve-cost`. The default 128 runs are estimated at
+US$35.84, at most US$147.20:
+
+```
+error: 128 runs to do, estimated at US$35.84, at most US$147.20 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
+```
+
+A resumed comparison is priced on the runs that still lack a verdict.
+
 A comparison on the demo data, all 128 runs on one day with Claude Code
 2.1.308:
 
@@ -597,6 +619,53 @@ the example above, Claude Code made a small request of its own on a second
 model. A figure that was not reported is shown as `-`, and the `run` row is
 only added up when every role reported.
 
+## Spending policy
+
+`tenx/policy.py` holds the limits on what agents may spend, in US$ of Claude
+Code's own estimates (on a subscription these are not bills; the limit that
+applies is your plan's usage):
+
+| Limit | Default |
+| --- | --- |
+| A run, all its agent calls together | US$2.00 |
+| One call of the engineer | US$0.75 |
+| One call of the cross-source agent | US$0.40 |
+| One call of a scout | US$0.10 |
+| A comparison that may start without `--approve-cost` | US$5.00, estimated |
+
+Each agent is started with its call cap as Claude Code's `--max-budget-usd`.
+Claude Code checks that cap after each model response, so one call can pass
+it by up to one response; checking a run's total before each call would
+therefore not cap the run. Instead, a run's budget reserves a call's whole
+cap before the call starts, and starts it only if what was spent, what is
+still reserved and the new reservation fit the run's ceiling; otherwise the
+call is not started and the run stops with `stopped: budget`. When the call
+ends, the reservation is settled with the cost Claude Code reported, or with
+the whole reservation when it reported none (a crash, a timeout) or did not
+know a model's price. A call that passed its cap is charged what it cost,
+and the report names it. An example with made-up figures, from the tests:
+
+```
+budget (US$, Claude Code's own estimates): ceiling 2.00, spent 1.222, still reserved 0.10
+
+call           cap  measured  charged  charged as
+scout a       0.10     0.012    0.012  measured
+cross-source  0.40         -     0.40  whole reservation
+engineer      0.75      0.81     0.81  measured
+engineer passed its cap by US$0.06: Claude Code checks the cap only after each model response
+```
+
+Amounts are kept as decimals, never binary floating point, so a call that
+fits the ceiling exactly is not refused by a rounding error, and the budget
+can be shared by agents running at the same time. A policy can be read from
+a JSON file with the fields `run_usd`, `call_usd` and `typical_usd` (each an
+object naming `engineer`, `cross-source` and `scout`) and
+`approve_above_usd`; unknown fields, malformed amounts and a call cap above
+the run's ceiling are refused. Today the per-call caps apply to every run
+and the approval to every comparison; the run ceiling, the reservations and
+the policy file come into use with the workflow being built, which will
+reserve and settle every agent call.
+
 ## Run artefacts
 
 `tenx/artefacts.py` holds what a stopped run needs in order to be resumed
@@ -625,6 +694,297 @@ are used by the runner's own writes and by their tests.
   attempt. The manifest is outside the work folder an agent is given, and is
   trusted: the check guards against crashes, not against someone editing it.
 
+## Capability interfaces
+
+`tenx/ports.py` names what a run needs from a platform, by capability rather
+than by tool, so that the workflow being built (checkpoints, resume and
+approvals) can run on other platforms later without changing. The workflow
+is not built yet; today the interfaces have their first implementations and
+tests, and the runner works as before.
+
+| Interface | Capabilities | First implementation |
+| --- | --- | --- |
+| `SourceProfiler` | profile sources; compare columns across tables | `DuckDBProfiler` (`tenx/adapters/duckdb.py`): the source profiler and the overlap report |
+| `TransformEngine` | scaffold a project; build a project | `DbtDuckDB`: an empty dbt project that reads the raw files, built with `dbt build` into a new DuckDB file |
+| `Validator` | validate a project | `DuckDBGate`: the gate, with its results and its report text unchanged |
+| `AgentBackend` | run an agent; give a structured answer | `ClaudeCode` (`tenx/backends/claude_code.py`): `claude -p` with the runner's own command line, start and stop |
+| `Sandbox` | (unchanged) | `Bubblewrap` and `Unisolated` in `tenx/sandbox.py` |
+
+Each implementation lists what it can do with `capabilities()`. Asking one
+for something it cannot do raises `UnsupportedCapability`, whose message is
+a sentence such as "plain agents cannot give a structured answer", before
+anything is started. Errors of the platform underneath (a folder with no
+tables, a declaration that does not parse) are raised as `PlatformError`
+with the same message, so the code calling an interface never needs to know
+which platform it is talking to.
+
+The implementations wrap the existing modules and are tested against them on
+generated demo data: the same profile and overlap files byte for byte, the
+same dbt project files, the same build results, and the same gate results
+and report on a correct and a broken project. A test keeps `tenx/ports.py`,
+the run records in `tenx/domain.py` and the workflow's package `tenx/graph/`
+free of imports of DuckDB, dbt, the gate, the profiler, the overlap report,
+the runner or the implementations themselves, whether written as an import
+statement or as a module name given to `importlib`; a second test imports
+them in a fresh interpreter and checks that none of those modules was
+loaded, directly or through another module.
+
+## Graph run
+
+```
+python -m tenx.run run --raw demo/data --goal demo/goal.md \
+    --checks tests/fixtures/demo_gate.json --out runs/demo-graph
+python -m tenx.run status --out runs/demo-graph
+python -m tenx.run resume --out runs/demo-graph
+```
+
+`tenx.run` does what `python -m tenx.engineer` does (profile the raw files,
+compare their columns, the cross-source agent, the engineer, then the gate)
+as the steps of a [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview)
+graph. The graph's state is written to `<out>/checkpoints.sqlite` after each
+step, before the next one starts. If the run stops part way, because the
+process was killed, the machine was shut down or a step failed, `resume`
+carries it on from the step it was in: finished steps do not run again.
+`status` says whether a run passed, failed or stopped, and if it stopped
+part way, which step a resume will run and what went wrong. `make engineer`
+still uses the earlier runner; the two are being compared before the graph
+replaces it.
+
+`run` takes the same options as `tenx.engineer` (`--no-cross-source`,
+`--unisolated`) and `--policy`, a JSON spending policy with a ceiling and
+caps (see [Spending policy](#spending-policy)). Scouts are not part of the
+graph run. `resume` and `status` read the request back from the checkpoint,
+so a resumed run uses the same inputs, sandbox setting and policy it started
+with. Exit status: 0 passed, 1 failed the gate, 2 refused or stopped by an
+error (resume tries the step again), 3 stopped by the budget or by a
+platform that cannot do a step.
+
+Each step reaches sources, builds, checks and agents only through the
+[capability interfaces](#capability-interfaces); `tenx.run` chooses the
+DuckDB, dbt and Claude Code implementations and hands them to the graph.
+Before anything runs, the plan step asks each implementation for every
+capability the run's steps need, and stops the run with, for example,
+"fake gate cannot validate a project" if one is missing.
+
+Every agent call reserves its cap from the run's budget before it starts,
+and the run stops with `stopped: budget` before a call that would pass the
+ceiling (US$2.00 by default). After a resume, every call settled before the
+stop counts against the ceiling again.
+
+Agent calls and gate runs each get an attempt folder:
+
+```
+runs/demo-graph/
+    checkpoints.sqlite
+    plugin/                     the add-on as loaded for the run
+    profile/  overlap/          the profiles and the overlap report
+    cross-source/attempt-1/     manifest.json, agent.json, JOINS.md, work/
+    engineer/attempt-1/         manifest.json, agent.json, work/ (the project)
+    gate/attempt-1/             manifest.json, report.txt, work/ (the gate's databases)
+    usage.json                  tokens, turns, time and cost by role
+    budget.json                 each call's reservation, charge and overshoot
+```
+
+An agent sees only its attempt's `work/` folder (in the sandbox), never the
+manifest beside it. When a resumed run comes to an agent step, it first
+looks at the attempts already on disk. An attempt that completed from
+exactly the same inputs (the goal, profiles, overlap report, `JOINS.md`,
+the agent's instructions, its tools, turns and cap, the backend and the
+sandbox) is used as it is, and no call is made. Any other attempt left by
+the stop is charged to the budget: what its report says it cost, or its
+whole reservation when it left no report, since nothing says it spent less.
+The step then runs again in a new attempt with a fresh folder. Profile and
+overlap are plain code and are run again from nothing.
+
+A run killed during the engineer's call on the demo data, then resumed
+(the project's path shortened, and the gate's checks and the usage table
+left out):
+
+```
+$ python -m tenx.run status --out runs/graph-kill
+run: graph-kill
+status: stopped part way; next step: engineer
+resume with: python -m tenx.run resume --out runs/graph-kill
+attempts: cross-source 1
+charged to the budget: US$0.0557 (Claude Code's estimates, not a bill)
+
+$ python -m tenx.run resume --out runs/graph-kill
+status: passed
+project: runs/graph-kill/engineer/attempt-2/work
+
+gate: PASS (24 passed, 0 failed, 0 not run)
+
+$ python -m tenx.run status --out runs/graph-kill
+run: graph-kill
+status: passed
+attempts: cross-source 1, engineer 2, gate 1
+charged to the budget: US$0.8980 (Claude Code's estimates, not a bill)
+```
+
+The cross-source agent did not run again. The killed engineer call left no
+report, so it was charged its whole US$0.75 reservation; the second call
+cost US$0.0923. In the sandbox, killing the run also ends the agent it had
+started (bubblewrap's `--die-with-parent`). A run started with
+`--unisolated` and then killed leaves its agent running until the agent
+finishes, and that agent's cost is not known to the run.
+
+### Equivalence with the earlier runner
+
+```
+make equivalence
+python tests/equivalence.py --seeds 42 --sizes 200 --scenarios pass fail resumed
+```
+
+Before the graph replaces `tenx.engineer`, it must behave exactly like it.
+`make equivalence` runs both on the same inputs with a stand-in for Claude
+Code that answers the same way every time (no model calls, no cost), then
+compares what each left behind, byte for byte (`tenx/equivalence.py`):
+
+| Earlier runner | Graph run |
+| --- | --- |
+| `project/` | `engineer/attempt-<n>/work/` |
+| `cross_source/` | `cross-source/attempt-<n>/work/` |
+| `project/source_profiles/` | `profile/` |
+| the overlap files in `cross_source/source_profiles/` | `overlap/` |
+| `project/JOINS.md` | `cross-source/attempt-<n>/JOINS.md` |
+| `agent.json`, `cross_source.json` | each attempt's `agent.json` |
+| `plugin/`, `usage.json` | `plugin/`, `usage.json` |
+| the gate's report, as printed | `gate/attempt-<n>/report.txt` |
+| `gate/` (file names only) | `gate/attempt-<n>/work/` (file names only) |
+
+`budget.json`, the checkpoints, the attempt manifests and, after a resume,
+the earlier attempts belong to the graph alone. Any other file, in either
+run, counts as a difference. The gate's working folders are compared by
+name only, since their databases and dbt logs differ between any two
+builds. The stand-in also writes into its report the command it was given,
+a hash of every file in its folder when it started, the environment
+variables the runner set, and which of a few paths it could see, so the two
+reports differ if the command, the agent's starting folder or the sandbox
+differ. Both runs use the same output folder in turn, so paths written into
+the artefacts match too.
+
+By default it runs the eight comparison datasets (seeds 1, 7, 42 and 2026
+at 200 and 1,000 companies) with two behaviours of the stand-in: the
+reference models (gate PASS) and models that keep test-mode invoices (gate
+FAIL). The other behaviours are an answer from the cross-source agent that
+fails its check, an engineer that leaves no report, the engineer alone, and
+a graph run killed during the engineer's call and resumed, compared with an
+earlier-runner run that was never stopped; the tests run all six on a small
+dataset. The exit status is 1 if any pair differs. On 2026-10-31 (the
+output below shortened):
+
+```
+$ make equivalence
+seed 1, 200 companies, pass (gate PASS): identical: 51 files compared, 5 graph only
+seed 1, 200 companies, fail (gate FAIL): identical: 51 files compared, 5 graph only
+...
+seed 2026, 1000 companies, fail (gate FAIL): identical: 51 files compared, 5 graph only
+0 of 16 differ
+```
+
+It shows that the graph changed how a run is carried out, not what it
+produces. Whether real agents do as well in the graph is measured
+separately, with live runs (below).
+
+### Paired comparison with the earlier runner
+
+```
+make parity PARITY_FLAGS=--approve-cost
+python -m tenx.compare paired --raw NAME=FOLDER [--raw NAME=FOLDER ...] \
+    --goal demo/goal.md --checks tests/fixtures/demo_gate.json --out runs/parity \
+    [--trials 8] [--parallel 3] [--approve-cost]
+python -m tenx.compare report runs/parity
+```
+
+`python -m tenx.compare paired` runs the earlier runner (`tenx.engineer`)
+and the graph run (`tenx.run`), each with the cross-source agent and real
+Claude Code, on the same datasets. A pair is one dataset and one trial
+number: its two runs are next to each other in the order, and which goes
+first is drawn from a seed. `make parity` runs the eight comparison datasets
+eight times each: 64 pairs, 128 runs, three at a time. It resumes like
+`make compare`: a run without a gate verdict is run again from an empty
+folder, and a pair counts only when both of its runs have a verdict.
+
+Each pair is counted as both passing, only the earlier runner passing, only
+the graph passing, or neither. The difference in pass rates, earlier runner
+minus graph, gets Tango's score interval for paired proportions at 95%
+(`tenx/parity.py`; it stays usable when few pairs, or none, disagree). The
+margin is fixed in the code before any run, at 10 points:
+
+| 95% interval of the difference | Pass-rate verdict |
+| --- | --- |
+| wholly below +10 points | non-inferior |
+| wholly above +10 points | inferior |
+| anything else, including a limit on +10 | inconclusive |
+
+The cost per pass of each runner is all its estimated spend divided by its
+passes, over the counted pairs. The graph's cost per pass over the earlier
+runner's gets a 95% bootstrap interval from 2,000 resamples of whole pairs,
+drawn from a fixed seed, so the same runs always give the same figures. The
+graph's cost is within the limit when the whole interval is below 1.10, over
+it when the whole interval is above 1.10, and inconclusive otherwise; it is
+unknown if any counted run's cost was not reported. The overall verdict is
+non-inferior only when the pass rate is non-inferior and the cost within
+the limit, inferior when either is inferior or over, and inconclusive
+otherwise. An inconclusive verdict is reported as such, never as equal.
+
+`comparison.txt` and `comparison.json` hold the counts, both pass rates,
+the difference and its interval, both verdicts, the cost figures, the
+counts by dataset and the pairs left out. Even when the two runners are
+equally good, 64 pairs give an inconclusive verdict in a sizeable share of
+comparisons: in a simulation with both at a 97% pass rate, the pass-rate
+verdict was non-inferior in about three comparisons of four. `--trials`
+gives more pairs.
+
+`make parity` is priced before anything starts, from what each agent call
+usually costs, and refused without approval:
+
+```
+$ make parity
+error: 128 runs to do, estimated at US$35.84, at most US$147.20 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
+```
+
+No live paired comparison has been run yet.
+
+## Run records and graph state
+
+The graph run (above) saves its state after every step, so that a
+run stopped part way (a crash, a kill, a closed laptop) resumes where it
+stopped. `tenx/domain.py` holds the records the steps pass to one another,
+and `tenx/graph/` the state that carries them.
+
+| Record | What it holds |
+| --- | --- |
+| `EngineeringRequest` | The run's raw folder, goal, hidden checks, output folder, which agents run, and whether it is sandboxed |
+| `ExecutionPlan` | The workflow and its steps, each at most once, in a fixed order |
+| `ArtefactRef` | A file or folder a step made, its SHA-256 (for a folder, of every file and its place) and the attempt that made it |
+| `AgentFinding`, `Evidence` | One claim an agent made, whether it is a fact, an inference, a hypothesis or a recommendation, how sure it is, and what it rests on |
+| `ValidationResult` | The validator's verdict, the number of checks, each check that did not pass, and where the full report is |
+| `CostRecord` | One agent call's tokens by model, turns, time and estimated cost, with its reservation, what the run was charged and any overshoot |
+| `ResourceBudget` | The spending policy the run works within |
+
+The state holds only JSON values, and each record goes in as its JSON form
+and is checked again by the step that reads it. Objects kept in the state
+would be rebuilt on resume by importing and calling their class, which the
+checkpoint library is moving to block; in its strict mode they come back as
+plain dictionaries, so a step that worked on a fresh run would fail only
+after a resume. Reading a record is strict: a count given as `true` or
+`"5"`, a field the record does not have, a missing field or an unknown
+choice is refused with the record and the field named. Money is decimal
+text, never a float: amounts from the policy follow its rule (at most four
+places), and measured costs keep every place Claude Code reported. A cost
+record whose charge or overshoot does not follow from its cost and
+reservation is refused.
+
+When steps run at the same time, their writes are joined: findings,
+verdicts and cost records are added to their lists; artefacts are joined by
+name, and a name may be given a new file only by a later attempt of the
+step that made it, so two steps disagreeing is an error rather than
+whichever wrote last; attempt counts only rise. Checkpoints go to one
+SQLite file per run and are read back allowing only the checkpoint
+library's own list of safe built-in types, so that a resume does not
+construct objects of any class a checkpoint file names.
+
 ## Repository layout
 
 | Path | Contents |
@@ -632,6 +992,9 @@ are used by the runner's own writes and by their tests.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, and the run artefacts |
-| `tests/` | Tests, and the dbt project the gate is tested against |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, and the run records |
+| `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
+| `tenx/graph/` | The graph run: its steps, its state and checkpoints |
+| `tenx/run.py` | The graph run's command line: run, resume, status |
+| `tests/` | Tests, the dbt project the gate is tested against, and the equivalence check (`tests/equivalence.py`) |
 
