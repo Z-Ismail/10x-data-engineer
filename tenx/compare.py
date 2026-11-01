@@ -62,6 +62,10 @@ ARMS = {
     "both": (True, True),
 }
 BASELINE = "alone"
+# The paired comparison: today's runner with the cross-source agent, and the
+# same run as a graph. Each dataset and trial runs both, back to back.
+PAIRED = "paired"
+PAIRED_ARMS = ("default", "graph")
 # An arm is said to help (or hurt) when the probability that its pass rate
 # is higher (or lower) than the baseline's reaches this. With three arms
 # compared with one baseline, 0.98 keeps the chance of wrongly keeping any
@@ -162,13 +166,7 @@ class Trial:
         return f"{self.dataset}/{self.arm}/{self.trial}"
 
 
-def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
-    """The order to run every arm on every dataset, trials times.
-
-    A block is one dataset and one trial number, and holds each arm once, in
-    a random order drawn from the seed. Blocks run trial by trial, so a
-    comparison cut short still has every arm on nearly the same datasets.
-    """
+def _check_plan(datasets: Sequence[str], arms: Sequence[str], trials: int) -> None:
     if not isinstance(trials, int) or isinstance(trials, bool) or trials < 1:
         raise ValueError(f"trials must be a whole number of at least 1, not {trials!r}")
     for kind, names in (("dataset", datasets), ("arm", arms)):
@@ -179,12 +177,9 @@ def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 
         for name in names:
             if not isinstance(name, str) or not _NAME.fullmatch(name):
                 raise ValueError(f"{kind} name {name!r} must be letters, digits, '_', '.' or '-'")
-    unknown = [arm for arm in arms if arm not in ARMS]
-    if unknown:
-        raise ValueError(f"unknown arm {unknown[0]!r}; the arms are {', '.join(ARMS)}")
-    if BASELINE not in arms:
-        raise ValueError(f"the arms must include {BASELINE!r}, which the others are compared with")
-    rng = random.Random(f"{seed}:compare")
+
+
+def _blocks(datasets: Sequence[str], arms: Sequence[str], trials: int, rng) -> list[Trial]:
     order = []
     for trial in range(1, trials + 1):
         for dataset in datasets:
@@ -194,12 +189,48 @@ def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 
     return order
 
 
+def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order to run every arm on every dataset, trials times.
+
+    A block is one dataset and one trial number, and holds each arm once, in
+    a random order drawn from the seed. Blocks run trial by trial, so a
+    comparison cut short still has every arm on nearly the same datasets.
+    """
+    _check_plan(datasets, arms, trials)
+    unknown = [arm for arm in arms if arm not in ARMS]
+    if unknown:
+        raise ValueError(f"unknown arm {unknown[0]!r}; the arms are {', '.join(ARMS)}")
+    if BASELINE not in arms:
+        raise ValueError(f"the arms must include {BASELINE!r}, which the others are compared with")
+    return _blocks(datasets, arms, trials, random.Random(f"{seed}:compare"))
+
+
+def paired_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order of a paired comparison: each pair's two runs next to each other.
+
+    A pair is one dataset and one trial number; which runner goes first is
+    drawn from the seed.
+    """
+    _check_plan(datasets, PAIRED_ARMS, trials)
+    return _blocks(datasets, PAIRED_ARMS, trials, random.Random(f"{seed}:paired"))
+
+
 def write_plan(
-    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+    out: Path,
+    datasets: Sequence[str],
+    arms: Sequence[str],
+    trials: int,
+    seed: int,
+    mode: str | None = None,
 ) -> list[Trial]:
     """Plan the runs and keep the plan in out, so the comparison can resume."""
-    order = plan(datasets, arms, trials, seed)
+    order = (
+        paired_plan(datasets, trials, seed)
+        if mode == PAIRED
+        else plan(datasets, arms, trials, seed)
+    )
     document = {
+        **({"mode": mode} if mode else {}),
         "datasets": list(datasets),
         "arms": list(arms),
         "trials": trials,
@@ -482,7 +513,7 @@ class Estimate:
 
 def agent_calls(arm: str, tables: int) -> list[str]:
     """The kind of each agent call one run of the arm makes: a scout per raw table."""
-    scouts, cross_source = ARMS[arm]
+    scouts, cross_source = (False, True) if arm in PAIRED_ARMS else ARMS[arm]
     return [SCOUT] * (tables if scouts else 0) + [CROSS_SOURCE] * cross_source + [ENGINEER]
 
 
@@ -497,32 +528,50 @@ def estimate(trials: Sequence[Trial], tables: dict[str, int], rules: Policy) -> 
 
 
 def _order(
-    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+    out: Path,
+    datasets: Sequence[str],
+    arms: Sequence[str],
+    trials: int,
+    seed: int,
+    mode: str | None = None,
 ) -> list[Trial]:
     """The planned order: the one kept in out, or a new one. Writes nothing."""
     if (out / PLAN_FILE).is_file():
         document, order = read_plan(out)
-        asked = (list(datasets), list(arms), trials, seed)
-        kept = (document["datasets"], document["arms"], document["trials"], document.get("seed"))
+        asked = (mode, list(datasets), list(arms), trials, seed)
+        kept = (
+            document.get("mode"),
+            document["datasets"],
+            document["arms"],
+            document["trials"],
+            document.get("seed"),
+        )
         if asked != kept:
             raise ValueError(
-                f"{out} holds a comparison of other datasets, arms, trials or seed; "
-                "use another folder"
+                f"{out} holds a comparison of another kind, or of other datasets, arms, "
+                "trials or seed; use another folder"
             )
         return order
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise ValueError(f"{out} must be empty or hold a comparison to resume")
+    if mode == PAIRED:
+        return paired_plan(datasets, trials, seed)
     return plan(datasets, arms, trials, seed)
 
 
 def _start(
-    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+    out: Path,
+    datasets: Sequence[str],
+    arms: Sequence[str],
+    trials: int,
+    seed: int,
+    mode: str | None = None,
 ) -> list[Trial]:
     """Check out and keep the plan there, so the comparison can resume."""
-    order = _order(out, datasets, arms, trials, seed)
+    order = _order(out, datasets, arms, trials, seed, mode)
     if not (out / PLAN_FILE).is_file():
         out.mkdir(parents=True, exist_ok=True)
-        write_plan(out, datasets, arms, trials, seed)
+        write_plan(out, datasets, arms, trials, seed, mode)
     return order
 
 
