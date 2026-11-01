@@ -17,6 +17,7 @@ above it, and the comparison is inconclusive otherwise.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from math import inf, sqrt
 from statistics import NormalDist
@@ -103,4 +104,77 @@ def verdict(low: float, high: float, margin: float = MARGIN) -> str:
         return NON_INFERIOR
     if low > margin:
         return INFERIOR
+    return INCONCLUSIVE
+
+
+# The second runner may cost at most this much more per pass than the first.
+COST_LIMIT = 1.10
+RESAMPLES = 2000
+WITHIN = "within"
+OVER = "over"
+UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class PairCost:
+    """One pair's verdicts and estimated costs, first runner then second."""
+
+    first_passed: bool
+    first_usd: float
+    second_passed: bool
+    second_usd: float
+
+
+def cost_per_pass(costs: list[float], passes: int) -> float:
+    """All spend divided by passes; infinite when nothing passed."""
+    return sum(costs) / passes if passes else inf
+
+
+def cost_ratio(pairs: list[PairCost]) -> float:
+    """The second runner's cost per pass over the first's."""
+    first = cost_per_pass([p.first_usd for p in pairs], sum(p.first_passed for p in pairs))
+    second = cost_per_pass([p.second_usd for p in pairs], sum(p.second_passed for p in pairs))
+    if first == inf:
+        return inf if second == inf else 0.0
+    return inf if second == inf else second / first
+
+
+def cost_interval(
+    pairs: list[PairCost], level: float = LEVEL, resamples: int = RESAMPLES, seed: int = 0
+) -> tuple[float, float]:
+    """A percentile bootstrap interval of the cost ratio, resampling whole pairs.
+
+    The resamples are drawn from a fixed seed, so the same pairs always give
+    the same interval. A resample in which the second runner never passes
+    gives an infinite ratio, which counts like any other.
+    """
+    if not pairs:
+        raise ValueError("at least one pair is needed")
+    if not 0 < level < 1:
+        raise ValueError(f"level must be between 0 and 1, not {level}")
+    rng = random.Random(f"{seed}:cost")
+    ratios = sorted(
+        cost_ratio([pairs[rng.randrange(len(pairs))] for _ in pairs]) for _ in range(resamples)
+    )
+    tail = (1 - level) / 2
+    low = ratios[int(tail * resamples)]
+    high = ratios[min(resamples - 1, int((1 - tail) * resamples))]
+    return low, high
+
+
+def cost_verdict(low: float, high: float, limit: float = COST_LIMIT) -> str:
+    """Within the limit, over it, or inconclusive across it."""
+    if high < limit:
+        return WITHIN
+    if low > limit:
+        return OVER
+    return INCONCLUSIVE
+
+
+def parity(passes: str, cost: str) -> str:
+    """Non-inferior only when the pass rate is and the cost is within the limit."""
+    if passes == INFERIOR or cost == OVER:
+        return INFERIOR
+    if passes == NON_INFERIOR and cost == WITHIN:
+        return NON_INFERIOR
     return INCONCLUSIVE

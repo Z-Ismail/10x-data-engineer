@@ -11,12 +11,20 @@ import unittest
 from statistics import NormalDist
 
 from tenx.parity import (
+    COST_LIMIT,
     INCONCLUSIVE,
     INFERIOR,
     MARGIN,
     NON_INFERIOR,
+    OVER,
+    WITHIN,
+    PairCost,
     Pairs,
+    cost_interval,
+    cost_ratio,
+    cost_verdict,
     interval,
+    parity,
     score,
     verdict,
 )
@@ -162,6 +170,75 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(verdict(*interval(Pairs(40, 20, 1, 3))), INFERIOR)
         # 16 pairs, 1 lost: too few pairs to tell.
         self.assertEqual(verdict(*interval(Pairs(15, 1, 0, 0))), INCONCLUSIVE)
+
+
+class CostTest(unittest.TestCase):
+    def test_ratio_worked_by_hand(self):
+        # First: 0.40 over 2 passes = 0.20; second: 0.40 over 1 pass = 0.40.
+        pairs = [PairCost(True, 0.2, True, 0.3), PairCost(True, 0.2, False, 0.1)]
+        self.assertAlmostEqual(cost_ratio(pairs), 2.0)
+
+    def test_ratio_when_nothing_passes(self):
+        self.assertEqual(cost_ratio([PairCost(True, 0.2, False, 0.2)]), math.inf)
+        self.assertEqual(cost_ratio([PairCost(False, 0.2, True, 0.2)]), 0.0)
+        self.assertEqual(cost_ratio([PairCost(False, 0.2, False, 0.2)]), math.inf)
+
+    def test_identical_pairs_give_a_point(self):
+        pairs = [PairCost(True, 0.25, True, 0.5)] * 30
+        self.assertEqual(cost_interval(pairs), (2.0, 2.0))
+
+    def test_two_pairs_worked_by_hand(self):
+        # Resamples of two pairs: AA ratio 1 (a quarter), AB or BA ratio 2
+        # (a half), BB ratio 3 (a quarter); the 2.5% and 97.5% points are 1 and 3.
+        pairs = [PairCost(True, 1.0, True, 1.0), PairCost(True, 1.0, True, 3.0)]
+        self.assertEqual(cost_interval(pairs), (1.0, 3.0))
+
+    def test_resamples_with_no_pass_count_as_infinite(self):
+        # The second passes in 1 pair of 20: about 36% of resamples miss it.
+        pairs = [PairCost(True, 0.2, i == 0, 0.2) for i in range(20)]
+        low, high = cost_interval(pairs)
+        # A resample holding that pair k times gives 20 / k. k is at least 4
+        # in about 1.6% of resamples, so the 2.5% point is at k = 3.
+        self.assertEqual(high, math.inf)
+        self.assertAlmostEqual(low, 20 / 3)
+        self.assertEqual(cost_verdict(low, high), OVER)
+
+    def test_the_same_pairs_give_the_same_interval(self):
+        rng = random.Random(4)
+        pairs = [
+            PairCost(
+                rng.random() < 0.9, rng.uniform(0.1, 0.3), rng.random() < 0.9, rng.uniform(0.1, 0.3)
+            )
+            for _ in range(64)
+        ]
+        self.assertEqual(cost_interval(pairs), cost_interval(list(pairs)))
+        self.assertNotEqual(cost_interval(pairs), cost_interval(pairs, seed=1))
+
+    def test_refusals(self):
+        with self.assertRaises(ValueError):
+            cost_interval([])
+        with self.assertRaises(ValueError):
+            cost_interval([PairCost(True, 1, True, 1)], level=0)
+
+    def test_cost_verdicts(self):
+        self.assertEqual(COST_LIMIT, 1.10)
+        self.assertEqual(cost_verdict(0.95, 1.08), WITHIN)
+        self.assertEqual(cost_verdict(1.12, 1.30), OVER)
+        self.assertEqual(cost_verdict(0.98, 1.10), INCONCLUSIVE)
+        self.assertEqual(cost_verdict(1.10, 1.20), INCONCLUSIVE)
+
+    def test_parity_needs_both(self):
+        table = {
+            (NON_INFERIOR, WITHIN): NON_INFERIOR,
+            (NON_INFERIOR, INCONCLUSIVE): INCONCLUSIVE,
+            (NON_INFERIOR, OVER): INFERIOR,
+            (NON_INFERIOR, "unknown"): INCONCLUSIVE,
+            (INCONCLUSIVE, WITHIN): INCONCLUSIVE,
+            (INFERIOR, WITHIN): INFERIOR,
+            (INFERIOR, "unknown"): INFERIOR,
+        }
+        for (passes, cost), expected in table.items():
+            self.assertEqual(parity(passes, cost), expected, (passes, cost))
 
 
 if __name__ == "__main__":
