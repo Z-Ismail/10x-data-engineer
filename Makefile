@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph equivalence compare clean
+.PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph equivalence compare parity clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -74,6 +74,25 @@ compare:
 	done; done
 	$(PYTHON) -m tenx.compare run --goal demo/goal.md --checks tests/fixtures/demo_gate.json \
 		--out runs/compare --trials $(COMPARE_TRIALS) $(COMPARE_FLAGS) \
+		$(foreach name,$(COMPARE_DATASETS),--raw $(name)=$(COMPARE_DATA)/$(name)/data)
+
+# The current runner and the graph, each with the cross-source agent, on the
+# same eight datasets, PARITY_TRIALS pairs each (64 pairs, 128 runs, by
+# default); the graph is non-inferior when the pass-rate difference stays
+# below 10 points and its cost per pass within 10%. Needs Claude Code,
+# signed in, and bubblewrap. Run it again to resume. Estimated above US$5,
+# so it needs approval: make parity PARITY_FLAGS=--approve-cost
+PARITY_TRIALS ?= 8
+PARITY_FLAGS ?=
+
+parity:
+	@for seed in $(COMPARE_SEEDS); do for size in $(COMPARE_SIZES); do \
+		folder=$(COMPARE_DATA)/s$$seed-$$size; \
+		test -d $$folder/data || $(PYTHON) demo/generate.py --seed $$seed --companies $$size \
+			--out $$folder/data --answers-out $$folder/answers || exit 1; \
+	done; done
+	$(PYTHON) -m tenx.compare paired --goal demo/goal.md --checks tests/fixtures/demo_gate.json \
+		--out runs/parity --trials $(PARITY_TRIALS) $(PARITY_FLAGS) \
 		$(foreach name,$(COMPARE_DATASETS),--raw $(name)=$(COMPARE_DATA)/$(name)/data)
 
 clean:

@@ -30,6 +30,10 @@ comparison datasets with a stand-in for Claude Code, and fails if what they
 leave behind differs by a byte; it takes about seven minutes and needs
 bubblewrap.
 
+`make parity` runs the graph and the earlier runner with real agents, 64
+pairs, and is refused unless `PARITY_FLAGS=--approve-cost` is given, since it
+is estimated above US$5.
+
 ## Guidelines
 
 - One logical change per commit, with its tests.

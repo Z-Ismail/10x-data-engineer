@@ -17,6 +17,8 @@ make engineer-alone    # the same without the cross-source agent
 make engineer-scouts   # the same as make engineer, with a scout for each raw table first
 make engineer-graph    # the same as make engineer, as a graph that can be resumed
 make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
+make parity      # the graph against the earlier runner with real agents, 64 pairs;
+                 # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
 make compare     # runs the engineer with and without the other agents, 128 runs;
                  # needs COMPARE_FLAGS=--approve-cost (estimated above US$5)
 ```
@@ -881,8 +883,68 @@ seed 2026, 1000 companies, fail (gate FAIL): identical: 51 files compared, 5 gra
 ```
 
 It shows that the graph changed how a run is carried out, not what it
-produces. Whether real agents do as well in the graph will be measured
-separately, with live runs.
+produces. Whether real agents do as well in the graph is measured
+separately, with live runs (below).
+
+### Paired comparison with the earlier runner
+
+```
+make parity PARITY_FLAGS=--approve-cost
+python -m tenx.compare paired --raw NAME=FOLDER [--raw NAME=FOLDER ...] \
+    --goal demo/goal.md --checks tests/fixtures/demo_gate.json --out runs/parity \
+    [--trials 8] [--parallel 3] [--approve-cost]
+python -m tenx.compare report runs/parity
+```
+
+`python -m tenx.compare paired` runs the earlier runner (`tenx.engineer`)
+and the graph run (`tenx.run`), each with the cross-source agent and real
+Claude Code, on the same datasets. A pair is one dataset and one trial
+number: its two runs are next to each other in the order, and which goes
+first is drawn from a seed. `make parity` runs the eight comparison datasets
+eight times each: 64 pairs, 128 runs, three at a time. It resumes like
+`make compare`: a run without a gate verdict is run again from an empty
+folder, and a pair counts only when both of its runs have a verdict.
+
+Each pair is counted as both passing, only the earlier runner passing, only
+the graph passing, or neither. The difference in pass rates, earlier runner
+minus graph, gets Tango's score interval for paired proportions at 95%
+(`tenx/parity.py`; it stays usable when few pairs, or none, disagree). The
+margin is fixed in the code before any run, at 10 points:
+
+| 95% interval of the difference | Pass-rate verdict |
+| --- | --- |
+| wholly below +10 points | non-inferior |
+| wholly above +10 points | inferior |
+| anything else, including a limit on +10 | inconclusive |
+
+The cost per pass of each runner is all its estimated spend divided by its
+passes, over the counted pairs. The graph's cost per pass over the earlier
+runner's gets a 95% bootstrap interval from 2,000 resamples of whole pairs,
+drawn from a fixed seed, so the same runs always give the same figures. The
+graph's cost is within the limit when the whole interval is below 1.10, over
+it when the whole interval is above 1.10, and inconclusive otherwise; it is
+unknown if any counted run's cost was not reported. The overall verdict is
+non-inferior only when the pass rate is non-inferior and the cost within
+the limit, inferior when either is inferior or over, and inconclusive
+otherwise. An inconclusive verdict is reported as such, never as equal.
+
+`comparison.txt` and `comparison.json` hold the counts, both pass rates,
+the difference and its interval, both verdicts, the cost figures, the
+counts by dataset and the pairs left out. Even when the two runners are
+equally good, 64 pairs give an inconclusive verdict in a sizeable share of
+comparisons: in a simulation with both at a 97% pass rate, the pass-rate
+verdict was non-inferior in about three comparisons of four. `--trials`
+gives more pairs.
+
+`make parity` is priced before anything starts, from what each agent call
+usually costs, and refused without approval:
+
+```
+$ make parity
+error: 128 runs to do, estimated at US$35.84, at most US$147.20 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
+```
+
+No live paired comparison has been run yet.
 
 ## Run records and graph state
 
@@ -930,7 +992,7 @@ construct objects of any class a checkpoint file names.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison, the run artefacts, the spending policy, the capability interfaces, and the run records |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, and the run records |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |

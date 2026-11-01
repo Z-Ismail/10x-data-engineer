@@ -11,7 +11,15 @@ same figures.
 
     python -m tenx.compare run --raw NAME=FOLDER [--raw NAME=FOLDER ...]
         --goal <file> --checks <file> --out <folder> [--trials 4] [--parallel 3]
+    python -m tenx.compare paired --raw NAME=FOLDER [--raw NAME=FOLDER ...]
+        --goal <file> --checks <file> --out <folder> [--trials 8] [--parallel 3]
     python -m tenx.compare report <folder>
+
+``paired`` compares two runners rather than arms: today's runner and the
+same run as a graph, each with the cross-source agent, on the same datasets
+and trials, the two runs of a pair next to each other. The pairs are
+compared by Tango's interval on the difference in pass rates against a
+10-point margin fixed in advance, and by the cost per pass (tenx.parity).
 
 Each run is an ordinary engineer run, in its own folder:
 
@@ -47,7 +55,7 @@ from decimal import Decimal
 from math import comb, exp, lgamma, log
 from pathlib import Path
 
-from tenx import artefacts
+from tenx import artefacts, parity
 from tenx.engineer import EngineerError
 from tenx.engineer import run as engineer_run
 from tenx.gate import GateError, load_declaration
@@ -62,6 +70,10 @@ ARMS = {
     "both": (True, True),
 }
 BASELINE = "alone"
+# The paired comparison: today's runner with the cross-source agent, and the
+# same run as a graph. Each dataset and trial runs both, back to back.
+PAIRED = "paired"
+PAIRED_ARMS = ("default", "graph")
 # An arm is said to help (or hurt) when the probability that its pass rate
 # is higher (or lower) than the baseline's reaches this. With three arms
 # compared with one baseline, 0.98 keeps the chance of wrongly keeping any
@@ -162,13 +174,7 @@ class Trial:
         return f"{self.dataset}/{self.arm}/{self.trial}"
 
 
-def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
-    """The order to run every arm on every dataset, trials times.
-
-    A block is one dataset and one trial number, and holds each arm once, in
-    a random order drawn from the seed. Blocks run trial by trial, so a
-    comparison cut short still has every arm on nearly the same datasets.
-    """
+def _check_plan(datasets: Sequence[str], arms: Sequence[str], trials: int) -> None:
     if not isinstance(trials, int) or isinstance(trials, bool) or trials < 1:
         raise ValueError(f"trials must be a whole number of at least 1, not {trials!r}")
     for kind, names in (("dataset", datasets), ("arm", arms)):
@@ -179,12 +185,9 @@ def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 
         for name in names:
             if not isinstance(name, str) or not _NAME.fullmatch(name):
                 raise ValueError(f"{kind} name {name!r} must be letters, digits, '_', '.' or '-'")
-    unknown = [arm for arm in arms if arm not in ARMS]
-    if unknown:
-        raise ValueError(f"unknown arm {unknown[0]!r}; the arms are {', '.join(ARMS)}")
-    if BASELINE not in arms:
-        raise ValueError(f"the arms must include {BASELINE!r}, which the others are compared with")
-    rng = random.Random(f"{seed}:compare")
+
+
+def _blocks(datasets: Sequence[str], arms: Sequence[str], trials: int, rng) -> list[Trial]:
     order = []
     for trial in range(1, trials + 1):
         for dataset in datasets:
@@ -194,12 +197,48 @@ def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 
     return order
 
 
+def plan(datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order to run every arm on every dataset, trials times.
+
+    A block is one dataset and one trial number, and holds each arm once, in
+    a random order drawn from the seed. Blocks run trial by trial, so a
+    comparison cut short still has every arm on nearly the same datasets.
+    """
+    _check_plan(datasets, arms, trials)
+    unknown = [arm for arm in arms if arm not in ARMS]
+    if unknown:
+        raise ValueError(f"unknown arm {unknown[0]!r}; the arms are {', '.join(ARMS)}")
+    if BASELINE not in arms:
+        raise ValueError(f"the arms must include {BASELINE!r}, which the others are compared with")
+    return _blocks(datasets, arms, trials, random.Random(f"{seed}:compare"))
+
+
+def paired_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order of a paired comparison: each pair's two runs next to each other.
+
+    A pair is one dataset and one trial number; which runner goes first is
+    drawn from the seed.
+    """
+    _check_plan(datasets, PAIRED_ARMS, trials)
+    return _blocks(datasets, PAIRED_ARMS, trials, random.Random(f"{seed}:paired"))
+
+
 def write_plan(
-    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+    out: Path,
+    datasets: Sequence[str],
+    arms: Sequence[str],
+    trials: int,
+    seed: int,
+    mode: str | None = None,
 ) -> list[Trial]:
     """Plan the runs and keep the plan in out, so the comparison can resume."""
-    order = plan(datasets, arms, trials, seed)
+    order = (
+        paired_plan(datasets, trials, seed)
+        if mode == PAIRED
+        else plan(datasets, arms, trials, seed)
+    )
     document = {
+        **({"mode": mode} if mode else {}),
         "datasets": list(datasets),
         "arms": list(arms),
         "trials": trials,
@@ -451,10 +490,210 @@ def _table(header: list[str], rows: list[list[str]], left: int) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class PairedSummary:
+    """The paired verdicts, the pass-rate difference and the cost of each runner."""
+
+    datasets: list[str]
+    trials: int
+    pairs: parity.Pairs
+    interval: tuple[float, float] | None
+    verdict: str
+    cost_per_pass: dict[str, float | None]
+    cost_interval: tuple[float, float] | None
+    cost_verdict: str
+    parity: str
+    by_dataset: dict[str, parity.Pairs]
+    left_out: tuple[str, ...]
+    planned: int
+
+    def to_dict(self) -> dict:
+        def counts(pairs: parity.Pairs) -> dict:
+            return {
+                "both_pass": pairs.both,
+                "only_default_passes": pairs.first_only,
+                "only_graph_passes": pairs.second_only,
+                "neither_passes": pairs.neither,
+            }
+
+        n = self.pairs.n
+
+        def finite(value: float | None) -> float | str | None:
+            return "infinity" if value == float("inf") else value
+
+        return {
+            "mode": PAIRED,
+            "datasets": self.datasets,
+            "trials": self.trials,
+            "planned_pairs": self.planned,
+            "pairs": counts(self.pairs),
+            "pass_rate": {
+                "default": (self.pairs.both + self.pairs.first_only) / n if n else None,
+                "graph": (self.pairs.both + self.pairs.second_only) / n if n else None,
+            },
+            "difference": self.pairs.difference if n else None,
+            "interval_95": list(self.interval) if self.interval else None,
+            "margin": parity.MARGIN,
+            "verdict": self.verdict,
+            "cost_per_pass_usd": {k: finite(v) for k, v in self.cost_per_pass.items()},
+            "cost_ratio_interval_95": (
+                [finite(v) for v in self.cost_interval] if self.cost_interval else None
+            ),
+            "cost_limit": parity.COST_LIMIT,
+            "cost_verdict": self.cost_verdict,
+            "parity": self.parity,
+            "by_dataset": {name: counts(pairs) for name, pairs in self.by_dataset.items()},
+            "pairs_left_out": list(self.left_out),
+        }
+
+
+def _count(pairs: list[tuple[Outcome, Outcome]]) -> parity.Pairs:
+    verdicts = [(d.gate == "PASS", g.gate == "PASS") for d, g in pairs]
+    return parity.Pairs(
+        both=verdicts.count((True, True)),
+        first_only=verdicts.count((True, False)),
+        second_only=verdicts.count((False, True)),
+        neither=verdicts.count((False, False)),
+    )
+
+
+def summarise_paired(out: Path) -> PairedSummary:
+    """Count the pairs where both runs have a verdict, and compare the runners on them."""
+    document, order = read_plan(out)
+    found = {(t.dataset, t.trial, t.arm): outcome(out, t) for t in order}
+    keys = sorted({(t.dataset, t.trial) for t in order}, key=lambda k: (k[1], k[0]))
+    counted, left_out = [], []
+    for dataset, trial in keys:
+        first, second = (found[(dataset, trial, arm)] for arm in PAIRED_ARMS)
+        if first.gate is None or second.gate is None:
+            left_out.append(f"{dataset}/{trial}")
+        else:
+            counted.append((first, second))
+    pairs = _count(counted)
+    low_high = parity.interval(pairs) if counted else None
+    verdict = parity.verdict(*low_high) if low_high else "no pairs"
+    costs = [
+        parity.PairCost(d.gate == "PASS", d.cost_usd, g.gate == "PASS", g.cost_usd)
+        for d, g in counted
+    ]
+    known = bool(costs) and all(c.first_usd is not None and c.second_usd is not None for c in costs)
+    per_pass = {arm: None for arm in PAIRED_ARMS}
+    cost_low_high = None
+    cost_verdict = parity.UNKNOWN
+    if known:
+        per_pass = {
+            "default": parity.cost_per_pass(
+                [c.first_usd for c in costs], pairs.both + pairs.first_only
+            ),
+            "graph": parity.cost_per_pass(
+                [c.second_usd for c in costs], pairs.both + pairs.second_only
+            ),
+        }
+        cost_low_high = parity.cost_interval(costs, seed=document.get("seed", 0))
+        cost_verdict = parity.cost_verdict(*cost_low_high)
+    datasets = document["datasets"]
+    return PairedSummary(
+        datasets=datasets,
+        trials=document["trials"],
+        pairs=pairs,
+        interval=low_high,
+        verdict=verdict,
+        cost_per_pass=per_pass,
+        cost_interval=cost_low_high,
+        cost_verdict=cost_verdict,
+        parity=parity.parity(verdict, cost_verdict) if low_high else "no pairs",
+        by_dataset={
+            name: _count([(d, g) for d, g in counted if d.trial.dataset == name])
+            for name in datasets
+        },
+        left_out=tuple(left_out),
+        planned=len(keys),
+    )
+
+
+def _points(value: float) -> str:
+    return f"{100 * value:+.1f}"
+
+
+def _ratio(value: float) -> str:
+    return "infinite" if value == float("inf") else f"{value:.3f}"
+
+
+def render_paired(summary: PairedSummary) -> str:
+    """The paired comparison as plain text."""
+    pairs = summary.pairs
+    trials = f"{summary.trials} trial{'s' if summary.trials != 1 else ''}"
+    lines = [
+        (
+            f"paired comparison: {len(summary.datasets)} datasets, {trials} each, "
+            f"{pairs.n} of {summary.planned} pairs have both gate verdicts"
+        ),
+        (
+            "difference = default's pass rate minus graph's; the graph is non-inferior "
+            f"when the 95% interval lies below +{100 * parity.MARGIN:.0f} points"
+        ),
+        "",
+    ]
+    if not pairs.n:
+        return "\n".join(lines + ["no pairs to compare yet"]) + "\n"
+    rows = [
+        ["both pass", str(pairs.both)],
+        ["only default passes", str(pairs.first_only)],
+        ["only graph passes", str(pairs.second_only)],
+        ["neither passes", str(pairs.neither)],
+    ]
+    lines += _table(["pairs", "count"], rows, left=1)
+    low, high = summary.interval
+    default_rate = (pairs.both + pairs.first_only) / pairs.n
+    graph_rate = (pairs.both + pairs.second_only) / pairs.n
+    lines += [
+        "",
+        f"pass rate: default {_percent(default_rate)}, graph {_percent(graph_rate)}",
+        (
+            f"difference: {_points(pairs.difference)} points, 95% interval (Tango) "
+            f"{_points(low)} to {_points(high)}"
+        ),
+        f"pass rate verdict: {summary.verdict}",
+    ]
+    if summary.verdict == parity.NON_INFERIOR and low > 0:
+        lines.append("  (the graph's pass rate is lower, by less than the margin)")
+    cost = summary.cost_per_pass
+    lines.append("")
+    if summary.cost_interval is None:
+        lines.append("cost per pass: unknown (a counted run's cost was not reported)")
+    else:
+        cost_low, cost_high = summary.cost_interval
+        shown = {arm: "-" if v == float("inf") else _money(v) for arm, v in cost.items()}
+        lines += [
+            f"US$ per pass: default {shown['default']}, graph {shown['graph']}",
+            (
+                "graph / default: 95% interval (bootstrap over pairs) "
+                f"{_ratio(cost_low)} to {_ratio(cost_high)}; limit {parity.COST_LIMIT:.2f}"
+            ),
+        ]
+    lines += [f"cost verdict: {summary.cost_verdict}", "", f"parity: {summary.parity}"]
+    lines += ["", "pairs by dataset (both, only default, only graph, neither)", ""]
+    rows = [
+        [name, *(str(v) for v in (p.both, p.first_only, p.second_only, p.neither))]
+        for name, p in summary.by_dataset.items()
+    ]
+    lines += _table(["dataset", "both", "default", "graph", "neither"], rows, left=1)
+    if summary.left_out:
+        lines += ["", "pairs without both gate verdicts, not counted:"]
+        lines += [f"  {name}" for name in summary.left_out]
+    lines += ["", "cost is Claude Code's own estimate, not a bill"]
+    return "\n".join(lines) + "\n"
+
+
 def report(out: Path) -> str:
     """Summarise the comparison in out, and write it there as text and JSON."""
-    summary = summarise(out)
-    text = render(summary)
+    document, _ = read_plan(out)
+    if document.get("mode") == PAIRED:
+        summary = summarise_paired(out)
+        text = render_paired(summary)
+    else:
+        summary = summarise(out)
+        text = render(summary)
     artefacts.write_text(Path(out) / REPORT_TEXT, text)
     artefacts.write_text(Path(out) / REPORT_JSON, json.dumps(summary.to_dict(), indent=2) + "\n")
     return text
@@ -482,7 +721,7 @@ class Estimate:
 
 def agent_calls(arm: str, tables: int) -> list[str]:
     """The kind of each agent call one run of the arm makes: a scout per raw table."""
-    scouts, cross_source = ARMS[arm]
+    scouts, cross_source = (False, True) if arm in PAIRED_ARMS else ARMS[arm]
     return [SCOUT] * (tables if scouts else 0) + [CROSS_SOURCE] * cross_source + [ENGINEER]
 
 
@@ -497,33 +736,95 @@ def estimate(trials: Sequence[Trial], tables: dict[str, int], rules: Policy) -> 
 
 
 def _order(
-    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+    out: Path,
+    datasets: Sequence[str],
+    arms: Sequence[str],
+    trials: int,
+    seed: int,
+    mode: str | None = None,
 ) -> list[Trial]:
     """The planned order: the one kept in out, or a new one. Writes nothing."""
     if (out / PLAN_FILE).is_file():
         document, order = read_plan(out)
-        asked = (list(datasets), list(arms), trials, seed)
-        kept = (document["datasets"], document["arms"], document["trials"], document.get("seed"))
+        asked = (mode, list(datasets), list(arms), trials, seed)
+        kept = (
+            document.get("mode"),
+            document["datasets"],
+            document["arms"],
+            document["trials"],
+            document.get("seed"),
+        )
         if asked != kept:
             raise ValueError(
-                f"{out} holds a comparison of other datasets, arms, trials or seed; "
-                "use another folder"
+                f"{out} holds a comparison of another kind, or of other datasets, arms, "
+                "trials or seed; use another folder"
             )
         return order
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise ValueError(f"{out} must be empty or hold a comparison to resume")
+    if mode == PAIRED:
+        return paired_plan(datasets, trials, seed)
     return plan(datasets, arms, trials, seed)
 
 
 def _start(
-    out: Path, datasets: Sequence[str], arms: Sequence[str], trials: int, seed: int
+    out: Path,
+    datasets: Sequence[str],
+    arms: Sequence[str],
+    trials: int,
+    seed: int,
+    mode: str | None = None,
 ) -> list[Trial]:
     """Check out and keep the plan there, so the comparison can resume."""
-    order = _order(out, datasets, arms, trials, seed)
+    order = _order(out, datasets, arms, trials, seed, mode)
     if not (out / PLAN_FILE).is_file():
         out.mkdir(parents=True, exist_ok=True)
-        write_plan(out, datasets, arms, trials, seed)
+        write_plan(out, datasets, arms, trials, seed, mode)
     return order
+
+
+def _check_inputs(datasets: dict[str, Path], goal: Path, checks: Path, parallel: int) -> None:
+    if not isinstance(parallel, int) or isinstance(parallel, bool) or parallel < 1:
+        raise ValueError(f"parallel must be a whole number of at least 1, not {parallel!r}")
+    for name, folder in datasets.items():
+        if not Path(folder).is_dir():
+            raise ValueError(f"the raw folder for {name}, {folder}, is not a folder")
+    if not Path(goal).is_file():
+        raise ValueError(f"the goal {goal} is not a file")
+    load_declaration(checks)
+
+
+def _execute(out: Path, order: list[Trial], call, parallel: int, progress) -> None:
+    """Run every planned run without a verdict, at most `parallel` at a time.
+
+    `call(trial, folder)` makes one run in an empty folder; an error is
+    reported and the run left without a verdict.
+    """
+    pending = [trial for trial in order if outcome(out, trial).gate is None]
+    lock = threading.Lock()
+    finished = [len(order) - len(pending)]
+
+    def one(trial: Trial) -> None:
+        folder = out / RUNS_DIR / trial.folder
+        if folder.exists():
+            shutil.rmtree(folder)
+        try:
+            call(trial, folder)
+            gate = outcome(out, trial).gate
+            note = f"gate {gate}" if gate else "no gate verdict"
+        except (ArmError, EngineerError, GateError, OSError) as error:
+            note = f"error: {error}"
+        with lock:
+            finished[0] += 1
+            progress(f"[{finished[0]}/{len(order)}] {trial.folder}: {note}")
+
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        for future in [pool.submit(one, trial) for trial in pending]:
+            future.result()
+
+
+class ArmError(Exception):
+    """A run of one arm of a paired comparison stopped with an error."""
 
 
 def run_comparison(
@@ -551,14 +852,7 @@ def run_comparison(
     is written or run unless `approve_cost` is true.
     """
     runner = runner or engineer_run
-    if not isinstance(parallel, int) or isinstance(parallel, bool) or parallel < 1:
-        raise ValueError(f"parallel must be a whole number of at least 1, not {parallel!r}")
-    for name, folder in datasets.items():
-        if not Path(folder).is_dir():
-            raise ValueError(f"the raw folder for {name}, {folder}, is not a folder")
-    if not Path(goal).is_file():
-        raise ValueError(f"the goal {goal} is not a file")
-    load_declaration(checks)
+    _check_inputs(datasets, goal, checks, parallel)
     out = Path(out)
     rules = Policy()
     tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
@@ -571,36 +865,87 @@ def run_comparison(
         )
     progress(cost.describe())
     order = _start(out, list(datasets), arms, trials, seed)
-    pending = [trial for trial in order if outcome(out, trial).gate is None]
-    lock = threading.Lock()
-    finished = [len(order) - len(pending)]
 
-    def one(trial: Trial) -> None:
-        folder = out / RUNS_DIR / trial.folder
-        if folder.exists():
-            shutil.rmtree(folder)
+    def call(trial: Trial, folder: Path) -> None:
         scouts, cross_source = ARMS[trial.arm]
-        try:
-            runner(
-                datasets[trial.dataset],
-                goal,
-                checks,
-                folder,
-                claude=claude,
-                scouts=scouts,
-                cross_source=cross_source,
-            )
-            gate = outcome(out, trial).gate
-            note = f"gate {gate}" if gate else "no gate verdict"
-        except (EngineerError, GateError, OSError) as error:
-            note = f"error: {error}"
-        with lock:
-            finished[0] += 1
-            progress(f"[{finished[0]}/{len(order)}] {trial.folder}: {note}")
+        runner(
+            datasets[trial.dataset],
+            goal,
+            checks,
+            folder,
+            claude=claude,
+            scouts=scouts,
+            cross_source=cross_source,
+        )
 
-    with ThreadPoolExecutor(max_workers=parallel) as pool:
-        for future in [pool.submit(one, trial) for trial in pending]:
-            future.result()
+    _execute(out, order, call, parallel, progress)
+    return report(out)
+
+
+def run_default(raw: Path, goal: Path, checks: Path, out: Path, claude: str) -> None:
+    """Today's runner with the cross-source agent, as make engineer runs it."""
+    engineer_run(raw, goal, checks, out, claude=claude, cross_source=True)
+
+
+def run_graph(raw: Path, goal: Path, checks: Path, out: Path, claude: str) -> None:
+    """The same run as a graph. Imported here, so other modes do not need the graph extra."""
+    from tenx.policy import PolicyError
+    from tenx.ports import PlatformError
+    from tenx.run import RunError, start
+    from tenx.sandbox import SandboxError
+
+    try:
+        start(raw, goal, checks, out, cross_source=True, claude=claude)
+    except (RunError, PlatformError, SandboxError, PolicyError) as error:
+        raise ArmError(str(error)) from error
+
+
+PAIRED_RUNNERS = {"default": run_default, "graph": run_graph}
+
+
+def run_paired(
+    datasets: dict[str, Path],
+    goal: Path,
+    checks: Path,
+    out: Path,
+    trials: int = 8,
+    seed: int = 0,
+    parallel: int = 3,
+    claude: str = "claude",
+    runners: dict | None = None,
+    progress=print,
+    approve_cost: bool = False,
+) -> str:
+    """Run the default runner and the graph on every dataset, trials times, then report.
+
+    Each pair's two runs are next to each other in the order. A run that
+    cannot start, or stops with an error, is reported and left without a
+    verdict, and its pair is not counted; the comparison carries on and a
+    second start runs it again. `runners` stands in for the two runners in
+    tests. Priced first; above the policy's limit nothing is written or run
+    unless `approve_cost` is true.
+    """
+    runners = runners or PAIRED_RUNNERS
+    if set(runners) != set(PAIRED_ARMS):
+        raise ValueError(f"a runner is needed for each of {', '.join(PAIRED_ARMS)}")
+    _check_inputs(datasets, goal, checks, parallel)
+    out = Path(out)
+    rules = Policy()
+    tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
+    order = _order(out, list(datasets), PAIRED_ARMS, trials, seed, PAIRED)
+    cost = estimate([t for t in order if outcome(out, t).gate is None], tables, rules)
+    if cost.typical_usd > rules.approve_above_usd and not approve_cost:
+        raise CostNotApproved(
+            f"{cost.describe()}; above US${rules.approve_above_usd}, so it needs approval: "
+            "run it again with --approve-cost to go ahead"
+        )
+    progress(cost.describe())
+    order = _start(out, list(datasets), PAIRED_ARMS, trials, seed, PAIRED)
+
+    def call(trial: Trial, folder: Path) -> None:
+        runners[trial.arm](datasets[trial.dataset], goal, checks, folder, claude)
+
+    _execute(out, order, call, parallel, progress)
     return report(out)
 
 
@@ -639,6 +984,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run even when the comparison is estimated above US$5",
     )
+    paired = commands.add_parser(
+        "paired",
+        help="run the default runner and the graph on the same datasets, or resume, then report",
+    )
+    paired.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; give one --raw per dataset",
+    )
+    paired.add_argument("--goal", type=Path, required=True, help="what to build, in plain English")
+    paired.add_argument(
+        "--checks", type=Path, required=True, help="the gate's JSON declaration of what to expect"
+    )
+    paired.add_argument("--out", type=Path, required=True, help="folder for the comparison")
+    paired.add_argument("--trials", type=int, default=8, help="pairs on each dataset")
+    paired.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
+    paired.add_argument("--parallel", type=int, default=3, help="runs at the same time")
+    paired.add_argument(
+        "--approve-cost",
+        action="store_true",
+        help="run even when the comparison is estimated above US$5",
+    )
     show = commands.add_parser("report", help="report a comparison from its runs so far")
     show.add_argument("out", type=Path, help="the comparison's folder")
     args = parser.parse_args(argv)
@@ -649,17 +1019,29 @@ def main(argv: list[str] | None = None) -> int:
         datasets = dict(args.raw)
         if len(datasets) != len(args.raw):
             raise ValueError("each dataset may be named only once")
-        text = run_comparison(
-            datasets,
-            args.goal,
-            args.checks,
-            args.out,
-            arms=args.arms,
-            trials=args.trials,
-            seed=args.seed,
-            parallel=args.parallel,
-            approve_cost=args.approve_cost,
-        )
+        if args.command == "paired":
+            text = run_paired(
+                datasets,
+                args.goal,
+                args.checks,
+                args.out,
+                trials=args.trials,
+                seed=args.seed,
+                parallel=args.parallel,
+                approve_cost=args.approve_cost,
+            )
+        else:
+            text = run_comparison(
+                datasets,
+                args.goal,
+                args.checks,
+                args.out,
+                arms=args.arms,
+                trials=args.trials,
+                seed=args.seed,
+                parallel=args.parallel,
+                approve_cost=args.approve_cost,
+            )
     except (ValueError, EngineerError, GateError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

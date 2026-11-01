@@ -67,6 +67,16 @@ Notable changes to this project.
   layout onto the other; any file outside the map is a difference). It runs
   on the eight comparison datasets in CI, and on six behaviours of the
   stand-in, a resumed graph run among them, in the tests.
+- A paired comparison of the graph run with the earlier runner,
+  `python -m tenx.compare paired` and `make parity`: both run with the
+  cross-source agent on the same datasets and trials, the two runs of a pair
+  next to each other. The difference in pass rates gets Tango's 95% score
+  interval for paired proportions against a 10-point margin fixed in
+  advance, with three verdicts (non-inferior, inferior, inconclusive), and
+  the graph's cost per pass is compared with a bootstrap interval against a
+  10% limit (`tenx/parity.py`). It resumes, and is priced and refused above
+  US$5 without `--approve-cost`; the 64 pairs of `make parity` are estimated
+  at US$35.84.
 
 ### Fixed
 
