@@ -36,10 +36,11 @@ jobs:
           bwrap --ro-bind / / --unshare-pid --die-with-parent true
       - name: Run tests
         # The sandbox tests fail here, rather than being skipped, if
-        # bubblewrap cannot run.
+        # bubblewrap cannot run. One module per process, four at a time on
+        # GitHub's runners, to stay well inside the job's time limit.
         env:
           TENX_REQUIRE_SANDBOX: "1"
-        run: make test
+        run: make test-parallel
       - name: Generate demo data
         run: make demo-data
       - name: Profile demo data

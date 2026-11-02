@@ -1,12 +1,17 @@
 PYTHON ?= python3
 
-.PHONY: install test lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph equivalence compare parity clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph equivalence compare parity clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v
+
+# The same tests, one module per process, as many at a time as there are
+# processors; a module that hangs is stopped after 15 minutes.
+test-parallel:
+	$(PYTHON) tests/parallel.py
 
 lint:
 	ruff check .
