@@ -12,6 +12,8 @@ make profile
 Python 3.10 or later. `make install` installs the package in editable mode
 together with DuckDB, dbt, and LangGraph and Pydantic for the workflow.
 The gate tests run `dbt build` many times and take a few minutes.
+`make test-parallel` runs the same tests one module per process, as many
+at a time as there are processors; CI uses it.
 
 The sandbox tests need bubblewrap (`sudo apt install bubblewrap`) and are
 skipped without it, unless `TENX_REQUIRE_SANDBOX=1` is set, as CI does; then
