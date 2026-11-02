@@ -93,6 +93,11 @@ Notable changes to this project.
 
 ### Changed
 
+- CI runs the tests one module per process, four at a time
+  (`make test-parallel`, `tests/parallel.py`): about 5 minutes instead of 13
+  to 19. A module passes only if it runs exactly the tests counted for it,
+  and one that hangs is stopped after 15 minutes and named. `make test` is
+  unchanged.
 - `make install` also installs the new `graph` extra (LangGraph, its SQLite
   checkpointer and Pydantic), pinned to one LangGraph minor version. The
   core package still depends only on DuckDB.
