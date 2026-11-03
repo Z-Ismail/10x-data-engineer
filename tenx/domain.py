@@ -365,6 +365,8 @@ class Failure(Record):
     check: Text
     subject: Text
     status: Literal["fail", "skip"]
+    # What the validator lets an agent be told of it; nothing if it says nothing.
+    feedback: Text | None = None
 
 
 class ValidationResult(Record):
@@ -397,7 +399,12 @@ class ValidationResult(Record):
             passed=report.passed,
             checks=len(report.results),
             failures=tuple(
-                Failure(check=result.check, subject=result.subject, status=result.status)
+                Failure(
+                    check=result.check,
+                    subject=result.subject,
+                    status=result.status,
+                    feedback=result.feedback or None,
+                )
                 for result in report.results
                 if result.status != "pass"
             ),

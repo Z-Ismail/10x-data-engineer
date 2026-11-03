@@ -450,8 +450,18 @@ class ValidationResultTest(unittest.TestCase):
                 "passed": False,
                 "checks": 4,
                 "failures": [
-                    {"check": "rows", "subject": "stg_invoices", "status": "fail"},
-                    {"check": "repeat", "subject": "project", "status": "skip"},
+                    {
+                        "check": "rows",
+                        "subject": "stg_invoices",
+                        "status": "fail",
+                        "feedback": None,
+                    },
+                    {
+                        "check": "repeat",
+                        "subject": "project",
+                        "status": "skip",
+                        "feedback": None,
+                    },
                 ],
                 "report": {
                     "name": "gate-report",
@@ -474,6 +484,18 @@ class ValidationResultTest(unittest.TestCase):
                 "report": None,
             },
         )
+
+    def test_a_failure_keeps_what_its_validator_lets_an_agent_be_told(self):
+        told = CheckResult("rows", "stg_invoices", "fail", "detail", {}, "4 rows, 5 expected")
+        report = ValidationReport(
+            (told, CheckResult("key", "stg_invoices", "fail", "x")), False, ""
+        )
+        failures = ValidationResult.of("duckdb gate", report).failures
+        self.assertEqual([f.feedback for f in failures], ["4 rows, 5 expected", None])
+        # An empty statement says nothing, like no statement.
+        empty = CheckResult("rows", "m", "fail", "detail", {}, "")
+        quiet = ValidationReport((empty,), False, "")
+        self.assertIsNone(ValidationResult.of("duckdb gate", quiet).failures[0].feedback)
 
     def test_a_verdict_that_disagrees_with_its_checks_is_refused(self):
         failure = {"check": "rows", "subject": "stg_invoices", "status": "fail"}
