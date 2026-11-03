@@ -32,7 +32,7 @@ from pathlib import Path
 from tenx import policy as spending
 from tenx.adapters.duckdb import DbtDuckDB, DuckDBGate, DuckDBProfiler
 from tenx.backends.claude_code import ClaudeCode
-from tenx.domain import CostRecord, EngineeringRequest, ResourceBudget
+from tenx.domain import MAX_REPAIRS, CostRecord, EngineeringRequest, ResourceBudget
 from tenx.engineer import (
     CROSS_SOURCE,
     ENGINEER,
@@ -126,8 +126,13 @@ def start(
     rules: Policy | None = None,
     sandbox: Sandbox | None = None,
     claude: str = "claude",
+    repairs: int = 0,
 ) -> dict:
-    """Check the inputs, then run the graph from its first step. Returns the final state."""
+    """Check the inputs, then run the graph from its first step. Returns the final state.
+
+    ``repairs`` is how many times the engineer may repair a project the gate
+    fails, given what the gate found; none by default.
+    """
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise RunError(f"the agent definitions are not in {PLUGIN_DIR}; run from a clone")
     load_declaration(checks)
@@ -148,6 +153,7 @@ def start(
         out=str(out.resolve()),
         cross_source=cross_source,
         isolation="unisolated" if sandbox.name == "none" else "bubblewrap",
+        repairs=repairs,
     )
     budget = Budget(rules)
     begin = {
@@ -241,6 +247,16 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="run the cross-source agent before the engineer (on unless --no-cross-source)",
     )
+    run.add_argument(
+        "--repairs",
+        type=int,
+        choices=range(MAX_REPAIRS + 1),
+        default=0,
+        metavar="N",
+        help="if the gate fails the project, let the engineer repair it up to N times "
+        f"(0 to {MAX_REPAIRS}), told what failed; stops early when a repair fails no fewer "
+        "checks than before (default 0)",
+    )
     run.add_argument("--policy", type=Path, help="JSON spending policy (ceiling and caps)")
     run.add_argument(
         "--unisolated",
@@ -260,7 +276,14 @@ def main(argv: list[str] | None = None) -> int:
             rules = spending.load(args.policy) if args.policy else None
             sandbox = default_sandbox(unisolated=args.unisolated)
             state = start(
-                args.raw, args.goal, args.checks, args.out, args.cross_source, rules, sandbox
+                args.raw,
+                args.goal,
+                args.checks,
+                args.out,
+                args.cross_source,
+                rules,
+                sandbox,
+                repairs=args.repairs,
             )
         else:
             state = resume(args.out)
