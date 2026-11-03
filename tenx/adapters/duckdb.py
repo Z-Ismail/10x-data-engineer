@@ -115,7 +115,12 @@ class DuckDBGate:
         return ValidationReport(
             tuple(
                 CheckResult(
-                    result.check, result.subject, result.status, result.detail, result.facts
+                    result.check,
+                    result.subject,
+                    result.status,
+                    result.detail,
+                    result.facts,
+                    gate.feedback(result),
                 )
                 for result in results
             ),

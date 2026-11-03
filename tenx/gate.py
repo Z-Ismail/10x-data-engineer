@@ -1356,6 +1356,22 @@ def passed(results: list[Result]) -> bool:
     return bool(results) and all(result.status == PASS for result in results)
 
 
+def feedback(result: Result) -> str:
+    """What the engineer may be told of a check when it is asked to repair its work.
+
+    Everything the report says, except the rows an ``expected`` check lists:
+    they come from the declared reference query, which the engineer is never
+    shown, and a model could pass by adding exactly those rows. The counts
+    stay, so the engineer knows how many rows are wrong and must find them
+    itself. Values from the raw files or from the engineer's own models are
+    shown, since it can read both anyway.
+    """
+    if result.check != "expected":
+        return result.detail
+    first, *rest = result.detail.splitlines() or [""]
+    return f"{first}\n(the rows themselves are not shown)" if rest else first
+
+
 def render(results: list[Result]) -> str:
     tally = {
         status: sum(1 for result in results if result.status == status)
