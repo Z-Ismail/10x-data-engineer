@@ -116,7 +116,7 @@ if:
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available: the graph run works only through them |
 | Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available: the per-call caps and the comparison approval apply to every run; the run ceiling applies to graph runs (`python -m tenx.run`) |
 | Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the build workflow runs as a graph that is saved after every step and can be resumed (`python -m tenx.run`), with the run ceiling enforced; with a stand-in for Claude Code it leaves byte-identical projects, notes, reports and usage to the current runner's on eight demo datasets (`make equivalence`). A paired comparison with real agents against the current runner (`make parity`, 64 pairs, a predeclared 10-point margin) is built; it has not been run, and the graph replaces that runner only on a non-inferior verdict. Approvals and the other roles come later |
-| Build | Repair loop driven by the gate's report | Planned |
+| Build | Repair loop driven by the gate's report | In progress: built into the graph run, off by default (`python -m tenx.run run --repairs N`); not yet measured against runs without it |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
 | Review | Advisory reviewer, measured on planted defects | Planned |
 | Platforms | Snowflake first, then Databricks and BigQuery, read-only first | Planned |
