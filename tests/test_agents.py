@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from tenx.repair import REPORT_FILE
+
 AGENTS = Path(__file__).resolve().parent.parent / "agents"
 
 SUPPORTED = {
@@ -72,6 +74,13 @@ class EngineerAgentTest(unittest.TestCase):
     def test_reads_the_table_notes_only_when_they_are_there(self):
         self.assertIn("`TABLE_NOTES.md`, only in some runs", self.body)
         self.assertIn("When it is there, read it before you write the staging models", self.body)
+
+    def test_repairs_from_the_gate_report_only_when_it_is_there(self):
+        self.assertIn("`GATE_REPORT.md`, only in some runs", self.body)
+        self.assertIn("fix it for every\n  row it affects", self.body)
+        self.assertIn("Never write rows or values into a model by hand", self.body)
+        # The file name the prompt gives is the one the run writes.
+        self.assertEqual(REPORT_FILE, "GATE_REPORT.md")
 
     def test_reads_raw_files_through_raw_dir(self):
         self.assertIn("{{ var('raw_dir') }}", self.body)

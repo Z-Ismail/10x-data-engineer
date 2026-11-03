@@ -323,6 +323,11 @@ class ResourceBudget(Record):
         return _policy.from_dict(json.loads(self.model_dump_json()))
 
 
+# The most repairs a run may ask for: the design's two in the same context
+# and one fresh restart.
+MAX_REPAIRS = 3
+
+
 class EngineeringRequest(Record):
     """What a run was asked to do: its sources, its goal, and how to run."""
 
@@ -336,6 +341,9 @@ class EngineeringRequest(Record):
     cross_source: bool = True
     scouts: bool = False
     isolation: Literal["bubblewrap", "unisolated"] = "bubblewrap"
+    # How many times the engineer may repair its work after the validator
+    # fails it; none unless asked.
+    repairs: Annotated[int, Field(ge=0, le=MAX_REPAIRS)] = 0
 
 
 # Every step a workflow can take, in the only order they can be taken.
@@ -365,6 +373,8 @@ class Failure(Record):
     check: Text
     subject: Text
     status: Literal["fail", "skip"]
+    # What the validator lets an agent be told of it; nothing if it says nothing.
+    feedback: Text | None = None
 
 
 class ValidationResult(Record):
@@ -397,7 +407,12 @@ class ValidationResult(Record):
             passed=report.passed,
             checks=len(report.results),
             failures=tuple(
-                Failure(check=result.check, subject=result.subject, status=result.status)
+                Failure(
+                    check=result.check,
+                    subject=result.subject,
+                    status=result.status,
+                    feedback=result.feedback or None,
+                )
                 for result in report.results
                 if result.status != "pass"
             ),

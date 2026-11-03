@@ -42,6 +42,7 @@ from tenx.gate import (
     check_total,
     expected_rows,
     expected_totals,
+    feedback,
     load_declaration,
     main,
     parse_declaration,
@@ -2322,6 +2323,44 @@ class DemoProject(unittest.TestCase):
             },
         )
         self.assertIn("nowhere", results[("build", "project")].detail)
+
+
+class FeedbackTest(unittest.TestCase):
+    """What the engineer may be told of each check when it repairs its work."""
+
+    def test_expected_rows_are_withheld_and_their_counts_kept(self):
+        detail = (
+            "customer_id, account_id: 5 rows expected and 4 in the model, "
+            "of which 0 not expected and 1 expected but missing\n"
+            "missing: (cus_000007A, 001000000000000007)"
+        )
+        result = Result("expected", "int_matched", FAIL, detail)
+        self.assertEqual(
+            feedback(result),
+            "customer_id, account_id: 5 rows expected and 4 in the model, "
+            "of which 0 not expected and 1 expected but missing\n"
+            "(the rows themselves are not shown)",
+        )
+
+    def test_unexpected_rows_are_withheld_too(self):
+        detail = "a: 2 rows expected and 3 in the model, of which 1 not expected\nnot expected: (x)"
+        shown = feedback(Result("expected", "m", FAIL, detail))
+        self.assertNotIn("(x)", shown)
+        self.assertTrue(shown.startswith("a: 2 rows expected and 3 in the model"))
+
+    def test_an_expected_check_of_one_line_is_shown_as_it_is(self):
+        for detail in (
+            "column account_id is not in the model",
+            "a: the 5 expected rows, and no other",
+        ):
+            result = Result("expected", "m", FAIL, detail)
+            self.assertEqual(feedback(result), detail)
+
+    def test_other_checks_are_shown_in_full(self):
+        detail = "dbt build failed\n  Compilation Error in model stg_x\n  column y not found"
+        for check in ("build", "rows", "key", "total", "repeat"):
+            result = Result(check, "stg_x", FAIL, detail)
+            self.assertEqual(feedback(result), detail)
 
 
 if __name__ == "__main__":

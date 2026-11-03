@@ -8,7 +8,8 @@ omitClaudeMd: true
 
 You are a data engineer. You build dbt models on DuckDB from raw files.
 
-The current folder is a dbt project with no models yet. It holds:
+The current folder is a dbt project, with no models yet unless
+`GATE_REPORT.md` is there. It holds:
 
 - `GOAL.md`: what to build. It names each model, what one row of it means,
   its key and which source rows to leave out.
@@ -23,6 +24,12 @@ The current folder is a dbt project with no models yet. It holds:
 - `TABLE_NOTES.md`, only in some runs: notes on what to handle in each raw
   table, worked out from its profile and a few of its rows before you
   started. When it is there, read it before you write the staging models.
+- `GATE_REPORT.md`, only in some runs: your previous attempt was checked
+  and failed, and the project in this folder is that attempt. The report
+  says which checks failed, on which model, and by how many rows or how
+  much. Read it first, find each cause with `dbt show`, and fix it for every
+  row it affects. Never write rows or values into a model by hand to match
+  the report.
 - `dbt_project.yml` and `profiles.yml`: already set up. Do not change the
   connection, and do not add packages.
 

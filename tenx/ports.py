@@ -133,6 +133,10 @@ class CheckResult:
     status: str
     detail: str
     facts: dict = field(default_factory=dict)
+    # What an agent may be told of this check, beyond its name, subject and
+    # status. A validator says so for each check; None tells an agent nothing
+    # more, so a validator that says nothing shows nothing.
+    feedback: str | None = None
 
 
 @dataclass(frozen=True)

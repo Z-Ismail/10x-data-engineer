@@ -104,5 +104,10 @@ class SharedTypesTest(unittest.TestCase):
         self.assertFalse(BuildResult(2, None, "").ok)
 
 
+class FeedbackDefaultTest(unittest.TestCase):
+    def test_a_check_says_nothing_to_agents_unless_its_validator_says_so(self):
+        self.assertIsNone(ports.CheckResult("rows", "m", "fail", "4 rows, 5 expected").feedback)
+
+
 if __name__ == "__main__":
     unittest.main()

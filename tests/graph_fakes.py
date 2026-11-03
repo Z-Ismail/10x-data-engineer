@@ -81,6 +81,10 @@ class Fakes:
         # What each agent reports, by role name; None writes no report.
         self.reports = {"cross-source": report(0.07, 9, ANSWER), "engineer": report(0.11, 18)}
         self.verdict = True
+        # When set, how many checks fail at each validation in turn (0 passes).
+        self.failing: list[int] | None = None
+        # Called with the engineer's folder after it writes its model.
+        self.engineer_also = None
         self.seen: dict[str, list[str]] = {}
 
     def _capable(self, port: str, all_of: set[str]) -> frozenset[str]:
@@ -118,6 +122,8 @@ class Fakes:
         )
         if role.name == "engineer":
             (workspace / "models" / "orders.sql").write_text("select 1\n")
+            if self.engineer_also is not None:
+                self.engineer_also(workspace)
         made = self.reports.get(role.name)
         if made is None:
             return AgentRun(1, None, message="crashed")
@@ -128,6 +134,17 @@ class Fakes:
     def validate(self, project, raw, declaration, workdir, sandbox=None, hidden=()):
         self.calls.append("gate")
         (workdir / "built.duckdb").write_text("tables\n")
+        if self.failing is not None:
+            failing = self.failing.pop(0)
+            results = (
+                CheckResult("build", "project", "pass", "built"),
+                CheckResult(
+                    "rows", "orders", "fail" if failing else "pass", "5 rows", {}, "5 of 6 rows"
+                ),
+                CheckResult("key", "orders", "fail" if failing > 1 else "pass", "1 repeated"),
+            )
+            verdict = not failing
+            return ValidationReport(results, verdict, f"gate {failing} failing\n")
         status = "pass" if self.verdict else "fail"
         results = (
             CheckResult("build", "project", "pass", "built"),

@@ -77,6 +77,15 @@ Notable changes to this project.
   10% limit (`tenx/parity.py`). It resumes, and is priced and refused above
   US$5 without `--approve-cost`; the 64 pairs of `make parity` are estimated
   at US$35.84.
+- Repairs in the graph run, off by default: `python -m tenx.run run
+  --repairs N` (0 to 3) gives the engineer up to N more attempts when the
+  gate fails its project. Each repair starts from the project just checked,
+  in a new attempt folder, with `GATE_REPORT.md` saying which checks failed,
+  on which model and by how much. The rows of an `expected` check are not
+  shown, only their counts, because they come from the gate's hidden
+  reference query. Repairs stop when one fails no fewer checks than the
+  attempt before it, when the run ceiling cannot hold another, or at N.
+  Every round is charged and has its own row in `usage.json`.
 
 ### Fixed
 

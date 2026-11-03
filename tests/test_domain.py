@@ -378,6 +378,7 @@ def request(**changes) -> dict:
         "cross_source": True,
         "scouts": False,
         "isolation": "bubblewrap",
+        "repairs": 0,
     }
     value.update(changes)
     return value
@@ -400,10 +401,22 @@ class RequestAndPlanTest(unittest.TestCase):
             (request(isolation="none"), "isolation:"),
             (request(raw=""), "raw:"),
             (missing, "declaration: Field required"),
+            (request(repairs=-1), "repairs:"),
+            (request(repairs=4), "repairs:"),
+            (request(repairs=True), "repairs:"),
+            (request(repairs="2"), "repairs:"),
         ]:
             with self.subTest(expected=expected), self.assertRaises(RecordError) as caught:
                 EngineeringRequest.load(value)
             self.assertIn(expected, str(caught.exception))
+
+    def test_repairs_from_none_to_three(self):
+        self.assertEqual(
+            EngineeringRequest.load({k: v for k, v in request().items() if k != "repairs"}).repairs,
+            0,
+        )
+        for repairs in range(4):
+            self.assertEqual(EngineeringRequest.load(request(repairs=repairs)).repairs, repairs)
 
     def test_a_plan_takes_its_steps_once_in_order(self):
         steps = ["profile", "overlap", "cross-source", "engineer", "gate", "report"]
@@ -450,8 +463,18 @@ class ValidationResultTest(unittest.TestCase):
                 "passed": False,
                 "checks": 4,
                 "failures": [
-                    {"check": "rows", "subject": "stg_invoices", "status": "fail"},
-                    {"check": "repeat", "subject": "project", "status": "skip"},
+                    {
+                        "check": "rows",
+                        "subject": "stg_invoices",
+                        "status": "fail",
+                        "feedback": None,
+                    },
+                    {
+                        "check": "repeat",
+                        "subject": "project",
+                        "status": "skip",
+                        "feedback": None,
+                    },
                 ],
                 "report": {
                     "name": "gate-report",
@@ -474,6 +497,18 @@ class ValidationResultTest(unittest.TestCase):
                 "report": None,
             },
         )
+
+    def test_a_failure_keeps_what_its_validator_lets_an_agent_be_told(self):
+        told = CheckResult("rows", "stg_invoices", "fail", "detail", {}, "4 rows, 5 expected")
+        report = ValidationReport(
+            (told, CheckResult("key", "stg_invoices", "fail", "x")), False, ""
+        )
+        failures = ValidationResult.of("duckdb gate", report).failures
+        self.assertEqual([f.feedback for f in failures], ["4 rows, 5 expected", None])
+        # An empty statement says nothing, like no statement.
+        empty = CheckResult("rows", "m", "fail", "detail", {}, "")
+        quiet = ValidationReport((empty,), False, "")
+        self.assertIsNone(ValidationResult.of("duckdb gate", quiet).failures[0].feedback)
 
     def test_a_verdict_that_disagrees_with_its_checks_is_refused(self):
         failure = {"check": "rows", "subject": "stg_invoices", "status": "fail"}

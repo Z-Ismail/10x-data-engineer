@@ -771,6 +771,50 @@ and the run stops with `stopped: budget` before a call that would pass the
 ceiling (US$2.00 by default). After a resume, every call settled before the
 stop counts against the ceiling again.
 
+### Repairs
+
+`run --repairs N` (0 to 3, default 0) lets the engineer repair its project
+when the gate fails it. The repair is a new engineer attempt, in its own
+folder, that starts from the project the gate just checked: its models and
+project files, without the database, `target/` and logs of its own builds,
+and with the same goal, profiles and `JOINS.md` as before. A link the
+engineer made in its project is copied as a link and never followed, so the
+copy, which runs outside the sandbox, cannot bring in a file the engineer
+could not read. The attempt also gets `GATE_REPORT.md`, here for a crosswalk
+that matched whole addresses after lower case and trimming, on the demo data
+(seed 42, 200 companies):
+
+```
+# What the checks found
+
+Your previous attempt was built from an empty database and checked after you
+finished. 1 check failed, 23 passed.
+The project in this folder is that attempt. Find the cause of each failure
+and fix it in the models, for every row it affects, not only for the rows or
+values named here, and run `dbt build` again before you stop.
+
+## expected: int_customers_matched_to_accounts
+
+customer_id, account_id: 147 rows expected and 147 in the model, of which 13 not expected and 13 expected but missing
+(the rows themselves are not shown)
+```
+
+Each check says what the engineer may be told of it. The gate tells it what
+its report says, except the rows an `expected` check lists: those come from
+the declared reference query, which the engineer never sees, and a model
+could pass by adding exactly those rows. The counts stay. A check that says
+nothing is shown only by its name, model and status.
+
+The gate checks every repair. Another repair follows only if the last one
+failed fewer checks (failed or not run) than the attempt before it, and
+only if the run ceiling can hold the engineer's cap again; otherwise the run
+ends failed, with the reason (for example `the repairs allowed (2) were
+made`). A repair that cannot be afforded does not stop the run part way:
+the run already has a verdict. `usage.json` lists every round
+(`engineer`, `engineer repair 1`, ...), so its totals include them;
+`budget.json` lists every charge, as for any attempt. A resumed run repairs
+from where it stopped, like any other step.
+
 Agent calls and gate runs each get an attempt folder:
 
 ```

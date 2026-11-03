@@ -41,6 +41,13 @@ project, the raw files and the home folder; every attempt fails in the
 sandbox and succeeds without it. `python -m tenx.gate` also builds in the
 sandbox, and refuses where none can be set up unless given `--unisolated`.
 
+When a graph run repairs a failed project (`--repairs`), the engineer is
+told what the gate found, but never the rows the gate worked out from its
+hidden reference query, only how many differ; a check that does not say
+what may be shown is reported by name alone. The engineer's project is
+copied into the repair's folder outside the sandbox, with any link it made
+copied as a link and not followed.
+
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and
 later, AppArmor allows bubblewrap to set up a sandbox only with a profile

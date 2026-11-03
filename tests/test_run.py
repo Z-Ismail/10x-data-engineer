@@ -12,6 +12,7 @@ process.
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -38,6 +39,16 @@ if "tenx:engineer" in sys.argv and marker and not Path(marker).exists():
     sys.exit(1)
 """
 
+# Started as the engineer with no GATE_REPORT.md in its folder, the stand-in
+# copies STUB_FIRST_MODELS, when set, instead of STUB_MODELS: a first attempt
+# that fails, then a repair that passes.
+FIRST_MODELS = """
+if "tenx:engineer" in sys.argv and os.environ.get("STUB_FIRST_MODELS"):
+    if not Path("GATE_REPORT.md").exists():
+        os.environ["STUB_MODELS"] = os.environ["STUB_FIRST_MODELS"]
+"""
+CROSSWALK = "intermediate/int_customers_matched_to_accounts.sql"
+
 
 class CommandLineTest(unittest.TestCase):
     @classmethod
@@ -49,9 +60,23 @@ class CommandLineTest(unittest.TestCase):
         bin_dir = root / "bin"
         bin_dir.mkdir()
         claude = bin_dir / "claude"
-        claude.write_text(f"#!{sys.executable}\n{KILL_ONCE}\n{STUB}", encoding="utf-8")
+        claude.write_text(
+            f"#!{sys.executable}\n{KILL_ONCE}\n{FIRST_MODELS}\n{STUB}", encoding="utf-8"
+        )
         claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
         cls.bin = bin_dir
+        # The reference models with a crosswalk on whole addresses, which the
+        # gate fails on the expected rows.
+        cls.whole_address = root / "whole_address"
+        shutil.copytree(REFERENCE_MODELS, cls.whole_address)
+        (cls.whole_address / CROSSWALK).write_text(
+            "select customers.customer_id, accounts.account_id\n"
+            "from {{ ref('stg_billing__customers') }} as customers\n"
+            "left join {{ ref('stg_crm__accounts') }} as accounts\n"
+            "    on customers.email = accounts.billing_email\n",
+            encoding="utf-8",
+        )
+        cls.first_models = ""
 
     @classmethod
     def tearDownClass(cls):
@@ -71,6 +96,7 @@ class CommandLineTest(unittest.TestCase):
             "STUB_MODELS": str(REFERENCE_MODELS),
             "STUB_ANSWER": json.dumps(ANSWER),
             "STUB_KILL_ONCE": str(self.root / "killed") if kill else "",
+            "STUB_FIRST_MODELS": self.first_models,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
         }
         return subprocess.run(
@@ -124,6 +150,34 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertTrue(again.stdout.startswith("status: passed\n"))
         self.assertFalse((self.out / "engineer" / "attempt-2").exists())
+
+    def test_a_run_repaired_after_the_gate_fails(self):
+        self.first_models = str(self.whole_address)
+        done = self.start(False, "--repairs", "2")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: passed\n"), done.stdout)
+        self.assertIn("engineer repair 1  success", done.stdout)
+        first = self.out / "gate" / "attempt-1" / "report.txt"
+        self.assertRegex(first.read_text(), r"FAIL\s+expected\s+int_customers_matched")
+        told = (self.out / "engineer" / "attempt-2" / "work" / "GATE_REPORT.md").read_text()
+        self.assertIn("## expected: int_customers_matched_to_accounts\n", told)
+        self.assertIn("(the rows themselves are not shown)", told)
+        self.assertNotIn("cus_", told)
+        seen = json.loads(self.record.read_text())
+        self.assertIn("GATE_REPORT.md", seen["files"])
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(
+            [role["role"] for role in usage["roles"]],
+            ["cross-source", "engineer", "engineer repair 1"],
+        )
+
+    def test_repairs_outside_none_to_three_are_refused(self):
+        for value in ("-1", "4", "two"):
+            with self.subTest(value=value):
+                done = self.start(False, "--repairs", value)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("--repairs", done.stderr)
+                self.assertFalse(self.out.exists())
 
     def test_refusals_write_nothing(self):
         self.out.mkdir()
