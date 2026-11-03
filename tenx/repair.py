@@ -15,12 +15,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tenx.domain import ValidationResult
+from tenx.domain import MAX_REPAIRS, ValidationResult
+
+__all__ = ["MAX_REPAIRS", "REPORT_FILE", "Decision", "decide", "render"]
 
 REPORT_FILE = "GATE_REPORT.md"
-# The most repairs a run may ask for: the design's two in the same context
-# and one fresh restart, all made here as fresh attempts.
-MAX_REPAIRS = 3
 
 
 def _counted(count: int, noun: str) -> str:

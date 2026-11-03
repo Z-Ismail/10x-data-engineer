@@ -378,6 +378,7 @@ def request(**changes) -> dict:
         "cross_source": True,
         "scouts": False,
         "isolation": "bubblewrap",
+        "repairs": 0,
     }
     value.update(changes)
     return value
@@ -400,10 +401,22 @@ class RequestAndPlanTest(unittest.TestCase):
             (request(isolation="none"), "isolation:"),
             (request(raw=""), "raw:"),
             (missing, "declaration: Field required"),
+            (request(repairs=-1), "repairs:"),
+            (request(repairs=4), "repairs:"),
+            (request(repairs=True), "repairs:"),
+            (request(repairs="2"), "repairs:"),
         ]:
             with self.subTest(expected=expected), self.assertRaises(RecordError) as caught:
                 EngineeringRequest.load(value)
             self.assertIn(expected, str(caught.exception))
+
+    def test_repairs_from_none_to_three(self):
+        self.assertEqual(
+            EngineeringRequest.load({k: v for k, v in request().items() if k != "repairs"}).repairs,
+            0,
+        )
+        for repairs in range(4):
+            self.assertEqual(EngineeringRequest.load(request(repairs=repairs)).repairs, repairs)
 
     def test_a_plan_takes_its_steps_once_in_order(self):
         steps = ["profile", "overlap", "cross-source", "engineer", "gate", "report"]
