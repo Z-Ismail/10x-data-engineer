@@ -93,5 +93,6 @@ class GraphState(TypedDict, total=False):
     validations: Annotated[list[dict], operator.add]  # ValidationResult
     costs: Annotated[list[dict], operator.add]  # CostRecord
     attempts: Annotated[dict[str, int], merge_attempts]  # step -> attempts so far
+    rounds: Annotated[list[int], operator.add]  # the engineer's attempt checked each round
     status: Literal["running", "passed", "failed", "stopped"]
     reason: str  # why a stopped run stopped, in a sentence

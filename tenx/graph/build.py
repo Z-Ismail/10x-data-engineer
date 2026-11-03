@@ -61,6 +61,9 @@ from tenx.ports import (
     Validator,
     require,
 )
+from tenx.repair import REPORT_FILE as REPAIR_FILE
+from tenx.repair import decide
+from tenx.repair import render as render_repair
 
 CHECKPOINT_FILE = "checkpoints.sqlite"
 AGENT_FILE = "agent.json"
@@ -347,8 +350,27 @@ def cross_source_node(toolkit: Toolkit):
     return cross_source
 
 
+# What a repair does not carry over from the attempt it repairs: what the
+# build left, and the inputs, which every attempt is given afresh.
+NOT_CARRIED = ("target", "logs", "dbt_packages", "*.duckdb", "*.duckdb.wal", "*.duckdb.tmp")
+
+
+def _carry_over(previous: Path, work: Path) -> None:
+    # A link the agent made is copied as a link, never followed: this copy
+    # runs outside the sandbox and could otherwise read what the agent cannot.
+    skip = shutil.ignore_patterns(
+        *NOT_CARRIED, GOAL_FILE, SOURCE_PROFILES_DIR, NOTES_FILE, REPAIR_FILE
+    )
+    shutil.copytree(previous, work, symlinks=True, ignore=skip, dirs_exist_ok=True)
+
+
 def engineer_node(toolkit: Toolkit):
-    """The engineer agent, in a project made afresh for each attempt."""
+    """The engineer agent, in a project made afresh for each attempt.
+
+    After a failed validation the same step repairs: the new attempt starts
+    from the project just checked, with ``GATE_REPORT.md`` saying what the
+    validator let it be told of each failure.
+    """
 
     def engineer(state: GraphState) -> dict:
         request = _request(state)
@@ -357,20 +379,33 @@ def engineer_node(toolkit: Toolkit):
         files = {"goal": Path(request.goal), "profiles": profiles}
         if "joins" in found:
             files["joins"] = Path(found["joins"]["path"])
+        checked = [ValidationResult.load(item) for item in state.get("validations") or []]
+        repairing = bool(checked) and not checked[-1].passed
+        if repairing:
+            files["previous project"] = Path(found["project"]["path"])
+            files["gate report"] = Path(found["gate report"]["path"])
 
         def prepare(work: Path) -> None:
+            if repairing:
+                _carry_over(files["previous project"], work)
+                artefacts.write_text(work / REPAIR_FILE, render_repair(checked[-1]))
+            else:
+                toolkit.engine.scaffold(work, Path(request.raw))
             shutil.copytree(profiles, work / SOURCE_PROFILES_DIR)
             shutil.copyfile(request.goal, work / GOAL_FILE)
-            toolkit.engine.scaffold(work, Path(request.raw))
             if "joins" in files:
                 shutil.copyfile(files["joins"], work / NOTES_FILE)
 
         call = call_agent(toolkit, state, ENGINEER_STEP, files, prepare, raw=True)
         if call.stopped:
+            if repairing:
+                # The run has a verdict; not affording a repair leaves it failed.
+                reason = f"no repair made: {call.update['reason']}"
+                return {**call.update, "status": FAILED, "reason": reason}
             return call.update
         number = call.update["attempts"][ENGINEER_STEP]
         project = ArtefactRef.of("project", call.folder / artefacts.WORK_DIR, attempt=number)
-        return plain({**call.update, "artefacts": {"project": project.dump()}})
+        return plain({**call.update, "artefacts": {"project": project.dump()}, "rounds": [number]})
 
     return engineer
 
@@ -420,12 +455,17 @@ def ledger(state: GraphState, roles: Mapping[str, Role], sandbox: str) -> Ledger
     }
     used = []
     for step in (CROSS_SOURCE_STEP, ENGINEER_STEP):
-        number = (state.get("attempts") or {}).get(step)
-        if number is None:
+        last = (state.get("attempts") or {}).get(step)
+        if last is None:
             continue
-        folder = out / step / f"{artefacts.ATTEMPT_PREFIX}{number}"
-        missing = outcomes.get((step, number), "no report")
-        used.append(role_usage(roles[step].name, _report_in(folder), missing))
+        # Each round of a repaired run is a row of its own, so the run's
+        # figures add up every round; a run of one round has one row.
+        rounds = state.get("rounds") if step == ENGINEER_STEP else None
+        for index, number in enumerate(rounds if rounds and len(rounds) > 1 else [last]):
+            folder = out / step / f"{artefacts.ATTEMPT_PREFIX}{number}"
+            missing = outcomes.get((step, number), "no report")
+            name = roles[step].name + (f" repair {index}" if index else "")
+            used.append(role_usage(name, _report_in(folder), missing))
     validations = state.get("validations") or []
     if validations:
         verdict = "PASS" if validations[-1]["passed"] else "FAIL"
@@ -446,7 +486,11 @@ def report_node(toolkit: Toolkit):
             return {}
         validations = state.get("validations") or []
         passed = bool(validations) and validations[-1]["passed"]
-        return {"status": PASSED if passed else FAILED}
+        request = _request(state)
+        if passed or not request.repairs or not validations or state.get("reason"):
+            return {"status": PASSED if passed else FAILED}
+        checked = [ValidationResult.load(item) for item in validations]
+        return {"status": FAILED, "reason": decide(checked, request.repairs).reason}
 
     return report
 
@@ -460,6 +504,16 @@ def _after(step: str):
         return later[0] if later else REPORT_STEP
 
     return route
+
+
+def _after_gate(state: GraphState) -> str:
+    """Repair a failed project while repairs remain and each one makes headway."""
+    if state.get("status") != RUNNING:
+        return REPORT_STEP
+    checked = [ValidationResult.load(item) for item in state.get("validations") or []]
+    if checked and decide(checked, _request(state).repairs).repair:
+        return ENGINEER_STEP
+    return REPORT_STEP
 
 
 def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -> StateGraph:
@@ -480,7 +534,9 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
     graph.add_edge(START, PLAN)
     targets = [step for step in (*WORK_STEPS, REPORT_STEP) if step in made]
     for name in made:
-        if name != REPORT_STEP:
+        if name == GATE_STEP:
+            graph.add_conditional_edges(name, _after_gate, targets)
+        elif name != REPORT_STEP:
             graph.add_conditional_edges(name, _after(name), targets)
     graph.add_edge(REPORT_STEP, END)
     return graph
