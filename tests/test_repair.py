@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
+from demo.generate import generate
+from tenx.adapters.duckdb import DuckDBGate
 from tenx.domain import Failure, ValidationResult
 from tenx.repair import MAX_REPAIRS, decide, render
+from tenx.sandbox import Unisolated
+
+FIXTURES = Path(__file__).parent / "fixtures"
+CROSSWALK = Path("models/intermediate/int_customers_matched_to_accounts.sql")
 
 
 def verdict(checks: int, *failures: Failure) -> ValidationResult:
@@ -123,6 +133,43 @@ class DecideTest(unittest.TestCase):
 
     def test_the_cap_is_the_designs_three(self):
         self.assertEqual(MAX_REPAIRS, 3)
+
+
+class RealGateTest(unittest.TestCase):
+    """The gate's own report names the missing rows; the engineer's never does."""
+
+    def test_a_whole_address_crosswalk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generate(11, 60, root / "data", root / "answers")
+            project = root / "project"
+            shutil.copytree(FIXTURES / "demo_project", project)
+            (project / CROSSWALK).write_text(
+                "select customers.customer_id, accounts.account_id\n"
+                "from {{ ref('stg_billing__customers') }} as customers\n"
+                "left join {{ ref('stg_crm__accounts') }} as accounts\n"
+                "    on customers.email = accounts.billing_email\n",
+                encoding="utf-8",
+            )
+            declaration = FIXTURES / "demo_gate.json"
+            report = DuckDBGate().validate(
+                project, root / "data", declaration, root / "gate", Unisolated()
+            )
+        verdict = ValidationResult.of("gate", report)
+        self.assertEqual(
+            [(f.check, f.subject) for f in verdict.failures],
+            [("expected", "int_customers_matched_to_accounts")],
+        )
+        # Positive control: the gate's own report lists rows of the answer.
+        self.assertRegex(report.text, r"missing: \(cus_\w+, 001\d{15}\)")
+        text = render(verdict)
+        self.assertRegex(text, r"\d+ rows expected and \d+ in the model, of which \d+ not")
+        self.assertIn("(the rows themselves are not shown)", text)
+        for leak in ("cus_", "001000", "missing:", "not expected:"):
+            self.assertNotIn(leak, text)
+        for model in json.loads(declaration.read_text(encoding="utf-8"))["models"]:
+            if "expected" in model:
+                self.assertNotIn(model["expected"]["query"][:40], text)
 
 
 if __name__ == "__main__":
