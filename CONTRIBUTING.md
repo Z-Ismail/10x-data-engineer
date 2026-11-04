@@ -36,6 +36,10 @@ bubblewrap.
 pairs, and is refused unless `PARITY_FLAGS=--approve-cost` is given, since it
 is estimated above US$5.
 
+`make repairs` runs the graph with repairs on the engineer alone, 32 runs,
+and is refused unless `REPAIRS_FLAGS=--approve-cost` is given, for the same
+reason.
+
 ## Guidelines
 
 - One logical change per commit, with its tests.

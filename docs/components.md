@@ -21,6 +21,8 @@ make parity      # the graph against the earlier runner with real agents, 64 pai
                  # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
 make compare     # runs the engineer with and without the other agents, 128 runs;
                  # needs COMPARE_FLAGS=--approve-cost (estimated above US$5)
+make repairs     # repairs against no repairs, engineer alone, 32 runs;
+                 # needs REPAIRS_FLAGS=--approve-cost (estimated above US$5)
 ```
 
 ## Demo data
@@ -989,6 +991,54 @@ error: 128 runs to do, estimated at US$35.84, at most US$147.20 at each agent ca
 ```
 
 No live paired comparison has been run yet.
+
+### Repair comparison
+
+```
+make repairs REPAIRS_FLAGS=--approve-cost
+python -m tenx.compare repairs --raw NAME=FOLDER [--raw NAME=FOLDER ...] \
+    --goal demo/goal.md --checks tests/fixtures/demo_gate.json --out runs/repairs \
+    [--trials 4] [--repairs 2] [--no-cross-source] [--parallel 3] [--approve-cost]
+python -m tenx.compare report runs/repairs
+```
+
+`python -m tenx.compare repairs` measures whether repairs (above) raise the
+pass rate. It runs the graph with `--repairs N` (1 to 3, default 2) on every
+dataset, `--trials` times, and pairs each run with its own first round. The
+first round is a run without repairs: nothing the engineer sees in its first
+attempt depends on N, and a repair is made only after a round fails. So
+each run gives both outcomes, at the cost of one run, and the only runs
+whose two outcomes differ are those a repair rescued. Both are read from
+the run's `usage.json`: the first round passed when the run passed with no
+`engineer repair` row.
+
+The difference in pass rates, with repairs minus the first round, gets
+Tango's 95% interval, as in the paired comparison. Repairs are **better**
+when the whole interval lies above 0, **worse** when it lies below 0, and
+the result is **inconclusive** otherwise, including a limit exactly on 0.
+The cost per pass is reported for both: the first round's spend (the
+cross-source agent, if it ran, and the engineer's first attempt) over the
+first rounds that passed, and the whole run's spend over the runs that
+passed, with a bootstrap interval of their ratio. It says what a pass costs
+with repairs; it does not decide the verdict.
+
+`make repairs` runs the engineer alone (`--no-cross-source`), where a first
+attempt fails often enough for a repair to show, on the eight comparison
+datasets four times each: 32 runs, three at a time. With the cross-source
+agent, which passes nearly every first attempt on the demo data, a gain
+could hardly show. A run left without a verdict is not counted and runs
+again on the next start; a start with another number of repairs, or with
+the cross-source agent switched, in the same folder is refused.
+
+Every call a run may make is priced, each repair as another engineer call,
+so the estimate is above what a run usually spends:
+
+```
+$ make repairs
+error: 32 runs to do, estimated at US$19.20, at most US$72.00 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
+```
+
+No live repair comparison has been run yet.
 
 ## Run records and graph state
 

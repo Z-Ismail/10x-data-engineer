@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph equivalence compare parity clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph equivalence compare parity repairs clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -99,6 +99,26 @@ parity:
 	$(PYTHON) -m tenx.compare paired --goal demo/goal.md --checks tests/fixtures/demo_gate.json \
 		--out runs/parity --trials $(PARITY_TRIALS) $(PARITY_FLAGS) \
 		$(foreach name,$(COMPARE_DATASETS),--raw $(name)=$(COMPARE_DATA)/$(name)/data)
+
+# Repairs measured on the engineer alone: the graph with up to REPAIRS_MAX
+# repairs on the same eight datasets, REPAIRS_TRIALS runs each (32 by
+# default), each run compared with its own first round, a run without
+# repairs. Needs Claude Code, signed in, and bubblewrap. Run it again to
+# resume. Estimated above US$5, so it needs approval:
+# make repairs REPAIRS_FLAGS=--approve-cost
+REPAIRS_TRIALS ?= 4
+REPAIRS_MAX ?= 2
+REPAIRS_FLAGS ?=
+
+repairs:
+	@for seed in $(COMPARE_SEEDS); do for size in $(COMPARE_SIZES); do \
+		folder=$(COMPARE_DATA)/s$$seed-$$size; \
+		test -d $$folder/data || $(PYTHON) demo/generate.py --seed $$seed --companies $$size \
+			--out $$folder/data --answers-out $$folder/answers || exit 1; \
+	done; done
+	$(PYTHON) -m tenx.compare repairs --goal demo/goal.md --checks tests/fixtures/demo_gate.json \
+		--out runs/repairs --trials $(REPAIRS_TRIALS) --repairs $(REPAIRS_MAX) --no-cross-source \
+		$(REPAIRS_FLAGS) $(foreach name,$(COMPARE_DATASETS),--raw $(name)=$(COMPARE_DATA)/$(name)/data)
 
 clean:
 	rm -rf demo/data demo/answers profiles runs

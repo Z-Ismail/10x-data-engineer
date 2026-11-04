@@ -44,6 +44,7 @@ SLOW_FIRST = (
     "test_sandbox",
     "test_adapter_equivalence",
     "test_paired_runners",
+    "test_repair_runs",
 )
 
 
