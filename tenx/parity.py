@@ -27,6 +27,8 @@ LEVEL = 0.95
 NON_INFERIOR = "non-inferior"
 INFERIOR = "inferior"
 INCONCLUSIVE = "inconclusive"
+BETTER = "better"
+WORSE = "worse"
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,20 @@ def verdict(low: float, high: float, margin: float = MARGIN) -> str:
         return NON_INFERIOR
     if low > margin:
         return INFERIOR
+    return INCONCLUSIVE
+
+
+def superiority(low: float, high: float) -> str:
+    """Better when the whole interval lies above 0, worse below it, inconclusive across it.
+
+    For a difference taken as the new way minus the old, as when repair is
+    compared with no repair: no margin, and a limit exactly on 0 decides
+    nothing.
+    """
+    if low > 0:
+        return BETTER
+    if high < 0:
+        return WORSE
     return INCONCLUSIVE
 
 

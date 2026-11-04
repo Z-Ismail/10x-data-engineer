@@ -86,6 +86,13 @@ Notable changes to this project.
   reference query. Repairs stop when one fails no fewer checks than the
   attempt before it, when the run ceiling cannot hold another, or at N.
   Every round is charged and has its own row in `usage.json`.
+- A repair comparison: `python -m tenx.compare repairs` (and `make
+  repairs`) runs the graph with repairs and pairs each run with its own
+  first round, which is a run without repairs. Repairs are better when
+  Tango's 95% interval on the difference in pass rates lies wholly above 0;
+  the cost per pass with and without repairs is reported. It resumes, and
+  is priced on every call a run may make and refused above US$5 without
+  `--approve-cost`; the 32 runs of `make repairs` are estimated at US$19.20.
 
 ### Fixed
 
