@@ -74,6 +74,10 @@ BASELINE = "alone"
 # same run as a graph. Each dataset and trial runs both, back to back.
 PAIRED = "paired"
 PAIRED_ARMS = ("default", "graph")
+# The repair comparison: graph runs that may repair a failed project, each
+# compared with its own first round, which is a run without repairs.
+REPAIRS = "repairs"
+REPAIR_ARM = "repair"
 # An arm is said to help (or hurt) when the probability that its pass rate
 # is higher (or lower) than the baseline's reaches this. With three arms
 # compared with one baseline, 0.98 keeps the chance of wrongly keeping any
@@ -223,6 +227,30 @@ def paired_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Tri
     return _blocks(datasets, PAIRED_ARMS, trials, random.Random(f"{seed}:paired"))
 
 
+def repairs_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order of a repair comparison: one run per dataset and trial.
+
+    Runs go trial by trial, the datasets of each trial in an order drawn
+    from the seed.
+    """
+    _check_plan(datasets, [REPAIR_ARM], trials)
+    rng = random.Random(f"{seed}:repairs")
+    order = []
+    for trial in range(1, trials + 1):
+        names = list(datasets)
+        rng.shuffle(names)
+        order += [Trial(dataset, REPAIR_ARM, trial) for dataset in names]
+    return order
+
+
+def _planned(datasets, arms, trials, seed, mode) -> list[Trial]:
+    if mode == PAIRED:
+        return paired_plan(datasets, trials, seed)
+    if mode == REPAIRS:
+        return repairs_plan(datasets, trials, seed)
+    return plan(datasets, arms, trials, seed)
+
+
 def write_plan(
     out: Path,
     datasets: Sequence[str],
@@ -230,15 +258,16 @@ def write_plan(
     trials: int,
     seed: int,
     mode: str | None = None,
+    settings: dict | None = None,
 ) -> list[Trial]:
-    """Plan the runs and keep the plan in out, so the comparison can resume."""
-    order = (
-        paired_plan(datasets, trials, seed)
-        if mode == PAIRED
-        else plan(datasets, arms, trials, seed)
-    )
+    """Plan the runs and keep the plan in out, so the comparison can resume.
+
+    ``settings`` are kept beside the plan, and a resume must ask for the same.
+    """
+    order = _planned(datasets, arms, trials, seed, mode)
     document = {
         **({"mode": mode} if mode else {}),
+        **(settings or {}),
         "datasets": list(datasets),
         "arms": list(arms),
         "trials": trials,
@@ -787,29 +816,30 @@ def _order(
     trials: int,
     seed: int,
     mode: str | None = None,
+    settings: dict | None = None,
 ) -> list[Trial]:
     """The planned order: the one kept in out, or a new one. Writes nothing."""
     if (out / PLAN_FILE).is_file():
         document, order = read_plan(out)
-        asked = (mode, list(datasets), list(arms), trials, seed)
+        settings = settings or {}
+        asked = (mode, list(datasets), list(arms), trials, seed, settings)
         kept = (
             document.get("mode"),
             document["datasets"],
             document["arms"],
             document["trials"],
             document.get("seed"),
+            {name: document.get(name) for name in settings},
         )
         if asked != kept:
             raise ValueError(
                 f"{out} holds a comparison of another kind, or of other datasets, arms, "
-                "trials or seed; use another folder"
+                "trials, seed or settings; use another folder"
             )
         return order
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise ValueError(f"{out} must be empty or hold a comparison to resume")
-    if mode == PAIRED:
-        return paired_plan(datasets, trials, seed)
-    return plan(datasets, arms, trials, seed)
+    return _planned(datasets, arms, trials, seed, mode)
 
 
 def _start(
@@ -819,12 +849,13 @@ def _start(
     trials: int,
     seed: int,
     mode: str | None = None,
+    settings: dict | None = None,
 ) -> list[Trial]:
     """Check out and keep the plan there, so the comparison can resume."""
-    order = _order(out, datasets, arms, trials, seed, mode)
+    order = _order(out, datasets, arms, trials, seed, mode, settings)
     if not (out / PLAN_FILE).is_file():
         out.mkdir(parents=True, exist_ok=True)
-        write_plan(out, datasets, arms, trials, seed, mode)
+        write_plan(out, datasets, arms, trials, seed, mode, settings)
     return order
 
 
