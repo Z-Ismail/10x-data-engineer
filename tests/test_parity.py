@@ -11,6 +11,7 @@ import unittest
 from statistics import NormalDist
 
 from tenx.parity import (
+    BETTER,
     COST_LIMIT,
     INCONCLUSIVE,
     INFERIOR,
@@ -18,6 +19,7 @@ from tenx.parity import (
     NON_INFERIOR,
     OVER,
     WITHIN,
+    WORSE,
     PairCost,
     Pairs,
     cost_interval,
@@ -26,6 +28,7 @@ from tenx.parity import (
     interval,
     parity,
     score,
+    superiority,
     verdict,
 )
 
@@ -170,6 +173,25 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(verdict(*interval(Pairs(40, 20, 1, 3))), INFERIOR)
         # 16 pairs, 1 lost: too few pairs to tell.
         self.assertEqual(verdict(*interval(Pairs(15, 1, 0, 0))), INCONCLUSIVE)
+
+
+class SuperiorityTest(unittest.TestCase):
+    def test_the_three_verdicts(self):
+        self.assertEqual(superiority(0.01, 0.4), BETTER)
+        self.assertEqual(superiority(-0.4, -0.01), WORSE)
+        self.assertEqual(superiority(-0.1, 0.3), INCONCLUSIVE)
+
+    def test_limits_on_zero_are_inconclusive(self):
+        self.assertEqual(superiority(0.0, 0.3), INCONCLUSIVE)
+        self.assertEqual(superiority(-0.3, 0.0), INCONCLUSIVE)
+
+    def test_from_counts(self):
+        # 10 of 32 rescued, none lost: the interval is well above 0.
+        self.assertEqual(superiority(*interval(Pairs(10, 10, 0, 12))), BETTER)
+        self.assertEqual(superiority(*interval(Pairs(10, 0, 10, 12))), WORSE)
+        # One rescued run of 32 is not enough; none at all decides nothing.
+        self.assertEqual(superiority(*interval(Pairs(10, 1, 0, 21))), INCONCLUSIVE)
+        self.assertEqual(superiority(*interval(Pairs(10, 0, 0, 22))), INCONCLUSIVE)
 
 
 class CostTest(unittest.TestCase):
