@@ -276,23 +276,68 @@ def _cost(role) -> float | None:
     return cost if role.get("cost_known") is True else None
 
 
+def _ledger(out: Path, trial: Trial) -> tuple[str, list] | None:
+    """The run's gate verdict and role rows from its usage.json, if it has a verdict."""
+    path = Path(out) / RUNS_DIR / trial.folder / USAGE_FILE
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    gate = ledger.get("gate") if isinstance(ledger, dict) else None
+    if gate not in ("PASS", "FAIL"):
+        return None
+    roles = ledger.get("roles")
+    return gate, roles if isinstance(roles, list) else []
+
+
+def _spend(roles: list) -> float | None:
+    """What the roles cost together, known only when every role's cost is."""
+    costs = [_cost(role) for role in roles]
+    return sum(costs) if costs and all(cost is not None for cost in costs) else None
+
+
 def outcome(out: Path, trial: Trial) -> Outcome:
     """The run's verdict from its usage.json, or no verdict if it left none.
 
     The run's cost is known only when every role's cost is.
     """
-    path = Path(out) / RUNS_DIR / trial.folder / USAGE_FILE
-    try:
-        ledger = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    found = _ledger(out, trial)
+    if found is None:
         return Outcome(trial, None)
-    gate = ledger.get("gate") if isinstance(ledger, dict) else None
-    if gate not in ("PASS", "FAIL"):
-        return Outcome(trial, None)
-    roles = ledger.get("roles")
-    costs = [_cost(role) for role in roles] if isinstance(roles, list) else []
-    known = bool(costs) and all(cost is not None for cost in costs)
-    return Outcome(trial, gate, sum(costs) if known else None)
+    gate, roles = found
+    return Outcome(trial, gate, _spend(roles))
+
+
+# A repair round's row in usage.json: "engineer repair 1", "engineer repair 2".
+REPAIR_ROW = re.compile(r" repair [1-9][0-9]*$")
+
+
+@dataclass(frozen=True)
+class Rounds:
+    """A repairing run read as two: its first round alone, and the whole run.
+
+    A repair is made only after a round fails, so the first round passed
+    exactly when the run passed with no repair row in its usage.
+    """
+
+    trial: Trial
+    first: str | None
+    final: str | None
+    first_usd: float | None = None
+    total_usd: float | None = None
+
+
+def rounds(out: Path, trial: Trial) -> Rounds:
+    """The first round's and the run's verdicts and spend, or none if the run has no verdict."""
+    found = _ledger(out, trial)
+    if found is None:
+        return Rounds(trial, None, None)
+    gate, roles = found
+    names = [role.get("role") if isinstance(role, dict) else None for role in roles]
+    repaired = [isinstance(n, str) and REPAIR_ROW.search(n) is not None for n in names]
+    first_roles = [role for role, repair in zip(roles, repaired) if not repair]
+    first = "FAIL" if any(repaired) else gate
+    return Rounds(trial, first, gate, _spend(first_roles), _spend(roles))
 
 
 @dataclass(frozen=True)
