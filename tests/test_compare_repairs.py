@@ -6,17 +6,22 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tenx import parity
 from tenx.compare import (
     PLAN_FILE,
     REPAIR_ARM,
     REPAIRS,
+    REPORT_JSON,
+    REPORT_TEXT,
     RUNS_DIR,
     Rounds,
     Trial,
     _start,
     read_plan,
     repairs_plan,
+    report,
     rounds,
+    summarise_repairs,
     write_plan,
 )
 
@@ -139,6 +144,117 @@ class RepairsPlanTest(unittest.TestCase):
                 self.assertIn("settings", str(caught.exception))
             with self.assertRaises(ValueError):
                 _start(out, DATASETS, [REPAIR_ARM], 2, 0, "paired", SETTINGS)
+
+
+class RepairSummaryTest(unittest.TestCase):
+    def setUp(self):
+        self.out = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.out)
+
+    def plan(self, datasets, trials):
+        write_plan(self.out, datasets, [REPAIR_ARM], trials, 0, REPAIRS, SETTINGS)
+
+    def ran(self, dataset, trial, gate, *rows, known=True):
+        leave(self.out, Trial(dataset, REPAIR_ARM, trial), gate, *rows, known=known)
+
+    def fill(self, known=True):
+        self.plan(["a", "b"], 2)
+        self.ran("a", 1, "PASS", ("engineer", 0.10), known=known)
+        self.ran("a", 2, "PASS", ("engineer", 0.12), ("engineer repair 1", 0.08))
+        self.ran("b", 1, "FAIL", ("engineer", 0.10), *self.repairs(0.06, 0.04))
+        # b/2 left no verdict.
+
+    @staticmethod
+    def repairs(*costs):
+        return [(f"engineer repair {n}", cost) for n, cost in enumerate(costs, start=1)]
+
+    def test_each_run_is_paired_with_its_first_round(self):
+        self.fill()
+        summary = summarise_repairs(self.out)
+        # First: with repairs; second: the first round alone.
+        self.assertEqual(
+            summary.pairs, parity.Pairs(both=1, first_only=1, second_only=0, neither=1)
+        )
+        self.assertEqual(summary.left_out, ("b/repair/2",))
+        self.assertEqual(summary.interval, parity.interval(parity.Pairs(1, 1, 0, 1)))
+        self.assertEqual(summary.verdict, parity.INCONCLUSIVE)
+
+    def test_cost_per_pass_worked_by_hand(self):
+        self.fill()
+        summary = summarise_repairs(self.out)
+        # First round: 0.10 + 0.12 + 0.10 = 0.32 over 1 pass. With repairs:
+        # 0.10 + 0.20 + 0.20 = 0.50 over 2 passes.
+        self.assertAlmostEqual(summary.cost_per_pass["first round"], 0.32)
+        self.assertAlmostEqual(summary.cost_per_pass["with repairs"], 0.25)
+
+    def test_an_unknown_cost_leaves_cost_unknown(self):
+        self.fill(known=False)
+        summary = summarise_repairs(self.out)
+        self.assertIsNone(summary.cost_interval)
+        self.assertIn("cost per pass: unknown", report(self.out))
+
+    def test_many_rescued_runs_are_better(self):
+        self.plan(["a"], 12)
+        for trial in range(1, 13):
+            if trial <= 2:
+                self.ran("a", trial, "PASS", ("engineer", 0.1))
+            elif trial <= 10:
+                self.ran("a", trial, "PASS", ("engineer", 0.1), *self.repairs(0.1))
+            else:
+                self.ran("a", trial, "FAIL", ("engineer", 0.1), *self.repairs(0.1, 0.1))
+        summary = summarise_repairs(self.out)
+        self.assertEqual(summary.pairs, parity.Pairs(2, 8, 0, 2))
+        self.assertGreater(summary.interval[0], 0)
+        self.assertEqual(summary.verdict, parity.BETTER)
+        self.assertAlmostEqual(summary.pairs.difference, 8 / 12)
+
+    def test_report_text(self):
+        self.fill()
+        low, high = parity.interval(parity.Pairs(1, 1, 0, 1))
+        # A resample with no first-round pass but a repaired run has ratio 0
+        # (8 in 27 resamples have no first-round pass); three copies of b/1
+        # have no pass at all, an infinite ratio, 1 in 27, above the 2.5% tail.
+        expected = f"""repair comparison: 2 datasets, 2 trials each, up to 2 repairs, engineer alone; 3 of 4 runs have a gate verdict
+each run is paired with its own first round; difference = pass rate with repairs minus first round's; repairs are better when the 95% interval lies above 0
+
+runs               count
+passed first time      1
+repaired               1
+failed                 1
+
+pass rate: first round 33%, with repairs 67%
+difference: +33.3 points, 95% interval (Tango) {100 * low:+.1f} to {100 * high:+.1f}
+verdict: inconclusive
+
+US$ per pass: first round 0.3200, with repairs 0.2500
+with repairs / first round: 95% interval (bootstrap over runs) 0.000 to infinite
+
+runs by dataset (first time, repaired, failed)
+
+dataset  first time  repaired  failed
+a                 1         1       0
+b                 0         0       1
+
+runs without a gate verdict, not counted:
+  b/repair/2
+
+cost is Claude Code's own estimate, not a bill
+"""
+        self.assertEqual(report(self.out), expected)
+        self.assertEqual((self.out / REPORT_TEXT).read_text(encoding="utf-8"), expected)
+        document = json.loads((self.out / REPORT_JSON).read_text(encoding="utf-8"))
+        self.assertEqual(document["mode"], REPAIRS)
+        self.assertEqual((document["repairs"], document["cross_source"]), (2, False))
+        self.assertEqual(document["runs"]["repaired"], 1)
+        self.assertEqual(document["pass_rate"], {"first_round": 1 / 3, "with_repairs": 2 / 3})
+        self.assertEqual(document["cost_ratio_interval_95"], [0.0, "infinity"])
+        self.assertEqual(document["runs_left_out"], ["b/repair/2"])
+
+    def test_no_runs_yet(self):
+        self.plan(["a"], 1)
+        text = report(self.out)
+        self.assertIn("0 of 1 runs have a gate verdict", text)
+        self.assertIn("no runs to compare yet", text)
 
 
 if __name__ == "__main__":

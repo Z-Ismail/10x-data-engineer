@@ -759,12 +759,194 @@ def render_paired(summary: PairedSummary) -> str:
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True)
+class RepairSummary:
+    """Repairing runs against their own first rounds, and the cost per pass of each."""
+
+    datasets: list[str]
+    trials: int
+    repairs: int
+    cross_source: bool
+    # First: the run with its repairs; second: its first round alone.
+    pairs: parity.Pairs
+    interval: tuple[float, float] | None
+    verdict: str
+    cost_per_pass: dict[str, float | None]
+    cost_interval: tuple[float, float] | None
+    by_dataset: dict[str, parity.Pairs]
+    left_out: tuple[str, ...]
+    planned: int
+
+    def to_dict(self) -> dict:
+        def counts(pairs: parity.Pairs) -> dict:
+            return {
+                "passed_first_time": pairs.both,
+                "repaired": pairs.first_only,
+                "failed_after_passing": pairs.second_only,
+                "failed": pairs.neither,
+            }
+
+        def finite(value: float | None) -> float | str | None:
+            return "infinity" if value == float("inf") else value
+
+        n = self.pairs.n
+        return {
+            "mode": REPAIRS,
+            "datasets": self.datasets,
+            "trials": self.trials,
+            "repairs": self.repairs,
+            "cross_source": self.cross_source,
+            "planned_runs": self.planned,
+            "runs": counts(self.pairs),
+            "pass_rate": {
+                "first_round": (self.pairs.both + self.pairs.second_only) / n if n else None,
+                "with_repairs": (self.pairs.both + self.pairs.first_only) / n if n else None,
+            },
+            "difference": self.pairs.difference if n else None,
+            "interval_95": list(self.interval) if self.interval else None,
+            "verdict": self.verdict,
+            "cost_per_pass_usd": {k: finite(v) for k, v in self.cost_per_pass.items()},
+            "cost_ratio_interval_95": (
+                [finite(v) for v in self.cost_interval] if self.cost_interval else None
+            ),
+            "by_dataset": {name: counts(pairs) for name, pairs in self.by_dataset.items()},
+            "runs_left_out": list(self.left_out),
+        }
+
+
+def _count_rounds(found: list[Rounds]) -> parity.Pairs:
+    verdicts = [(r.final == "PASS", r.first == "PASS") for r in found]
+    return parity.Pairs(
+        both=verdicts.count((True, True)),
+        first_only=verdicts.count((True, False)),
+        second_only=verdicts.count((False, True)),
+        neither=verdicts.count((False, False)),
+    )
+
+
+def summarise_repairs(out: Path) -> RepairSummary:
+    """Pair each run that has a verdict with its own first round, and compare them."""
+    document, order = read_plan(out)
+    found = [rounds(out, trial) for trial in order]
+    counted = [r for r in found if r.final is not None]
+    pairs = _count_rounds(counted)
+    low_high = parity.interval(pairs) if counted else None
+    per_pass = {"first round": None, "with repairs": None}
+    cost_low_high = None
+    if counted and all(r.first_usd is not None and r.total_usd is not None for r in counted):
+        costs = [
+            parity.PairCost(r.first == "PASS", r.first_usd, r.final == "PASS", r.total_usd)
+            for r in counted
+        ]
+        per_pass = {
+            "first round": parity.cost_per_pass(
+                [c.first_usd for c in costs], pairs.both + pairs.second_only
+            ),
+            "with repairs": parity.cost_per_pass(
+                [c.second_usd for c in costs], pairs.both + pairs.first_only
+            ),
+        }
+        cost_low_high = parity.cost_interval(costs, seed=document.get("seed", 0))
+    datasets = document["datasets"]
+    return RepairSummary(
+        datasets=datasets,
+        trials=document["trials"],
+        repairs=document.get("repairs"),
+        cross_source=document.get("cross_source"),
+        pairs=pairs,
+        interval=low_high,
+        verdict=parity.superiority(*low_high) if low_high else "no runs",
+        cost_per_pass=per_pass,
+        cost_interval=cost_low_high,
+        by_dataset={
+            name: _count_rounds([r for r in counted if r.trial.dataset == name])
+            for name in datasets
+        },
+        left_out=tuple(r.trial.folder for r in found if r.final is None),
+        planned=len(order),
+    )
+
+
+def render_repairs(summary: RepairSummary) -> str:
+    """The repair comparison as plain text."""
+    pairs = summary.pairs
+    trials = f"{summary.trials} trial{'s' if summary.trials != 1 else ''}"
+    who = "with the cross-source agent" if summary.cross_source else "engineer alone"
+    lines = [
+        (
+            f"repair comparison: {len(summary.datasets)} datasets, {trials} each, "
+            f"up to {summary.repairs} repairs, {who}; "
+            f"{pairs.n} of {summary.planned} runs have a gate verdict"
+        ),
+        (
+            "each run is paired with its own first round; difference = pass rate with "
+            "repairs minus first round's; repairs are better when the 95% interval lies above 0"
+        ),
+        "",
+    ]
+    if not pairs.n:
+        return "\n".join(lines + ["no runs to compare yet"]) + "\n"
+    rows = [
+        ["passed first time", str(pairs.both)],
+        ["repaired", str(pairs.first_only)],
+        ["failed", str(pairs.neither)],
+    ]
+    if pairs.second_only:
+        rows.insert(2, ["failed after passing", str(pairs.second_only)])
+    lines += _table(["runs", "count"], rows, left=1)
+    low, high = summary.interval
+    first = (pairs.both + pairs.second_only) / pairs.n
+    final = (pairs.both + pairs.first_only) / pairs.n
+    lines += [
+        "",
+        f"pass rate: first round {_percent(first)}, with repairs {_percent(final)}",
+        (
+            f"difference: {_points(pairs.difference)} points, 95% interval (Tango) "
+            f"{_points(low)} to {_points(high)}"
+        ),
+        f"verdict: {summary.verdict}",
+        "",
+    ]
+    if summary.cost_interval is None:
+        lines.append("cost per pass: unknown (a counted run's cost was not reported)")
+    else:
+        cost_low, cost_high = summary.cost_interval
+        shown = {
+            name: "-" if v == float("inf") else _money(v)
+            for name, v in summary.cost_per_pass.items()
+        }
+        lines += [
+            (
+                f"US$ per pass: first round {shown['first round']}, "
+                f"with repairs {shown['with repairs']}"
+            ),
+            (
+                "with repairs / first round: 95% interval (bootstrap over runs) "
+                f"{_ratio(cost_low)} to {_ratio(cost_high)}"
+            ),
+        ]
+    lines += ["", "runs by dataset (first time, repaired, failed)", ""]
+    rows = [
+        [name, str(p.both), str(p.first_only), str(p.neither + p.second_only)]
+        for name, p in summary.by_dataset.items()
+    ]
+    lines += _table(["dataset", "first time", "repaired", "failed"], rows, left=1)
+    if summary.left_out:
+        lines += ["", "runs without a gate verdict, not counted:"]
+        lines += [f"  {name}" for name in summary.left_out]
+    lines += ["", "cost is Claude Code's own estimate, not a bill"]
+    return "\n".join(lines) + "\n"
+
+
 def report(out: Path) -> str:
     """Summarise the comparison in out, and write it there as text and JSON."""
     document, _ = read_plan(out)
     if document.get("mode") == PAIRED:
         summary = summarise_paired(out)
         text = render_paired(summary)
+    elif document.get("mode") == REPAIRS:
+        summary = summarise_repairs(out)
+        text = render_repairs(summary)
     else:
         summary = summarise(out)
         text = render(summary)
