@@ -13,6 +13,9 @@ same figures.
         --goal <file> --checks <file> --out <folder> [--trials 4] [--parallel 3]
     python -m tenx.compare paired --raw NAME=FOLDER [--raw NAME=FOLDER ...]
         --goal <file> --checks <file> --out <folder> [--trials 8] [--parallel 3]
+    python -m tenx.compare repairs --raw NAME=FOLDER [--raw NAME=FOLDER ...]
+        --goal <file> --checks <file> --out <folder> [--trials 4] [--repairs 2]
+        [--no-cross-source] [--parallel 3]
     python -m tenx.compare report <folder>
 
 ``paired`` compares two runners rather than arms: today's runner and the
@@ -20,6 +23,12 @@ same run as a graph, each with the cross-source agent, on the same datasets
 and trials, the two runs of a pair next to each other. The pairs are
 compared by Tango's interval on the difference in pass rates against a
 10-point margin fixed in advance, and by the cost per pass (tenx.parity).
+
+``repairs`` runs the graph with repairs and pairs each run with its own
+first round, which is a run without repairs: nothing the engineer sees in
+its first attempt depends on the number of repairs, and a repair is made
+only after a round fails. Repairs are better when Tango's interval on the
+difference lies wholly above 0; the cost per pass of each is reported.
 
 Each run is an ordinary engineer run, in its own folder:
 
@@ -981,9 +990,24 @@ def agent_calls(arm: str, tables: int) -> list[str]:
     return [SCOUT] * (tables if scouts else 0) + [CROSS_SOURCE] * cross_source + [ENGINEER]
 
 
-def estimate(trials: Sequence[Trial], tables: dict[str, int], rules: Policy) -> Estimate:
-    """Price the given runs from each dataset's number of raw tables."""
-    calls = [kind for t in trials for kind in agent_calls(t.arm, tables[t.dataset])]
+def repair_calls(repairs: int, cross_source: bool) -> list[str]:
+    """Every agent call a repairing run can make: each repair is another engineer call."""
+    return [CROSS_SOURCE] * cross_source + [ENGINEER] * (1 + repairs)
+
+
+def estimate(
+    trials: Sequence[Trial], tables: dict[str, int], rules: Policy, calls: list[str] | None = None
+) -> Estimate:
+    """Price the given runs from each dataset's number of raw tables.
+
+    ``calls``, when given, are the calls every run may make, as for a
+    repair comparison, priced as if each were made.
+    """
+    calls = [
+        kind
+        for t in trials
+        for kind in (calls if calls is not None else agent_calls(t.arm, tables[t.dataset]))
+    ]
     return Estimate(
         len(trials),
         sum((rules.typical_usd[kind] for kind in calls), Decimal(0)),
@@ -1145,15 +1169,18 @@ def run_default(raw: Path, goal: Path, checks: Path, out: Path, claude: str) -> 
     engineer_run(raw, goal, checks, out, claude=claude, cross_source=True)
 
 
-def run_graph(raw: Path, goal: Path, checks: Path, out: Path, claude: str) -> None:
-    """The same run as a graph. Imported here, so other modes do not need the graph extra."""
+def run_graph(raw: Path, goal: Path, checks: Path, out: Path, claude: str, **options) -> None:
+    """The same run as a graph. Imported here, so other modes do not need the graph extra.
+
+    ``options`` go to the graph run in place of the cross-source agent alone.
+    """
     from tenx.policy import PolicyError
     from tenx.ports import PlatformError
     from tenx.run import RunError, start
     from tenx.sandbox import SandboxError
 
     try:
-        start(raw, goal, checks, out, cross_source=True, claude=claude)
+        start(raw, goal, checks, out, **(options or {"cross_source": True}), claude=claude)
     except (RunError, PlatformError, SandboxError, PolicyError) as error:
         raise ArmError(str(error)) from error
 
@@ -1202,6 +1229,63 @@ def run_paired(
 
     def call(trial: Trial, folder: Path) -> None:
         runners[trial.arm](datasets[trial.dataset], goal, checks, folder, claude)
+
+    _execute(out, order, call, parallel, progress)
+    return report(out)
+
+
+def run_repairs(
+    datasets: dict[str, Path],
+    goal: Path,
+    checks: Path,
+    out: Path,
+    trials: int = 4,
+    repairs: int = 2,
+    cross_source: bool = True,
+    seed: int = 0,
+    parallel: int = 3,
+    claude: str = "claude",
+    runner=None,
+    progress=print,
+    approve_cost: bool = False,
+) -> str:
+    """Run the graph with repairs on every dataset, trials times, then report.
+
+    Each run is compared with its own first round, which is a run without
+    repairs. An error leaves the run without a verdict and out of every
+    figure; a second start runs it again. `runner` stands in for the graph
+    run in tests. Every call a run may make is priced first; above the
+    policy's limit nothing is written or run unless `approve_cost` is true.
+    """
+    if not isinstance(repairs, int) or isinstance(repairs, bool) or not 1 <= repairs <= 3:
+        raise ValueError(f"repairs must be a whole number from 1 to 3, not {repairs!r}")
+    runner = runner or run_graph
+    _check_inputs(datasets, goal, checks, parallel)
+    out = Path(out)
+    rules = Policy()
+    tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
+    settings = {"repairs": repairs, "cross_source": cross_source}
+    order = _order(out, list(datasets), [REPAIR_ARM], trials, seed, REPAIRS, settings)
+    pending = [t for t in order if outcome(out, t).gate is None]
+    cost = estimate(pending, tables, rules, repair_calls(repairs, cross_source))
+    if cost.typical_usd > rules.approve_above_usd and not approve_cost:
+        raise CostNotApproved(
+            f"{cost.describe()}; above US${rules.approve_above_usd}, so it needs approval: "
+            "run it again with --approve-cost to go ahead"
+        )
+    progress(cost.describe())
+    order = _start(out, list(datasets), [REPAIR_ARM], trials, seed, REPAIRS, settings)
+
+    def call(trial: Trial, folder: Path) -> None:
+        runner(
+            datasets[trial.dataset],
+            goal,
+            checks,
+            folder,
+            claude,
+            cross_source=cross_source,
+            repairs=repairs,
+        )
 
     _execute(out, order, call, parallel, progress)
     return report(out)
@@ -1267,6 +1351,40 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run even when the comparison is estimated above US$5",
     )
+    fix = commands.add_parser(
+        "repairs",
+        help="run the graph with repairs, each run against its own first round, then report",
+    )
+    fix.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; give one --raw per dataset",
+    )
+    fix.add_argument("--goal", type=Path, required=True, help="what to build, in plain English")
+    fix.add_argument(
+        "--checks", type=Path, required=True, help="the gate's JSON declaration of what to expect"
+    )
+    fix.add_argument("--out", type=Path, required=True, help="folder for the comparison")
+    fix.add_argument("--trials", type=int, default=4, help="runs on each dataset")
+    fix.add_argument(
+        "--repairs", type=int, default=2, choices=range(1, 4), help="repairs a run may make"
+    )
+    fix.add_argument(
+        "--cross-source",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="run the cross-source agent first (default: on); --no-cross-source for the engineer alone",
+    )
+    fix.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
+    fix.add_argument("--parallel", type=int, default=3, help="runs at the same time")
+    fix.add_argument(
+        "--approve-cost",
+        action="store_true",
+        help="run even when the comparison is estimated above US$5",
+    )
     show = commands.add_parser("report", help="report a comparison from its runs so far")
     show.add_argument("out", type=Path, help="the comparison's folder")
     args = parser.parse_args(argv)
@@ -1277,7 +1395,20 @@ def main(argv: list[str] | None = None) -> int:
         datasets = dict(args.raw)
         if len(datasets) != len(args.raw):
             raise ValueError("each dataset may be named only once")
-        if args.command == "paired":
+        if args.command == "repairs":
+            text = run_repairs(
+                datasets,
+                args.goal,
+                args.checks,
+                args.out,
+                trials=args.trials,
+                repairs=args.repairs,
+                cross_source=args.cross_source,
+                seed=args.seed,
+                parallel=args.parallel,
+                approve_cost=args.approve_cost,
+            )
+        elif args.command == "paired":
             text = run_paired(
                 datasets,
                 args.goal,

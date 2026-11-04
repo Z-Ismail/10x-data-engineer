@@ -1,10 +1,15 @@
 """Tests for the comparison of repairing runs with their own first rounds."""
 
+import io
 import json
 import shutil
 import tempfile
+import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 from tenx import parity
 from tenx.compare import (
@@ -14,17 +19,28 @@ from tenx.compare import (
     REPORT_JSON,
     REPORT_TEXT,
     RUNS_DIR,
+    ArmError,
+    CostNotApproved,
     Rounds,
     Trial,
     _start,
+    estimate,
+    main,
     read_plan,
+    repair_calls,
     repairs_plan,
     report,
     rounds,
+    run_graph,
+    run_repairs,
     summarise_repairs,
     write_plan,
 )
+from tenx.policy import CROSS_SOURCE, ENGINEER, Policy
 
+ROOT = Path(__file__).resolve().parent.parent
+DECLARATION = ROOT / "tests" / "fixtures" / "demo_gate.json"
+GOAL = ROOT / "demo" / "goal.md"
 DATASETS = ["s1-200", "s7-1000", "s42-200"]
 SETTINGS = {"repairs": 2, "cross_source": False}
 
@@ -255,6 +271,168 @@ cost is Claude Code's own estimate, not a bill
         text = report(self.out)
         self.assertIn("0 of 1 runs have a gate verdict", text)
         self.assertIn("no runs to compare yet", text)
+
+
+class RepairPricingTest(unittest.TestCase):
+    def test_every_round_a_run_may_make_is_priced(self):
+        self.assertEqual(repair_calls(2, cross_source=False), [ENGINEER] * 3)
+        self.assertEqual(repair_calls(1, cross_source=True), [CROSS_SOURCE, ENGINEER, ENGINEER])
+
+    def test_the_planned_measurement(self):
+        # 8 datasets x 4 trials = 32 runs of the engineer alone with up to 2
+        # repairs: 32 x 3 x 0.20 = 19.20 typical, 32 x 3 x 0.75 = 72.00 at the caps.
+        datasets = [f"d{i}" for i in range(8)]
+        order = repairs_plan(datasets, trials=4)
+        cost = estimate(order, {n: 4 for n in datasets}, Policy(), repair_calls(2, False))
+        self.assertEqual((cost.runs, cost.typical_usd), (32, Decimal("19.20")))
+        self.assertEqual(cost.ceiling_usd, Decimal("72.00"))
+        # With the cross-source agent: 32 x (0.08 + 0.60) = 21.76.
+        cost = estimate(order, {n: 4 for n in datasets}, Policy(), repair_calls(2, True))
+        self.assertEqual(cost.typical_usd, Decimal("21.76"))
+
+
+class FakeGraph:
+    """Stands in for the graph run: records its calls and leaves what `runs` names.
+
+    "repaired" leaves a pass with a repair row, "error" raises the run's
+    error, "none" leaves no usage.json; anything else is the verdict.
+    """
+
+    def __init__(self, calls: list, runs=None):
+        self.calls, self.runs = calls, runs or {}
+        self.lock = threading.Lock()
+
+    def __call__(self, raw, goal, checks, out, claude, **options):
+        with self.lock:
+            self.calls.append((Path(out), Path(raw), claude, options))
+        dataset, _, trial = Path(out).parts[-3:]
+        what = self.runs.get(f"{dataset}/{trial}", "PASS")
+        Path(out).mkdir(parents=True)
+        if what == "error":
+            raise ArmError("the run stopped")
+        rows = [{"role": "engineer", "cost_usd": 0.1, "cost_known": True}]
+        if what == "repaired":
+            rows.append({"role": "engineer repair 1", "cost_usd": 0.1, "cost_known": True})
+        if what != "none":
+            gate = "PASS" if what == "repaired" else what
+            ledger = json.dumps({"gate": gate, "roles": rows})
+            (Path(out) / "usage.json").write_text(ledger, encoding="utf-8")
+
+
+class RunRepairsTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.out = root / "repairs"
+        self.datasets = {}
+        for name in ("s1-200", "s7-1000"):
+            folder = root / "data" / name
+            folder.mkdir(parents=True)
+            (folder / "table.csv").write_text("id\n1\n", encoding="utf-8")
+            self.datasets[name] = folder
+        self.lines, self.calls = [], []
+
+    def start(self, runs=None, **options):
+        options.setdefault("trials", 2)
+        return run_repairs(
+            self.datasets,
+            GOAL,
+            DECLARATION,
+            self.out,
+            runner=FakeGraph(self.calls, runs),
+            progress=self.lines.append,
+            claude="my-claude",
+            **options,
+        )
+
+    def test_every_run_is_a_graph_run_with_the_planned_repairs(self):
+        text = self.start({"s7-1000/1": "repaired", "s1-200/2": "FAIL"}, parallel=1, repairs=3)
+        order = repairs_plan(list(self.datasets), 2)
+        options = {"cross_source": True, "repairs": 3}
+        expected = [
+            (self.out / RUNS_DIR / t.folder, self.datasets[t.dataset], "my-claude", options)
+            for t in order
+        ]
+        self.assertEqual(self.calls, expected)
+        self.assertIn("up to 3 repairs, with the cross-source agent; 4 of 4 runs", text)
+        self.assertEqual(summarise_repairs(self.out).pairs, parity.Pairs(2, 1, 0, 1))
+        # 4 runs x (0.08 + 4 x 0.20) = 3.52.
+        self.assertTrue(self.lines[0].startswith("4 runs to do, estimated at US$3.52,"))
+
+    def test_the_engineer_alone(self):
+        text = self.start(cross_source=False)
+        self.assertEqual(
+            {str(c[3]) for c in self.calls}, {str({"cross_source": False, "repairs": 2})}
+        )
+        self.assertIn("engineer alone", text)
+
+    def test_errors_leave_their_run_out_and_a_second_start_runs_them_again(self):
+        self.start({"s1-200/1": "error", "s7-1000/2": "none"})
+        self.assertEqual(
+            summarise_repairs(self.out).left_out, ("s1-200/repair/1", "s7-1000/repair/2")
+        )
+        self.assertTrue(any("s1-200/repair/1: error: the run stopped" in x for x in self.lines))
+        self.calls.clear()
+        self.start()
+        rerun = sorted(str(out.relative_to(self.out / RUNS_DIR)) for out, *_ in self.calls)
+        self.assertEqual(rerun, ["s1-200/repair/1", "s7-1000/repair/2"])
+        self.assertEqual(summarise_repairs(self.out).pairs, parity.Pairs(4, 0, 0, 0))
+
+    def test_another_number_of_repairs_is_refused_on_resume(self):
+        self.start()
+        with self.assertRaisesRegex(ValueError, "settings"):
+            self.start(repairs=3)
+        for value in (0, 4, True):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "1 to 3"):
+                self.start(repairs=value)
+
+    def test_an_expensive_comparison_is_refused_before_anything_starts(self):
+        # 2 datasets x 3 trials = 6 runs at 0.08 + 3 x 0.20 = 0.68: US$4.08 runs;
+        # 2 x 4 = 8 runs: US$5.44 is refused.
+        self.start(trials=3)
+        shutil.rmtree(self.out)
+        self.calls.clear()
+        with self.assertRaises(CostNotApproved) as refusal:
+            self.start(trials=4)
+        self.assertTrue(str(refusal.exception).startswith("8 runs to do, estimated at US$5.44,"))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.out.exists())
+
+    def test_command_line(self):
+        argv = ["repairs", "--goal", str(GOAL), "--checks", str(DECLARATION)]
+        for name, folder in self.datasets.items():
+            argv += ["--raw", f"{name}={folder}"]
+        argv += ["--out", str(self.out), "--no-cross-source", "--trials", "5"]
+        graph = FakeGraph(self.calls)
+        with (
+            mock.patch("tenx.compare.run_graph", graph),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(main(argv), 2)  # 10 runs x 0.60 = US$6.00
+        self.assertIn("10 runs to do, estimated at US$6.00", errors.getvalue())
+        self.assertEqual(self.calls, [])
+        with mock.patch("tenx.compare.run_graph", graph), redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(main([*argv, "--approve-cost"]), 0)
+        self.assertEqual(len(self.calls), 10)
+        self.assertEqual(self.calls[0][3], {"cross_source": False, "repairs": 2})
+        text = (self.out / REPORT_TEXT).read_text(encoding="utf-8")
+        self.assertTrue(printed.getvalue().endswith("\n" + text))
+        with redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(main(["report", str(self.out)]), 0)
+        self.assertEqual(printed.getvalue(), text)
+        with redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit):
+            main([*argv, "--repairs", "4"])
+
+    def test_the_graph_run_is_given_the_repairs(self):
+        with mock.patch("tenx.run.start") as start:
+            run_graph(
+                Path("raw"), Path("g"), Path("c"), Path("o"), "cl", cross_source=False, repairs=2
+            )
+        start.assert_called_once_with(
+            Path("raw"), Path("g"), Path("c"), Path("o"), cross_source=False, repairs=2, claude="cl"
+        )
 
 
 if __name__ == "__main__":
