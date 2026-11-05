@@ -111,7 +111,7 @@ if:
 | Discovery | Cross-source agent: how the tables join, given to the engineer | Available, on by default |
 | Build | Engineer agent: dbt models on DuckDB from a plain-English goal | Available |
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
-| Specification | Machine-checked spec contract and `SPEC.md` | Available as code; the Architect agent is next |
+| Specification | Machine-checked spec contract and `SPEC.md` | Available as code; a brief demo goal to measure an Architect against (`make engineer-brief`); the Architect agent is next |
 | Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available: the graph run works only through them |
 | Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available: the per-call caps and the comparison approval apply to every run; the run ceiling applies to graph runs (`python -m tenx.run`) |
@@ -137,6 +137,7 @@ make demo-data  # three demo source systems with planted defects
 make test
 make engineer   # the agents build the demo project, then the gate checks it
 make engineer-graph  # the same as a graph run that can be resumed if it stops
+make engineer-brief  # the graph run on a brief goal that leaves the spec unwritten
 make equivalence     # the graph against the current runner, with a stand-in for Claude Code
 make parity          # the graph against the current runner with real agents (needs approval)
 make repairs         # repairs against no repairs with real agents (needs approval)

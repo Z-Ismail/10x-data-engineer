@@ -6,6 +6,10 @@ Notable changes to this project.
 
 ### Added
 
+- A brief goal for the demo data, `demo/brief.md`, and `make engineer-brief`:
+  the same models, keys and money column as `demo/goal.md`, without the
+  rows to leave out, the grain or how to match billing to the CRM. It is the
+  test bed for writing a spec before the build.
 - Every agent runs in a bubblewrap sandbox on Linux. It sees its own folder,
   the add-on, the programs it runs, Claude Code's settings and, for the
   engineer, the raw files; the gate's expectations, the repository, the run

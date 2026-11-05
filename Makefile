@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph equivalence compare parity repairs clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief equivalence compare parity repairs clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -40,6 +40,14 @@ engineer-graph: demo-data
 	rm -rf runs/demo-graph
 	$(PYTHON) -m tenx.run run --raw demo/data --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/demo-graph
+
+# The graph run on the brief goal, which names the models, keys and money
+# column but leaves the grain, the rows to leave out and the matching unsaid.
+# Needs Claude Code, signed in.
+engineer-brief: demo-data
+	rm -rf runs/demo-brief
+	$(PYTHON) -m tenx.run run --raw demo/data --goal demo/brief.md \
+		--checks tests/fixtures/demo_gate.json --out runs/demo-brief
 
 # The old runner and the graph on the eight comparison datasets, with a
 # stand-in for Claude Code that answers the same way every time: every
