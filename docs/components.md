@@ -327,6 +327,22 @@ for each source table, and a crosswalk that matches each billing customer to
 its company's CRM account, for which the goal says only that the two systems
 share the customer's email address.
 
+[demo/brief.md](../demo/brief.md) is a brief goal for the same data, for
+measuring whether writing a spec before the build helps. It names the same
+models, their keys, the crosswalk's `account_id` and the money column,
+because the gate's checks read those by name, and says the models are for
+reporting on real customers, so they should hold real business records only,
+each once. It does not say what one row means, which rows to leave out or
+how to match the two systems. `make engineer-brief` runs the graph run on
+it. On 2026-11-05 (Claude Code 2.1.318, cross-source agent on) it passed 1
+of 8 runs on seeds 1, 7, 42 and 2026 with 200 and 1,000 companies. Seven
+crosswalks matched whole email addresses, missing the customers whose
+company's CRM account holds another mailbox, and one engineer also kept a
+single billing customer per email address. For comparison, the current
+runner with the cross-source agent passed the full goal in 31 of 32 runs on
+2026-10-22, on another day and Claude Code version. These figures hold for
+that day, version and data.
+
 The runner prepares a folder for the agent with the goal, a profile of every
 raw table and a dbt project with no models, set to read the raw files from
 the `raw_dir` variable. The agent reads the goal and the profiles, writes the
