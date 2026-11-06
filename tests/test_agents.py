@@ -11,6 +11,16 @@ from pathlib import Path
 
 import yaml
 
+from tenx.contract import (
+    COLUMN_FIELDS,
+    CONTRACT_FIELDS,
+    EXCLUSION_FIELDS,
+    MODEL_FIELDS,
+    RULES,
+    SCHEMA,
+    TOTAL_FIELDS,
+)
+from tenx.engineer import ARCHITECT
 from tenx.repair import REPORT_FILE
 
 AGENTS = Path(__file__).resolve().parent.parent / "agents"
@@ -159,6 +169,45 @@ class ScoutAgentTest(unittest.TestCase):
 
     def test_leaves_joins_to_the_cross_source_agent(self):
         self.assertIn("do not advise how to join it to other tables", self.body)
+
+
+class ArchitectAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.fields, self.body = read_agent(AGENTS / "architect.md")
+
+    def test_sets_only_fields_a_plugin_agent_may_set(self):
+        self.assertLessEqual(set(self.fields), SUPPORTED)
+        self.assertEqual(self.fields["name"], "architect")
+        self.assertTrue(self.fields["description"].strip())
+
+    def test_pins_the_model(self):
+        self.assertEqual(self.fields["model"], "sonnet")
+
+    def test_can_only_read_files_and_give_its_answer(self):
+        tools = {tool.strip() for tool in self.fields["tools"].split(",")}
+        self.assertEqual(tools, {"Read", "Glob", "Grep", "StructuredOutput"})
+
+    def test_starts_without_claude_md_files(self):
+        self.assertIs(self.fields["omitClaudeMd"], True)
+
+    def test_asks_for_every_field_of_the_contract(self):
+        fields = {*CONTRACT_FIELDS, *MODEL_FIELDS, *COLUMN_FIELDS, *EXCLUSION_FIELDS}
+        fields |= {*TOTAL_FIELDS, *RULES}
+        for field in sorted(fields):
+            with self.subTest(field):
+                self.assertIn(f"`{field}`", self.body)
+
+    def test_reads_the_files_its_folder_holds(self):
+        for name in ("GOAL.md", "source_profiles/", "overlap.txt", "JOINS.md"):
+            with self.subTest(name):
+                self.assertIn(f"`{name}`", self.body)
+
+    def test_keeps_the_role_in_step_with_the_contract(self):
+        self.assertEqual(ARCHITECT.agent, "tenx:architect")
+        self.assertIs(ARCHITECT.json_schema, SCHEMA)
+        self.assertEqual(ARCHITECT.allowed_tools, ())
+        self.assertEqual(ARCHITECT.max_turns, 15)
+        self.assertEqual(ARCHITECT.budget_kind, "cross-source")
 
 
 if __name__ == "__main__":
