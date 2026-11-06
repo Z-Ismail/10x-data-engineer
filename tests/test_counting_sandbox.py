@@ -10,6 +10,7 @@ Skipped where bubblewrap cannot run, unless TENX_REQUIRE_SANDBOX is set.
 """
 
 import copy
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -121,6 +122,17 @@ class UnguardedInSandboxTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "Read-only file system|Permission denied"):
             self.count(self.probes.write())
         self.assertFalse(self.probes.planted.exists())
+
+    def test_an_interpreter_named_through_a_hidden_folder_still_starts(self):
+        # As when the runner is started as ../venv/bin/python from a folder
+        # the sandbox hides: the path goes through that folder.
+        hidden = tempfile.TemporaryDirectory()
+        self.addCleanup(hidden.cleanup)
+        depth = len(Path(hidden.name).resolve().parts) - 1
+        given = hidden.name + "/.." * depth + sys.executable
+        with mock.patch.object(counting.sys, "executable", given):
+            counts = count_kept(CONTRACT, self.probes.raw, self.probes.work, self.box, self.hidden)
+        self.assertEqual(counts["stg_shop__orders"].kept, 3)
 
     def test_the_counts_are_the_same_in_the_sandbox_with_the_guards(self):
         counts = count_kept(CONTRACT, self.probes.raw, self.probes.work, self.box, self.hidden)

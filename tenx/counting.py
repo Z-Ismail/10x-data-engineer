@@ -126,7 +126,12 @@ def count_kept(
         hidden=tuple(path for path in hidden if path.exists()),
     )
     try:
-        command = (sandbox or Unisolated()).command([sys.executable, "-I", "-c", SCRIPT], seen)
+        # The interpreter as given, made absolute and tidied but not resolved:
+        # a virtual environment's python is a link, and only its own path
+        # finds the environment's packages. The process starts in workdir,
+        # and the folders on a path such as ../venv/bin/python may be hidden.
+        python = os.path.normpath(os.path.abspath(sys.executable))
+        command = (sandbox or Unisolated()).command([python, "-I", "-c", SCRIPT], seen)
     except SandboxError as error:
         raise ContractError(f"the rules cannot be counted apart from the run: {error}") from error
     job = json.dumps({"raw": f"{raw}/", "queries": queries})
