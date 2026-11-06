@@ -16,6 +16,7 @@ make engineer    # the cross-source agent, then the engineer builds the demo pro
 make engineer-alone    # the same without the cross-source agent
 make engineer-scouts   # the same as make engineer, with a scout for each raw table first
 make engineer-graph    # the same as make engineer, as a graph that can be resumed
+make engineer-architect  # the graph run on the brief goal, the Architect writing a spec first
 make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
 make parity      # the graph against the earlier runner with real agents, 64 pairs;
                  # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
@@ -889,6 +890,69 @@ cost US$0.0923. In the sandbox, killing the run also ends the agent it had
 started (bubblewrap's `--die-with-parent`). A run started with
 `--unisolated` and then killed leaves its agent running until the agent
 finishes, and that agent's cost is not known to the run.
+
+### Architect
+
+```
+make engineer-architect
+python -m tenx.run run --raw demo/data --goal demo/brief.md \
+    --checks tests/fixtures/demo_gate.json --out runs/demo-architect --architect
+```
+
+`run --architect` adds the architect agent after the cross-source agent and
+before the engineer. It works in its own folder with the goal, the source
+profiles, the overlap report and the cross-source agent's `JOINS.md`, with
+read-only tools, and answers with a spec contract: for each model the goal
+names, what one row is, its key, the raw table its rows come from, the rows
+to leave out (each a SQL condition on the raw table, or exact copies of
+another row) with the reason, where each column comes from, and which money
+column must add up to the raw data; then the assumptions it made and at
+most three questions for the requester.
+
+The run checks the contract against the profiles (every table and column it
+names must exist, a staging model takes columns only from its own table),
+then counts each rule on the raw files, in a separate process in the
+sandbox (see [security](security.md)). A checked and counted contract is
+kept as `architect/attempt-<n>/contract.json` and written out as `SPEC.md`,
+which every engineer attempt finds in its folder; the engineer is asked to
+follow it where it says more than the goal and not to change it. If an
+engineer attempt changes or removes its copy, the run records a finding
+saying so. A contract that fails the check or the count, or no answer at
+all, leaves the engineer without a spec, and the run records why, for
+example `no spec for the engineer: the contract lists no models`.
+
+The architect's spend is capped as a cross-source call (US$0.40), and it
+has its own row in the usage ledger. A real run on the brief goal (seed
+2026, 200 companies, Claude Code 2.1.318), the ledger and the start of its
+`SPEC.md`:
+
+```
+role          outcome    turns  refused     time  cost (US$)
+cross-source  success        9        0   29.7 s      0.0659
+architect     success       10        0   41.1 s      0.0926
+engineer      success       18        0   63.8 s      0.1426
+run           gate PASS     37        0  134.6 s      0.3011
+```
+
+```
+## `stg_billing__customers` (staging)
+
+One row per real (live, non-test) billing customer.
+
+- Source: `billing.customers`, 157 rows
+- Key: `customer_id`
+- Leave out:
+  - `not_livemode`, 10 rows: Goal asks for real business records only; livemode false marks test-mode records (10 of 157 rows). Rule: `livemode = 'false'`
+  - `internal_test_email`, 0 rows: Emails like test1@internal.example are test records (e.g. test1, test2, test10) with no CRM match; real records only. Rule: `lower(trim(email)) LIKE 'test%@internal.example'`
+- Rows to keep: 147
+```
+
+The gate still checks the run against its own declaration, which the
+architect never sees; the spec guides the engineer and is not the test.
+Whether the architect raises the pass rate on the brief goal has not been
+measured: in three runs on 2026-11-06 the spec reached the engineer each
+time, and one of the three passed (two specs matched billing customers to
+CRM accounts on the whole email address, which the gate fails).
 
 ### Equivalence with the earlier runner
 

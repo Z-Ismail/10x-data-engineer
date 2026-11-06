@@ -48,6 +48,20 @@ what may be shown is reported by name alone. The engineer's project is
 copied into the repair's folder outside the sandbox, with any link it made
 copied as a link and not followed.
 
+When a graph run has the architect agent write a spec (`--architect`),
+the spec's rules for leaving rows out are SQL the agent wrote, and the run
+counts them on the raw files. DuckDB's own advice is to treat SQL like code
+and not to run it from an untrusted source without a sandbox, so the counts
+are made by a separate Python process in the same sandbox: it sees the raw
+files read-only and nothing of the run, the repository or the gate's
+expectations. Inside it, DuckDB may read only the raw folder and cannot
+change its settings, each count must be a single `SELECT`, and the process
+is stopped after five minutes. The tests check that a rule which adds a
+statement of its own, reads a file outside the raw folder or writes into it
+is refused inside the counting process; that with those guards taken out,
+the sandbox alone shows the rule an empty file and keeps the raw folder
+unchanged; and that the same rules read and write without either.
+
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and
 later, AppArmor allows bubblewrap to set up a sandbox only with a profile

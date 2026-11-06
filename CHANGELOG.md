@@ -6,6 +6,18 @@ Notable changes to this project.
 
 ### Added
 
+- The Architect agent, in the graph run when asked (`python -m tenx.run run
+  --architect`, `make engineer-architect`). After the cross-source agent it
+  writes a spec for each model the goal names: what one row is, its key,
+  its source, the rows to leave out and why, where each column comes from
+  and which money must add up. The answer is checked against the source
+  profiles, each rule for leaving rows out is counted on the raw files, and
+  the result goes to the engineer as `SPEC.md`; the run notes it if the
+  engineer changes it. A spec that fails its check or its count is not
+  used, and the run says why. Its spend is capped as a cross-source call.
+- A spec's rules are counted in a separate process in the sandbox, with
+  DuckDB limited to the raw folder, one `SELECT` per count and a time limit,
+  since an agent wrote them.
 - A brief goal for the demo data, `demo/brief.md`, and `make engineer-brief`:
   the same models, keys and money column as `demo/goal.md`, without the
   rows to leave out, the grain or how to match billing to the CRM. It is the
@@ -113,6 +125,10 @@ Notable changes to this project.
 
 ### Changed
 
+- A spec's row counts come from `tenx.counting.count_kept` (through the
+  source profiler's "count the rows a spec keeps") instead of
+  `tenx.spec.count_rows`, which ran the rules in the caller's own process;
+  `tenx.spec` now only writes `SPEC.md`.
 - CI runs the tests one module per process, four at a time
   (`make test-parallel`, `tests/parallel.py`): about 5 minutes instead of 13
   to 19. A module passes only if it runs exactly the tests counted for it,
