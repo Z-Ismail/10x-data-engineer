@@ -377,6 +377,7 @@ def request(**changes) -> dict:
         "out": "runs/demo",
         "cross_source": True,
         "scouts": False,
+        "architect": False,
         "isolation": "bubblewrap",
         "repairs": 0,
     }

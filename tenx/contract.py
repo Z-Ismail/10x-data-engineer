@@ -283,3 +283,14 @@ def to_declaration(contract: dict) -> dict:
             declared["totals"] = totals
         models.append(declared)
     return {"models": models}
+
+
+def contract_from_report(report: dict | None, profiles: list[dict]) -> dict:
+    """The checked contract from Claude Code's JSON report of the architect's session."""
+    if report is None:
+        raise ContractError("the architect gave no report")
+    if "structured_output" not in report:
+        raise ContractError(
+            f"the architect ended {report.get('subtype') or 'unknown'} without an answer"
+        )
+    return check_contract(report["structured_output"], profiles)
