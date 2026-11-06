@@ -31,6 +31,10 @@ class ProfilesOnly:
         require(self, OVERLAP)
         return {}
 
+    def count_kept(self, contract, raw, workdir, sandbox=None, hidden=()) -> dict:
+        require(self, ports.COUNT_KEPT)
+        return {}
+
 
 class NoMethods:
     name = "nothing"
@@ -61,6 +65,7 @@ class CapabilityTest(unittest.TestCase):
             ports.VALIDATE,
             ports.RUN_AGENT,
             ports.STRUCTURED_ANSWER,
+            ports.COUNT_KEPT,
         ]
         self.assertEqual(len(set(names)), len(names))
 

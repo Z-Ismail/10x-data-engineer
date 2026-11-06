@@ -1,4 +1,4 @@
-"""The build workflow as a graph: profile, overlap, cross-source, engineer, gate, report.
+"""The build workflow as a graph: profile, overlap, cross-source, architect, engineer, gate, report.
 
 Each step is a node. The graph is saved after every step (``durability="sync"``),
 so a run that stops part way, by a crash or a closed laptop, resumes at the
@@ -29,6 +29,7 @@ from pathlib import Path
 from langgraph.graph import END, START, StateGraph
 
 from tenx import artefacts
+from tenx.contract import ContractError, contract_from_report
 from tenx.cross_source import NOTES_FILE, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
 from tenx.domain import (
@@ -45,6 +46,7 @@ from tenx.graph.state import FAILED, PASSED, RUNNING, STOPPED, GraphState, plain
 from tenx.ledger import Ledger, role_usage
 from tenx.policy import Budget, BudgetStop
 from tenx.ports import (
+    COUNT_KEPT,
     OVERLAP,
     PROFILE,
     RUN_AGENT,
@@ -53,6 +55,7 @@ from tenx.ports import (
     VALIDATE,
     AgentBackend,
     Mounts,
+    PlatformError,
     Role,
     Sandbox,
     SourceProfiler,
@@ -64,6 +67,7 @@ from tenx.ports import (
 from tenx.repair import REPORT_FILE as REPAIR_FILE
 from tenx.repair import decide
 from tenx.repair import render as render_repair
+from tenx.spec import render as render_spec
 
 CHECKPOINT_FILE = "checkpoints.sqlite"
 AGENT_FILE = "agent.json"
@@ -74,11 +78,22 @@ USAGE_FILE = "usage.json"
 BUDGET_FILE = "budget.json"
 PROFILE_DIR = "profile"
 OVERLAP_DIR = "overlap"
+SPEC_FILE = "SPEC.md"
+CONTRACT_FILE = "contract.json"
+COUNT_DIR = "count"
 
 PLAN = "plan"
 PROFILE_STEP, OVERLAP_STEP, CROSS_SOURCE_STEP = "profile", "overlap", "cross-source"
-ENGINEER_STEP, GATE_STEP, REPORT_STEP = "engineer", "gate", "report"
-WORK_STEPS = (PROFILE_STEP, OVERLAP_STEP, CROSS_SOURCE_STEP, ENGINEER_STEP, GATE_STEP)
+ARCHITECT_STEP, ENGINEER_STEP = "architect", "engineer"
+GATE_STEP, REPORT_STEP = "gate", "report"
+WORK_STEPS = (
+    PROFILE_STEP,
+    OVERLAP_STEP,
+    CROSS_SOURCE_STEP,
+    ARCHITECT_STEP,
+    ENGINEER_STEP,
+    GATE_STEP,
+)
 
 
 @dataclass(frozen=True)
@@ -90,7 +105,7 @@ class Toolkit:
     validator: Validator
     backend: AgentBackend
     sandbox: Sandbox
-    # The agents by step: "cross-source" and "engineer".
+    # The agents by step: "cross-source", "architect" and "engineer".
     roles: Mapping[str, Role]
     # What an agent working in a folder may see; True also shows it the raw files.
     mounts: Callable[[Path, bool], Mounts]
@@ -117,8 +132,10 @@ def _stop(reason: str, **update) -> dict:
 
 def steps_for(request: EngineeringRequest) -> tuple[str, ...]:
     """The steps the build workflow takes for a request, in order."""
-    middle = (OVERLAP_STEP, CROSS_SOURCE_STEP) if request.cross_source else ()
-    return (PROFILE_STEP, *middle, ENGINEER_STEP, GATE_STEP, REPORT_STEP)
+    middle = (CROSS_SOURCE_STEP,) if request.cross_source else ()
+    middle += (ARCHITECT_STEP,) if request.architect else ()
+    overlap = (OVERLAP_STEP,) if middle else ()
+    return (PROFILE_STEP, *overlap, *middle, ENGINEER_STEP, GATE_STEP, REPORT_STEP)
 
 
 def needs(toolkit: Toolkit, steps: tuple[str, ...]) -> list[tuple[object, str]]:
@@ -127,6 +144,11 @@ def needs(toolkit: Toolkit, steps: tuple[str, ...]) -> list[tuple[object, str]]:
         PROFILE_STEP: [(toolkit.profiler, PROFILE)],
         OVERLAP_STEP: [(toolkit.profiler, OVERLAP)],
         CROSS_SOURCE_STEP: [(toolkit.backend, RUN_AGENT), (toolkit.backend, STRUCTURED_ANSWER)],
+        ARCHITECT_STEP: [
+            (toolkit.backend, RUN_AGENT),
+            (toolkit.backend, STRUCTURED_ANSWER),
+            (toolkit.profiler, COUNT_KEPT),
+        ],
         ENGINEER_STEP: [(toolkit.engine, SCAFFOLD), (toolkit.backend, RUN_AGENT)],
         GATE_STEP: [(toolkit.validator, VALIDATE)],
     }
@@ -350,6 +372,59 @@ def cross_source_node(toolkit: Toolkit):
     return cross_source
 
 
+def architect_node(toolkit: Toolkit):
+    """The architect agent; its contract, checked and counted, becomes SPEC.md for the engineer.
+
+    The contract's rules for leaving rows out are counted by the profiler
+    apart from the run, in the sandbox, since an agent wrote them. A contract
+    that fails its check or its count leaves the engineer without a spec,
+    and the run says why.
+    """
+
+    def architect(state: GraphState) -> dict:
+        request = _request(state)
+        found = state["artefacts"]
+        profiles = Path(found["profiles"]["path"])
+        overlap = Path(found["overlap"]["path"])
+        files = {"goal": Path(request.goal), "profiles": profiles, "overlap": overlap}
+        if "joins" in found:
+            files["joins"] = Path(found["joins"]["path"])
+
+        def prepare(work: Path) -> None:
+            shutil.copyfile(request.goal, work / GOAL_FILE)
+            shutil.copytree(profiles, work / SOURCE_PROFILES_DIR)
+            shutil.copytree(overlap, work / SOURCE_PROFILES_DIR, dirs_exist_ok=True)
+            if "joins" in files:
+                shutil.copyfile(files["joins"], work / NOTES_FILE)
+
+        call = call_agent(toolkit, state, ARCHITECT_STEP, files, prepare)
+        if call.stopped:
+            return call.update
+        try:
+            contract = contract_from_report(call.report, _profiles(state))
+            counts = toolkit.profiler.count_kept(
+                contract,
+                Path(request.raw).resolve(),
+                (call.folder / COUNT_DIR).resolve(),
+                toolkit.sandbox,
+                toolkit.hidden,
+            )
+        except (ContractError, PlatformError) as problem:
+            claim = f"no spec for the engineer: {problem}"
+            finding = AgentFinding(
+                agent=ARCHITECT_STEP, claim=claim, kind="fact", confidence="high"
+            )
+            return plain({**call.update, "findings": [finding.dump()]})
+        artefacts.write_text(call.folder / CONTRACT_FILE, json.dumps(contract, indent=2) + "\n")
+        spec = call.folder / SPEC_FILE
+        artefacts.write_text(spec, render_spec(contract, counts))
+        number = call.update["attempts"][ARCHITECT_STEP]
+        ref = ArtefactRef.of("spec", spec, attempt=number).dump()
+        return plain({**call.update, "artefacts": {"spec": ref}})
+
+    return architect
+
+
 # What a repair does not carry over from the attempt it repairs: what the
 # build left, and the inputs, which every attempt is given afresh.
 NOT_CARRIED = ("target", "logs", "dbt_packages", "*.duckdb", "*.duckdb.wal", "*.duckdb.tmp")
@@ -359,7 +434,7 @@ def _carry_over(previous: Path, work: Path) -> None:
     # A link the agent made is copied as a link, never followed: this copy
     # runs outside the sandbox and could otherwise read what the agent cannot.
     skip = shutil.ignore_patterns(
-        *NOT_CARRIED, GOAL_FILE, SOURCE_PROFILES_DIR, NOTES_FILE, REPAIR_FILE
+        *NOT_CARRIED, GOAL_FILE, SOURCE_PROFILES_DIR, NOTES_FILE, SPEC_FILE, REPAIR_FILE
     )
     shutil.copytree(previous, work, symlinks=True, ignore=skip, dirs_exist_ok=True)
 
@@ -379,6 +454,8 @@ def engineer_node(toolkit: Toolkit):
         files = {"goal": Path(request.goal), "profiles": profiles}
         if "joins" in found:
             files["joins"] = Path(found["joins"]["path"])
+        if "spec" in found:
+            files["spec"] = Path(found["spec"]["path"])
         checked = [ValidationResult.load(item) for item in state.get("validations") or []]
         repairing = bool(checked) and not checked[-1].passed
         if repairing:
@@ -395,6 +472,8 @@ def engineer_node(toolkit: Toolkit):
             shutil.copyfile(request.goal, work / GOAL_FILE)
             if "joins" in files:
                 shutil.copyfile(files["joins"], work / NOTES_FILE)
+            if "spec" in files:
+                shutil.copyfile(files["spec"], work / SPEC_FILE)
 
         call = call_agent(toolkit, state, ENGINEER_STEP, files, prepare, raw=True)
         if call.stopped:
@@ -405,7 +484,17 @@ def engineer_node(toolkit: Toolkit):
             return call.update
         number = call.update["attempts"][ENGINEER_STEP]
         project = ArtefactRef.of("project", call.folder / artefacts.WORK_DIR, attempt=number)
-        return plain({**call.update, "artefacts": {"project": project.dump()}, "rounds": [number]})
+        update = {**call.update, "artefacts": {"project": project.dump()}, "rounds": [number]}
+        if "spec" in files:
+            given = ArtefactRef.load(found["spec"])
+            held = Path(project.path) / SPEC_FILE
+            if not (held.is_file() and artefacts.file_hash(held) == given.sha256):
+                claim = f"the engineer changed or removed SPEC.md in attempt {number}"
+                finding = AgentFinding(
+                    agent=ENGINEER_STEP, claim=claim, kind="fact", confidence="high"
+                )
+                update["findings"] = [finding.dump()]
+        return plain(update)
 
     return engineer
 
@@ -454,7 +543,7 @@ def ledger(state: GraphState, roles: Mapping[str, Role], sandbox: str) -> Ledger
         (cost["node"], cost["attempt"]): cost["outcome"] for cost in state.get("costs") or []
     }
     used = []
-    for step in (CROSS_SOURCE_STEP, ENGINEER_STEP):
+    for step in (CROSS_SOURCE_STEP, ARCHITECT_STEP, ENGINEER_STEP):
         last = (state.get("attempts") or {}).get(step)
         if last is None:
             continue
@@ -523,6 +612,7 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
         PROFILE_STEP: profile_node(toolkit),
         OVERLAP_STEP: overlap_node(toolkit),
         CROSS_SOURCE_STEP: cross_source_node(toolkit),
+        ARCHITECT_STEP: architect_node(toolkit),
         ENGINEER_STEP: engineer_node(toolkit),
         GATE_STEP: gate_node(toolkit),
         REPORT_STEP: report_node(toolkit),

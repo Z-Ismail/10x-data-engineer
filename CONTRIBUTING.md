@@ -58,7 +58,7 @@ reason.
 | `agents/` | The agents' instructions |
 | `docs/` | The component reference |
 | `demo/` | Generator for the three demo source systems, and their goal |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the spec contract's check, the run artefacts, the spending policy, and the capability interfaces |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the spec contract's check and its row counts, the run artefacts, the spending policy, and the capability interfaces |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/`, `tenx/run.py` | The graph run: its steps, state and checkpoints, and its command line |
 | `tests/` | Tests, the dbt project the gate is tested against, and the equivalence check (`tests/equivalence.py`) |

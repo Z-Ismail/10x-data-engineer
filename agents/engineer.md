@@ -21,6 +21,11 @@ The current folder is a dbt project, with no models yet unless
   out from the profiles and a comparison of the values in each pair of
   columns before you started. When it is there, read it before you write a
   model that combines sources.
+- `SPEC.md`, only in some runs: the spec for the models, written from the
+  goal and the profiles before you started: what one row of each model is,
+  its key, the source rows to leave out with the rule and how many rows it
+  removes, the rows to keep, and where each column comes from. When it is
+  there, follow it where it says more than `GOAL.md`, and do not change it.
 - `TABLE_NOTES.md`, only in some runs: notes on what to handle in each raw
   table, worked out from its profile and a few of its rows before you
   started. When it is there, read it before you write the staging models.

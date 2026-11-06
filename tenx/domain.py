@@ -340,6 +340,8 @@ class EngineeringRequest(Record):
     out: Text
     cross_source: bool = True
     scouts: bool = False
+    # Whether the architect agent writes a spec for the engineer first.
+    architect: bool = False
     isolation: Literal["bubblewrap", "unisolated"] = "bubblewrap"
     # How many times the engineer may repair its work after the validator
     # fails it; none unless asked.
@@ -347,7 +349,16 @@ class EngineeringRequest(Record):
 
 
 # Every step a workflow can take, in the only order they can be taken.
-STEPS = ("profile", "overlap", "scouts", "cross-source", "engineer", "gate", "report")
+STEPS = (
+    "profile",
+    "overlap",
+    "scouts",
+    "cross-source",
+    "architect",
+    "engineer",
+    "gate",
+    "report",
+)
 
 
 class ExecutionPlan(Record):

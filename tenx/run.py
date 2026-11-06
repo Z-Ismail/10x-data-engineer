@@ -5,7 +5,8 @@
     python -m tenx.run status --out <folder>
 
 ``run`` does what ``python -m tenx.engineer`` does (profile the raw files,
-compare their columns, the cross-source agent, the engineer, then the gate)
+compare their columns, the cross-source agent, the engineer, then the gate;
+with ``--architect``, the architect agent writes a spec before the engineer)
 as steps of a graph whose state is saved in ``<out>/checkpoints.sqlite``
 after each one. If the run stops part way, because the process was killed
 or a step failed, ``resume`` carries on from the step it was in: finished
@@ -34,6 +35,7 @@ from tenx.adapters.duckdb import DbtDuckDB, DuckDBGate, DuckDBProfiler
 from tenx.backends.claude_code import ClaudeCode
 from tenx.domain import MAX_REPAIRS, CostRecord, EngineeringRequest, ResourceBudget
 from tenx.engineer import (
+    ARCHITECT,
     CROSS_SOURCE,
     ENGINEER,
     PLUGIN_COPY_DIR,
@@ -60,7 +62,7 @@ from tenx.ports import PlatformError
 from tenx.sandbox import Sandbox, SandboxError, default_sandbox
 
 EXIT = {"passed": 0, "failed": 1, "stopped": 3}
-ROLES = {"cross-source": CROSS_SOURCE, "engineer": ENGINEER}
+ROLES = {"cross-source": CROSS_SOURCE, "architect": ARCHITECT, "engineer": ENGINEER}
 
 
 class RunError(Exception):
@@ -127,11 +129,13 @@ def start(
     sandbox: Sandbox | None = None,
     claude: str = "claude",
     repairs: int = 0,
+    architect: bool = False,
 ) -> dict:
     """Check the inputs, then run the graph from its first step. Returns the final state.
 
     ``repairs`` is how many times the engineer may repair a project the gate
-    fails, given what the gate found; none by default.
+    fails, given what the gate found; none by default. ``architect`` has the
+    architect agent write a spec for the engineer first.
     """
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise RunError(f"the agent definitions are not in {PLUGIN_DIR}; run from a clone")
@@ -154,6 +158,7 @@ def start(
         cross_source=cross_source,
         isolation="unisolated" if sandbox.name == "none" else "bubblewrap",
         repairs=repairs,
+        architect=architect,
     )
     budget = Budget(rules)
     begin = {
@@ -248,6 +253,12 @@ def main(argv: list[str] | None = None) -> int:
         help="run the cross-source agent before the engineer (on unless --no-cross-source)",
     )
     run.add_argument(
+        "--architect",
+        action="store_true",
+        help="have the architect agent write a spec (SPEC.md) for the engineer first, "
+        "after the cross-source agent; its rules are counted on the raw files in the sandbox",
+    )
+    run.add_argument(
         "--repairs",
         type=int,
         choices=range(MAX_REPAIRS + 1),
@@ -284,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
                 rules,
                 sandbox,
                 repairs=args.repairs,
+                architect=args.architect,
             )
         else:
             state = resume(args.out)
