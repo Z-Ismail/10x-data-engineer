@@ -8,9 +8,10 @@ from pathlib import Path
 import duckdb
 from test_spec import CONTRACT, ORDERS, VISITS
 
+from tenx.adapters.duckdb import DuckDBProfiler
 from tenx.contract import ContractError
 from tenx.counting import count_kept
-from tenx.ports import KeptRows
+from tenx.ports import COUNT_KEPT, KeptRows, PlatformError
 
 
 class CountCase(unittest.TestCase):
@@ -108,6 +109,18 @@ class CountTest(CountCase):
             ContractError, r"^model stg_shop__visits: no raw file for shop.visits$"
         ):
             count_kept(CONTRACT, self.raw, self.work)
+
+
+class AdapterTest(CountCase):
+    def test_the_profiler_counts_and_says_so(self):
+        profiler = DuckDBProfiler()
+        self.assertIn(COUNT_KEPT, profiler.capabilities())
+        counts = profiler.count_kept(CONTRACT, self.raw, self.work)
+        self.assertEqual(counts["stg_shop__visits"], KeptRows(5, (("repeat_visits", 2),), 3))
+
+    def test_a_refusal_is_a_platform_error(self):
+        with self.assertRaisesRegex(PlatformError, "could not count the rows"):
+            DuckDBProfiler().count_kept(self.with_rule("mode = 1"), self.raw, self.work)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from tenx.sandbox import Mounts, Sandbox
 
 __all__ = [
     "BUILD",
+    "COUNT_KEPT",
     "OVERLAP",
     "PROFILE",
     "RUN_AGENT",
@@ -54,6 +55,7 @@ BUILD = "build a project"
 VALIDATE = "validate a project"
 RUN_AGENT = "run an agent"
 STRUCTURED_ANSWER = "give a structured answer"
+COUNT_KEPT = "count the rows a spec keeps"
 
 
 class UnsupportedCapability(Exception):
@@ -185,6 +187,17 @@ class SourceProfiler(Protocol):
 
     def overlap(self, raw: Path, out: Path) -> dict:
         """Compare columns across the tables under ``raw``; write the report to ``out``."""
+        ...
+
+    def count_kept(
+        self,
+        contract: dict,
+        raw: Path,
+        workdir: Path,
+        sandbox: Sandbox | None = None,
+        hidden: tuple[Path, ...] = (),
+    ) -> dict[str, KeptRows]:
+        """Count, apart from the run, what each model of a checked contract keeps."""
         ...
 
 

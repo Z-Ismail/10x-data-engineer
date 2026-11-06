@@ -11,16 +11,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from tenx import gate
+from tenx.contract import ContractError
+from tenx.counting import count_kept
 from tenx.engineer import dbt_project_yml, profiles_yml
 from tenx.overlap import overlap_folder, write_report
 from tenx.ports import (
     BUILD,
+    COUNT_KEPT,
     OVERLAP,
     PROFILE,
     SCAFFOLD,
     VALIDATE,
     BuildResult,
     CheckResult,
+    KeptRows,
     PlatformError,
     Sandbox,
     ValidationReport,
@@ -34,7 +38,7 @@ class DuckDBProfiler:
     name = "DuckDB"
 
     def capabilities(self) -> frozenset[str]:
-        return frozenset({PROFILE, OVERLAP})
+        return frozenset({PROFILE, OVERLAP, COUNT_KEPT})
 
     def profile(self, raw: Path, out: Path) -> list[dict]:
         try:
@@ -49,6 +53,19 @@ class DuckDBProfiler:
         except ProfileError as error:
             raise PlatformError(str(error)) from error
         return report
+
+    def count_kept(
+        self,
+        contract: dict,
+        raw: Path,
+        workdir: Path,
+        sandbox: Sandbox | None = None,
+        hidden: tuple[Path, ...] = (),
+    ) -> dict[str, KeptRows]:
+        try:
+            return count_kept(contract, Path(raw), Path(workdir), sandbox, hidden)
+        except ContractError as error:
+            raise PlatformError(str(error)) from error
 
 
 class DbtDuckDB:
