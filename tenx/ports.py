@@ -33,6 +33,7 @@ __all__ = [
     "AgentRun",
     "BuildResult",
     "CheckResult",
+    "KeptRows",
     "Mounts",
     "PlatformError",
     "Role",
@@ -146,6 +147,15 @@ class ValidationReport:
     results: tuple[CheckResult, ...]
     passed: bool
     text: str
+
+
+@dataclass(frozen=True)
+class KeptRows:
+    """What a model keeps of its source: the rows, those each rule leaves out, the rest."""
+
+    source_rows: int
+    excluded: tuple[tuple[str, int], ...]
+    kept: int
 
 
 @dataclass(frozen=True)
