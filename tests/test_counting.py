@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import duckdb
 from test_spec import CONTRACT, ORDERS, VISITS
 
 from tenx.contract import ContractError
@@ -55,6 +56,51 @@ class CountTest(CountCase):
             r"^model stg_shop__orders: could not count the rows of shop.orders: .*mode",
         ):
             count_kept(self.with_rule("mode = 'test'"), self.raw, self.work)
+
+    def plainly(self, rule: str) -> int:
+        """The count in an ordinary DuckDB connection: the positive control."""
+        source = f"read_csv('{self.raw}/shop/orders.csv', all_varchar=true, header=true)"
+        con = duckdb.connect()
+        try:
+            return con.execute(
+                f"SELECT count(*) FROM {source} WHERE coalesce(({rule}), false)"
+            ).fetchone()[0]
+        finally:
+            con.close()
+
+    def test_a_rule_holding_a_statement_of_its_own_is_refused(self):
+        written = self.root / "written.csv"
+        rule = f"true), false); COPY (SELECT 1) TO '{written}'; SELECT coalesce((1"
+        self.plainly(rule)
+        self.assertTrue(written.exists())
+        written.unlink()
+        with self.assertRaisesRegex(ContractError, "not hold statements of its own"):
+            count_kept(self.with_rule(rule), self.raw, self.work)
+        self.assertFalse(written.exists())
+
+    def test_a_rule_cannot_write_into_the_raw_folder(self):
+        # DuckDB may read and write the folders it is allowed; only the
+        # one-statement rule (and the sandbox's read-only mount) stop this.
+        written = self.raw / "shop" / "planted.csv"
+        rule = f"true), false); COPY (SELECT 1 AS id) TO '{written}'; SELECT coalesce((1"
+        with self.assertRaisesRegex(ContractError, "not hold statements of its own"):
+            count_kept(self.with_rule(rule), self.raw, self.work)
+        self.assertEqual(
+            sorted(path.name for path in self.raw.rglob("*")), ["orders.csv", "shop", "visits.csv"]
+        )
+
+    def test_a_rule_cannot_read_outside_the_raw_folder(self):
+        secret = self.root / "secret.txt"
+        secret.write_text("s3cret\n")
+        rule = f"(SELECT content FROM read_text('{secret}')) LIKE 's%'"
+        self.assertEqual(self.plainly(rule), 4)
+        with self.assertRaisesRegex(ContractError, "disabled by configuration"):
+            count_kept(self.with_rule(rule), self.raw, self.work)
+
+    def test_a_rule_that_does_not_finish_is_stopped(self):
+        rule = "(SELECT count(*) FROM range(100000000000) a, range(100000000000) b) > 0"
+        with self.assertRaisesRegex(ContractError, "did not finish within 2 seconds"):
+            count_kept(self.with_rule(rule), self.raw, self.work, timeout=2)
 
     def test_a_source_with_no_raw_file_is_refused(self):
         (self.raw / "shop" / "visits.csv").unlink()
