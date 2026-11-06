@@ -21,9 +21,11 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
+import duckdb
 from test_engineer import ANSWER, DECLARATION, DEMO_GOAL, REFERENCE_MODELS, STUB
 
 from demo.generate import generate
+from tenx.gate import expected_rows, load_declaration, source_files
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -49,6 +51,24 @@ if "tenx:engineer" in sys.argv and os.environ.get("STUB_FIRST_MODELS"):
 """
 CROSSWALK = "intermediate/int_customers_matched_to_accounts.sql"
 
+# Started as the architect, the stand-in answers with the hand-written demo
+# contract, whose rules the run then counts on the raw files.
+ARCHITECT = """
+if "tenx:architect" in sys.argv:
+    import json
+    print(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 10,
+        "duration_ms": 61000, "total_cost_usd": 0.0931,
+        "modelUsage": {"claude-sonnet-5-5": {
+            "inputTokens": 12, "cacheCreationInputTokens": 15000,
+            "cacheReadInputTokens": 60000, "outputTokens": 4000, "costBasis": "list"}},
+        "permission_denials": [],
+        "structured_output": json.loads(Path(os.environ["STUB_CONTRACT"]).read_text()),
+    }))
+    sys.exit(0)
+"""
+CONTRACT = ROOT / "tests" / "fixtures" / "demo_contract.json"
+
 
 class CommandLineTest(unittest.TestCase):
     @classmethod
@@ -61,7 +81,8 @@ class CommandLineTest(unittest.TestCase):
         bin_dir.mkdir()
         claude = bin_dir / "claude"
         claude.write_text(
-            f"#!{sys.executable}\n{KILL_ONCE}\n{FIRST_MODELS}\n{STUB}", encoding="utf-8"
+            f"#!{sys.executable}\n{KILL_ONCE}\n{ARCHITECT}\n{FIRST_MODELS}\n{STUB}",
+            encoding="utf-8",
         )
         claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
         cls.bin = bin_dir
@@ -97,6 +118,7 @@ class CommandLineTest(unittest.TestCase):
             "STUB_ANSWER": json.dumps(ANSWER),
             "STUB_KILL_ONCE": str(self.root / "killed") if kill else "",
             "STUB_FIRST_MODELS": self.first_models,
+            "STUB_CONTRACT": str(CONTRACT),
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
         }
         return subprocess.run(
@@ -169,6 +191,32 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(
             [role["role"] for role in usage["roles"]],
             ["cross-source", "engineer", "engineer repair 1"],
+        )
+
+    def test_a_run_with_the_architect_gives_the_engineer_the_spec(self):
+        done = self.start(False, "--architect")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: passed\n"), done.stdout)
+        self.assertIn("architect     success", done.stdout)
+        seen = json.loads(self.record.read_text())
+        self.assertIn("SPEC.md", seen["files"])
+        spec = self.out / "architect" / "attempt-1" / "SPEC.md"
+        given = self.out / "engineer" / "attempt-1" / "work" / "SPEC.md"
+        self.assertEqual(given.read_text(), spec.read_text())
+        # Each model's rows to keep are the gate's own expected rows for it.
+        declared = {model.name: model for model in load_declaration(DECLARATION)}
+        con = duckdb.connect()
+        files = source_files(self.raw)
+        sections = {part.split("`")[0]: part for part in spec.read_text().split("\n## `")[1:]}
+        self.assertEqual(set(sections), set(declared))
+        for name, model in declared.items():
+            with self.subTest(model=name):
+                rows = expected_rows(con, model, files[model.source])
+                self.assertIn(f"- Rows to keep: {rows.expected_rows}\n", sections[name])
+        con.close()
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(
+            [role["role"] for role in usage["roles"]], ["cross-source", "architect", "engineer"]
         )
 
     def test_repairs_outside_none_to_three_are_refused(self):
