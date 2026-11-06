@@ -167,5 +167,67 @@ class ArchitectStepTest(ArchitectCase, unittest.TestCase):
         self.unusable(fakes, "no spec for the engineer: the architect gave no report")
 
 
+class SpecToEngineerTest(ArchitectCase, unittest.TestCase):
+    def test_the_engineer_is_given_the_spec(self):
+        fakes = Fakes()
+        given = {}
+        fakes.engineer_also = lambda work: given.update(text=(work / "SPEC.md").read_text())
+        state = self.run_graph(fakes)
+        self.assertEqual(given["text"], SPEC)
+        self.assertEqual([item for item in state["findings"] if item["agent"] == "engineer"], [])
+
+    def test_an_engineer_that_changes_the_spec_is_recorded(self):
+        for change in ("edit", "remove"):
+            with self.subTest(change):
+                self.setUp()
+                fakes = Fakes()
+
+                def tamper(work, change=change):
+                    if change == "edit":
+                        (work / "SPEC.md").write_text(
+                            SPEC.replace("Rows to keep: 5", "Rows to keep: 6")
+                        )
+                    else:
+                        (work / "SPEC.md").unlink()
+
+                fakes.engineer_also = tamper
+                state = self.run_graph(fakes)
+                claims = [
+                    item["claim"] for item in state["findings"] if item["agent"] == "engineer"
+                ]
+                self.assertEqual(claims, ["the engineer changed or removed SPEC.md in attempt 1"])
+
+    def test_a_repair_is_given_the_spec_afresh(self):
+        fakes = Fakes()
+        fakes.failing = [1, 0]
+        rounds = []
+
+        def note(work):
+            rounds.append((work / "SPEC.md").read_text())
+            (work / "SPEC.md").write_text("changed\n")
+
+        fakes.engineer_also = note
+        state = self.invoke(fakes.toolkit(self.out), self.request(architect=True, repairs=1))
+        self.assertEqual(rounds, [SPEC, SPEC])
+        self.assertEqual(state["status"], "passed")
+
+    def test_a_resumed_run_uses_the_finished_architect_attempt(self):
+        fakes = Fakes()
+        stop = {"engineer": True}
+
+        def dies(work):
+            if stop.pop("engineer", False):
+                raise SystemExit("killed")
+
+        fakes.engineer_also = dies
+        with self.assertRaises(SystemExit):
+            self.run_graph(fakes)
+        fakes.engineer_also = None
+        state = self.invoke(fakes.toolkit(self.out), resume=True)
+        self.assertEqual(fakes.calls.count("architect"), 1)
+        self.assertEqual(state["attempts"]["architect"], 1)
+        self.assertEqual(state["status"], "passed")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -81,6 +81,12 @@ class EngineerAgentTest(unittest.TestCase):
         self.assertIn("`JOINS.md`, only in some runs", self.body)
         self.assertIn("When it is there, read it", self.body)
 
+    def test_follows_the_spec_only_when_it_is_there_and_leaves_it_alone(self):
+        self.assertIn("`SPEC.md`, only in some runs", self.body)
+        self.assertIn(
+            "follow it where it says more than `GOAL.md`, and do not change it", self.body
+        )
+
     def test_reads_the_table_notes_only_when_they_are_there(self):
         self.assertIn("`TABLE_NOTES.md`, only in some runs", self.body)
         self.assertIn("When it is there, read it before you write the staging models", self.body)

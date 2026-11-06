@@ -434,7 +434,7 @@ def _carry_over(previous: Path, work: Path) -> None:
     # A link the agent made is copied as a link, never followed: this copy
     # runs outside the sandbox and could otherwise read what the agent cannot.
     skip = shutil.ignore_patterns(
-        *NOT_CARRIED, GOAL_FILE, SOURCE_PROFILES_DIR, NOTES_FILE, REPAIR_FILE
+        *NOT_CARRIED, GOAL_FILE, SOURCE_PROFILES_DIR, NOTES_FILE, SPEC_FILE, REPAIR_FILE
     )
     shutil.copytree(previous, work, symlinks=True, ignore=skip, dirs_exist_ok=True)
 
@@ -454,6 +454,8 @@ def engineer_node(toolkit: Toolkit):
         files = {"goal": Path(request.goal), "profiles": profiles}
         if "joins" in found:
             files["joins"] = Path(found["joins"]["path"])
+        if "spec" in found:
+            files["spec"] = Path(found["spec"]["path"])
         checked = [ValidationResult.load(item) for item in state.get("validations") or []]
         repairing = bool(checked) and not checked[-1].passed
         if repairing:
@@ -470,6 +472,8 @@ def engineer_node(toolkit: Toolkit):
             shutil.copyfile(request.goal, work / GOAL_FILE)
             if "joins" in files:
                 shutil.copyfile(files["joins"], work / NOTES_FILE)
+            if "spec" in files:
+                shutil.copyfile(files["spec"], work / SPEC_FILE)
 
         call = call_agent(toolkit, state, ENGINEER_STEP, files, prepare, raw=True)
         if call.stopped:
@@ -480,7 +484,17 @@ def engineer_node(toolkit: Toolkit):
             return call.update
         number = call.update["attempts"][ENGINEER_STEP]
         project = ArtefactRef.of("project", call.folder / artefacts.WORK_DIR, attempt=number)
-        return plain({**call.update, "artefacts": {"project": project.dump()}, "rounds": [number]})
+        update = {**call.update, "artefacts": {"project": project.dump()}, "rounds": [number]}
+        if "spec" in files:
+            given = ArtefactRef.load(found["spec"])
+            held = Path(project.path) / SPEC_FILE
+            if not (held.is_file() and artefacts.file_hash(held) == given.sha256):
+                claim = f"the engineer changed or removed SPEC.md in attempt {number}"
+                finding = AgentFinding(
+                    agent=ENGINEER_STEP, claim=claim, kind="fact", confidence="high"
+                )
+                update["findings"] = [finding.dump()]
+        return plain(update)
 
     return engineer
 
