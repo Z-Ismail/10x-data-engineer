@@ -103,6 +103,12 @@ class ArchitectStepTest(ArchitectCase, unittest.TestCase):
         attempt = self.out / "architect" / "attempt-1"
         self.assertEqual((attempt / "SPEC.md").read_text(), SPEC)
         self.assertEqual(json.loads((attempt / "contract.json").read_text()), CONTRACT)
+        # The stand-in's counts, as SPEC.md states them: six rows, one left out.
+        self.assertEqual(
+            (attempt / "counts.json").read_text(),
+            '{\n  "stg_shop__orders": {\n    "source_rows": 6,\n'
+            '    "excluded": {\n      "tests": 1\n    },\n    "kept": 5\n  }\n}\n',
+        )
         spec = ArtefactRef.load(state["artefacts"]["spec"])
         self.assertEqual((Path(spec.path), spec.attempt), (attempt / "SPEC.md", 1))
         self.assertTrue(spec.unchanged())
@@ -131,7 +137,8 @@ class ArchitectStepTest(ArchitectCase, unittest.TestCase):
         state = self.run_graph(fakes)
         self.assertEqual(self.findings(state), [claim])
         self.assertNotIn("spec", state["artefacts"])
-        self.assertFalse((self.out / "architect" / "attempt-1" / "SPEC.md").exists())
+        for name in ("SPEC.md", "counts.json"):
+            self.assertFalse((self.out / "architect" / "attempt-1" / name).exists())
         self.assertNotIn("SPEC.md", fakes.seen["engineer"])
         self.assertEqual(state["status"], "passed")
 
