@@ -1070,7 +1070,18 @@ $ make parity
 error: 128 runs to do, estimated at US$35.84, at most US$147.20 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
 ```
 
-No live paired comparison has been run yet.
+One live paired comparison has been run, on 2026-11-06, with Claude Code
+2.1.319 and Sonnet on the demo goal, at the code of 2026-11-02 (before the
+repair loop and the Architect were added, both off by default). Of 64
+pairs, 57 both passed, 2 passed only with the earlier runner, 5 only with
+the graph, and none failed both: the earlier runner passed 59 (92%), the
+graph 62 (97%). The difference, -4.7 points, had a 95% interval of -14.5 to
++4.2, wholly below the margin: non-inferior. The cost per pass was US$0.1672
+for the earlier runner and US$0.1604 for the graph, a ratio of 0.959 (95%
+0.878 to 1.037), within the limit. Overall: non-inferior. Every failing run,
+in both runners, failed only the `expected` check on the crosswalk. The
+runs cost US$19.81 in all by Claude Code's estimate. The figures hold for
+that day, Claude Code version, goal and data.
 
 ### Repair comparison
 
