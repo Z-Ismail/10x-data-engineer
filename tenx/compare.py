@@ -65,6 +65,7 @@ from math import comb, exp, lgamma, log
 from pathlib import Path
 
 from tenx import artefacts, parity
+from tenx.engineer import ARCHITECT as ARCHITECT_ROLE
 from tenx.engineer import EngineerError
 from tenx.engineer import run as engineer_run
 from tenx.gate import GateError, load_declaration
@@ -87,6 +88,12 @@ PAIRED_ARMS = ("default", "graph")
 # compared with its own first round, which is a run without repairs.
 REPAIRS = "repairs"
 REPAIR_ARM = "repair"
+# The architect comparison: the graph run on the same datasets with and
+# without the architect agent, both with the cross-source agent, in
+# shuffled blocks as the arm comparison runs them.
+ARCHITECT = "architect"
+ARCHITECT_ARMS = ("graph", "architect")
+ARCHITECT_BASELINE = "graph"
 # An arm is said to help (or hurt) when the probability that its pass rate
 # is higher (or lower) than the baseline's reaches this. With three arms
 # compared with one baseline, 0.98 keeps the chance of wrongly keeping any
@@ -252,7 +259,19 @@ def repairs_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Tr
     return order
 
 
+def architect_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order of an architect comparison: blocks of one dataset and trial, as plan() makes.
+
+    Each block holds a run with the architect and one without, in an order
+    drawn from the seed.
+    """
+    _check_plan(datasets, ARCHITECT_ARMS, trials)
+    return _blocks(datasets, ARCHITECT_ARMS, trials, random.Random(f"{seed}:architect"))
+
+
 def _planned(datasets, arms, trials, seed, mode) -> list[Trial]:
+    if mode == ARCHITECT:
+        return architect_plan(datasets, trials, seed)
     if mode == PAIRED:
         return paired_plan(datasets, trials, seed)
     if mode == REPAIRS:
@@ -415,10 +434,11 @@ class Summary:
     by_dataset: dict[str, dict[str, Tally]]
     without_verdict: tuple[Trial, ...]
     planned: int
+    baseline: str = BASELINE
 
     def to_dict(self) -> dict:
         return {
-            "baseline": BASELINE,
+            "baseline": self.baseline,
             "decision": DECISION,
             "datasets": self.datasets,
             "trials": self.trials,
@@ -432,8 +452,8 @@ class Summary:
         }
 
 
-def _verdict(arm: str, better: float | None, worse: float | None) -> str:
-    if arm == BASELINE:
+def _verdict(arm: str, better: float | None, worse: float | None, baseline: str) -> str:
+    if arm == baseline:
         return "baseline"
     if better is None or worse is None:
         return "no runs"
@@ -455,13 +475,14 @@ def summarise(out: Path) -> Summary:
     done = [o for o in outcomes if o.gate is not None]
     datasets = document["datasets"]
     arms = document["arms"]
-    base = _tally([o for o in done if o.trial.arm == BASELINE])
+    baseline = ARCHITECT_BASELINE if document.get("mode") == ARCHITECT else BASELINE
+    base = _tally([o for o in done if o.trial.arm == baseline])
     summaries = []
     for arm in arms:
         mine = [o for o in done if o.trial.arm == arm]
         tally = _tally(mine)
         better = worse = None
-        if arm != BASELINE and tally.runs and base.runs:
+        if arm != baseline and tally.runs and base.runs:
             better = prob_better(base, tally)
             worse = prob_better(tally, base)
         costs = [o.cost_usd for o in mine]
@@ -475,7 +496,7 @@ def summarise(out: Path) -> Summary:
                 high=high,
                 better=better,
                 worse=worse,
-                verdict=_verdict(arm, better, worse),
+                verdict=_verdict(arm, better, worse, baseline),
                 cost_usd=cost,
                 cost_per_pass=cost / tally.passes if cost is not None and tally.passes else None,
                 no_verdict=sum(o.trial.arm == arm and o.gate is None for o in outcomes),
@@ -495,6 +516,7 @@ def summarise(out: Path) -> Summary:
         by_dataset=by_dataset,
         without_verdict=tuple(o.trial for o in outcomes if o.gate is None),
         planned=len(order),
+        baseline=baseline,
     )
 
 
@@ -516,7 +538,7 @@ def render(summary: Summary) -> str:
     )
     rule = (
         f"an arm helps (or hurts) when the chance that its pass rate is higher "
-        f"(or lower) than {BASELINE}'s is at least {DECISION}"
+        f"(or lower) than {summary.baseline}'s is at least {DECISION}"
     )
     lines = [heading, rule, ""]
     rows = []
@@ -542,7 +564,7 @@ def render(summary: Summary) -> str:
         "passes",
         "rate",
         "95% interval",
-        f"P(> {BASELINE})",
+        f"P(> {summary.baseline})",
         "US$ per run",
         "US$ per pass",
     ]
@@ -985,7 +1007,12 @@ class Estimate:
 
 
 def agent_calls(arm: str, tables: int) -> list[str]:
-    """The kind of each agent call one run of the arm makes: a scout per raw table."""
+    """The kind of each agent call one run of the arm makes: a scout per raw table.
+
+    The architect is priced by the kind of call its role is capped as.
+    """
+    if arm == ARCHITECT:
+        return [CROSS_SOURCE, ARCHITECT_ROLE.budget_kind, ENGINEER]
     scouts, cross_source = (False, True) if arm in PAIRED_ARMS else ARMS[arm]
     return [SCOUT] * (tables if scouts else 0) + [CROSS_SOURCE] * cross_source + [ENGINEER]
 
