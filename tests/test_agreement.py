@@ -87,6 +87,11 @@ class ScoreTest(unittest.TestCase):
         found = self.differences(CONTRACT, {**KEPT, "stg_shop__lines": 7})
         self.assertEqual(found["stg_shop__lines"], ("rows to keep 7 not 9",))
 
+    def test_a_model_the_declaration_gives_no_rows_for_is_not_compared_on_rows(self):
+        wanted = {"stg_shop__orders": 6}
+        found = score(CONTRACT, {**KEPT, "stg_shop__lines": 1}, DECLARED, wanted)
+        self.assertEqual(found.describe(), "2 of 2 models agree")
+
     def test_a_key_in_another_order_or_case_agrees_and_another_key_does_not(self):
         reordered = changed(lambda m: m[1].update(key=["line", "order_id"]))
         self.assertEqual(self.differences(reordered)["stg_shop__lines"], ())

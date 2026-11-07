@@ -1,29 +1,44 @@
 """Tests for the comparison of the graph run with and without the architect."""
 
+import io
 import json
 import random
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+from demo.generate import generate
+from tenx.agreement import declared_rows
 from tenx.compare import (
     AGREEMENT_FILE,
     ARCHITECT,
     ARCHITECT_ARMS,
     REPORT_JSON,
     RUNS_DIR,
+    ArmError,
+    CostNotApproved,
     Trial,
     agent_calls,
     architect_plan,
     estimate,
+    main,
+    read_plan,
     report,
+    run_architect,
     summarise,
     write_plan,
 )
+from tenx.gate import load_declaration
 from tenx.policy import CROSS_SOURCE, ENGINEER, Policy
+
+ROOT = Path(__file__).resolve().parent.parent
+CHECKS = ROOT / "tests" / "fixtures" / "demo_gate.json"
+BRIEF = ROOT / "demo" / "brief.md"
+DEMO_CONTRACT = json.loads((ROOT / "tests" / "fixtures" / "demo_contract.json").read_text())
 
 DATASETS = ["s1-200", "s7-1000"]
 EIGHT = [f"s{seed}-{size}" for seed in (1, 7, 42, 2026) for size in (200, 1000)]
@@ -199,6 +214,143 @@ class ReportTest(unittest.TestCase):
             leave(other, trial, "PASS", 0.1)
         self.assertNotIn("spec", report(other))
         self.assertNotIn("spec_agreement", json.loads((other / REPORT_JSON).read_text()))
+
+
+class FakeGraph:
+    """Stands in for the graph run: records each call, leaves a usage.json and,
+    when the architect runs, an architect attempt with the demo contract and
+    the rows it keeps (`kept`, by dataset). A run named in `errors` raises
+    instead, as a run that cannot start does.
+    """
+
+    def __init__(self, kept, errors=()):
+        self.kept = kept
+        self.errors = set(errors)
+        self.calls = []
+
+    def __call__(self, raw, goal, checks, out, claude, **options):
+        self.calls.append((Path(out), Path(raw), Path(goal), claude, options))
+        folder = "/".join(Path(out).parts[-3:])
+        if folder in self.errors:
+            raise ArmError("the sandbox cannot start")
+        Path(out).mkdir(parents=True)
+        if options["architect"]:
+            attempt = Path(out) / "architect" / "attempt-1"
+            attempt.mkdir(parents=True)
+            (attempt / "contract.json").write_text(json.dumps(DEMO_CONTRACT))
+            dataset = Path(out).parts[-3]
+            counts = {
+                n: {"source_rows": 0, "excluded": {}, "kept": k}
+                for n, k in self.kept[dataset].items()
+            }
+            (attempt / "counts.json").write_text(json.dumps(counts))
+        roles = [{"role": "engineer", "cost_usd": 0.1, "cost_known": True}]
+        (Path(out) / "usage.json").write_text(json.dumps({"gate": "PASS", "roles": roles}))
+
+
+class RunnerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        cls.datasets = {"a": root / "a", "b": root / "b"}
+        generate(11, 20, cls.datasets["a"], root / "answers-a")
+        generate(12, 20, cls.datasets["b"], root / "answers-b")
+        # What the gate wants of each model, worked out by the declaration.
+        declared = load_declaration(CHECKS)
+        cls.wanted = {n: declared_rows(declared, f) for n, f in cls.datasets.items()}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.out = Path(tempfile.mkdtemp()) / "compare"
+        self.addCleanup(shutil.rmtree, self.out.parent)
+        # Dataset b's spec keeps one row too many in the crosswalk.
+        off = {**self.wanted["b"]}
+        off["int_customers_matched_to_accounts"] += 1
+        self.graph = FakeGraph({"a": self.wanted["a"], "b": off})
+
+    def start(self, trials=2, **options):
+        return run_architect(
+            self.datasets,
+            BRIEF,
+            CHECKS,
+            self.out,
+            trials=trials,
+            claude="stand-in",
+            runner=self.graph,
+            progress=lambda line: None,
+            **options,
+        )
+
+    def test_each_arm_runs_the_graph_and_only_one_runs_the_architect(self):
+        self.start()
+        _, order = read_plan(self.out)
+        self.assertEqual(
+            sorted((c[0], c[1], c[2], c[3], tuple(sorted(c[4].items()))) for c in self.graph.calls),
+            sorted(
+                (
+                    self.out / RUNS_DIR / t.folder,
+                    self.datasets[t.dataset],
+                    BRIEF,
+                    "stand-in",
+                    (("architect", t.arm == ARCHITECT), ("cross_source", True)),
+                )
+                for t in order
+            ),
+        )
+
+    def test_each_architect_run_is_scored_against_the_declaration(self):
+        text = self.start()
+        crosswalk = "int_customers_matched_to_accounts"
+        rows = self.wanted["b"][crosswalk]
+        for trial in (1, 2):
+            self.assertIn(f"a/architect/{trial}  PASS  5 of 5 models agree\n", text)
+            self.assertIn(
+                f"b/architect/{trial}  PASS  4 of 5 models agree; {crosswalk}: "
+                f"rows to keep {rows + 1} not {rows}\n",
+                text,
+            )
+        self.assertIn("2 of 4 specs agree on every declared model; 0 runs had no spec\n", text)
+        self.assertFalse((self.out / RUNS_DIR / "a" / "graph" / "1" / AGREEMENT_FILE).exists())
+
+    def test_a_run_that_fails_is_left_out_and_run_again_on_the_next_start(self):
+        self.graph.errors = {"a/architect/2"}
+        text = self.start()
+        self.assertIn("7 of 8 runs have a gate verdict", text)
+        self.assertIn("runs with no gate verdict, not counted:\n  a/architect/2\n", text)
+        self.graph.errors = set()
+        self.graph.calls = []
+        text = self.start()
+        self.assertEqual([c[0] for c in self.graph.calls], [self.out / RUNS_DIR / "a/architect/2"])
+        self.assertIn("8 of 8 runs have a gate verdict", text)
+
+    def test_above_five_dollars_nothing_runs_without_approval(self):
+        # 8 runs each arm: 8 x 0.28 + 8 x 0.36 = 5.12, above 5; 2 trials: 2.56.
+        with self.assertRaises(CostNotApproved) as refused:
+            self.start(trials=4)
+        self.assertIn("16 runs to do, estimated at US$5.12", str(refused.exception))
+        self.assertFalse(self.out.exists())
+        self.assertEqual(self.graph.calls, [])
+        self.start(trials=4, approve_cost=True)
+        self.assertEqual(len(self.graph.calls), 16)
+
+    def test_another_kind_of_comparison_in_the_folder_is_refused(self):
+        self.out.mkdir()
+        write_plan(self.out, ["a", "b"], ["alone"], 2, 0)
+        with self.assertRaises(ValueError):
+            self.start()
+
+    def test_the_command_line_refuses_without_approval(self):
+        args = ["architect", "--goal", str(BRIEF), "--checks", str(CHECKS), "--out", str(self.out)]
+        args += [f"--raw={n}={f}" for n, f in self.datasets.items()]
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            self.assertEqual(main(args), 2)
+        self.assertIn("US$5.12", err.getvalue())
+        self.assertFalse(self.out.exists())
 
 
 if __name__ == "__main__":

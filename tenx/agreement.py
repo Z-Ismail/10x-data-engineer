@@ -102,14 +102,14 @@ def _money(totals: set[tuple]) -> str:
     return "; ".join(shown) or "none"
 
 
-def _differences(spec: ModelSpec, declared: ModelSpec, kept: int, wanted: int) -> list[str]:
+def _differences(spec: ModelSpec, declared: ModelSpec, kept: int, wanted: int | None) -> list[str]:
     found = []
     key, wanted_key = {c.lower() for c in spec.key}, {c.lower() for c in declared.key}
     if key != wanted_key:
         found.append(f"key {_columns(key)} not {_columns(wanted_key)}")
     if spec.source != declared.source:
         found.append(f"source {spec.source} not {declared.source}")
-    if kept != wanted:
+    if wanted is not None and kept != wanted:
         found.append(f"rows to keep {kept} not {wanted}")
     totals, wanted_totals = _totals(spec.totals), _totals(declared.totals)
     if totals != wanted_totals:
@@ -127,7 +127,8 @@ def score(
 
     ``kept`` is what each contract model keeps of its source, as counted for
     the spec; ``wanted`` is the declaration's own expected rows for each of
-    its models, on the same raw files.
+    its models, on the same raw files; a model it leaves out (one declared
+    with no source) is not compared on rows.
     """
     specs = {model.name: model for model in parse_declaration(to_declaration(contract))}
     models = []
@@ -136,7 +137,7 @@ def score(
         if spec is None:
             models.append(ModelAgreement(model.name, ("not in the spec",)))
             continue
-        found = _differences(spec, model, kept[model.name], wanted[model.name])
+        found = _differences(spec, model, kept[model.name], wanted.get(model.name))
         models.append(ModelAgreement(model.name, tuple(found)))
     names = {model.name for model in declared}
     return Agreement(tuple(models), tuple(name for name in specs if name not in names))
@@ -150,6 +151,7 @@ def declared_rows(declared: list[ModelSpec], raw: Path) -> dict[str, int]:
         return {
             model.name: expected_rows(con, model, files[model.source]).expected_rows
             for model in declared
+            if model.source is not None
         }
     finally:
         con.close()

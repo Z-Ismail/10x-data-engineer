@@ -16,6 +16,8 @@ same figures.
     python -m tenx.compare repairs --raw NAME=FOLDER [--raw NAME=FOLDER ...]
         --goal <file> --checks <file> --out <folder> [--trials 4] [--repairs 2]
         [--no-cross-source] [--parallel 3]
+    python -m tenx.compare architect --raw NAME=FOLDER [--raw NAME=FOLDER ...]
+        --goal <file> --checks <file> --out <folder> [--trials 4] [--parallel 3]
     python -m tenx.compare report <folder>
 
 ``paired`` compares two runners rather than arms: today's runner and the
@@ -29,6 +31,12 @@ first round, which is a run without repairs: nothing the engineer sees in
 its first attempt depends on the number of repairs, and a repair is made
 only after a round fails. Repairs are better when Tango's interval on the
 difference lies wholly above 0; the cost per pass of each is reported.
+
+``architect`` runs the graph with and without the architect agent, both
+with the cross-source agent, on the same datasets in shuffled blocks, and
+judges them as the arms are judged, the run without the architect as the
+baseline. Each architect run's spec is scored against the declaration
+(tenx.agreement), which the agents never see, and shown beside its verdict.
 
 Each run is an ordinary engineer run, in its own folder:
 
@@ -65,6 +73,7 @@ from math import comb, exp, lgamma, log
 from pathlib import Path
 
 from tenx import artefacts, parity
+from tenx.agreement import declared_rows, last_contract, score
 from tenx.engineer import ARCHITECT as ARCHITECT_ROLE
 from tenx.engineer import EngineerError
 from tenx.engineer import run as engineer_run
@@ -1377,6 +1386,75 @@ def run_repairs(
     return report(out)
 
 
+def score_run(folder: Path, declared: list, wanted: dict[str, int]) -> dict:
+    """Score the run's spec against the declaration and keep it in the run's folder."""
+    found = last_contract(folder)
+    if found is None:
+        result = {"spec": False}
+    else:
+        contract, kept = found
+        result = {"spec": True, **score(contract, kept, declared, wanted).to_dict()}
+    artefacts.write_text(Path(folder) / AGREEMENT_FILE, json.dumps(result, indent=2) + "\n")
+    return result
+
+
+def run_architect(
+    datasets: dict[str, Path],
+    goal: Path,
+    checks: Path,
+    out: Path,
+    trials: int = 4,
+    seed: int = 0,
+    parallel: int = 3,
+    claude: str = "claude",
+    runner=None,
+    progress=print,
+    approve_cost: bool = False,
+) -> str:
+    """Run the graph with and without the architect on every dataset, trials times, then report.
+
+    Both arms run the cross-source agent; only the architect arm runs the
+    architect. Each architect run's spec is scored against the declaration
+    when the run finishes. An error leaves the run without a verdict, and a
+    second start runs it again. `runner` stands in for the graph run in
+    tests. Priced first; above the policy's limit nothing is written or run
+    unless `approve_cost` is true.
+    """
+    runner = runner or run_graph
+    _check_inputs(datasets, goal, checks, parallel)
+    out = Path(out)
+    rules = Policy()
+    tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
+    order = _order(out, list(datasets), ARCHITECT_ARMS, trials, seed, ARCHITECT)
+    cost = estimate([t for t in order if outcome(out, t).gate is None], tables, rules)
+    if cost.typical_usd > rules.approve_above_usd and not approve_cost:
+        raise CostNotApproved(
+            f"{cost.describe()}; above US${rules.approve_above_usd}, so it needs approval: "
+            "run it again with --approve-cost to go ahead"
+        )
+    progress(cost.describe())
+    declared = load_declaration(checks)
+    wanted = {name: declared_rows(declared, folder) for name, folder in datasets.items()}
+    order = _start(out, list(datasets), ARCHITECT_ARMS, trials, seed, ARCHITECT)
+
+    def call(trial: Trial, folder: Path) -> None:
+        architect = trial.arm == ARCHITECT
+        runner(
+            datasets[trial.dataset],
+            goal,
+            checks,
+            folder,
+            claude,
+            cross_source=True,
+            architect=architect,
+        )
+        if architect:
+            score_run(folder, declared, wanted[trial.dataset])
+
+    _execute(out, order, call, parallel, progress)
+    return report(out)
+
+
 def _dataset(text: str) -> tuple[str, Path]:
     name, sep, folder = text.partition("=")
     if not sep or not name or not folder:
@@ -1471,6 +1549,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run even when the comparison is estimated above US$5",
     )
+    spec = commands.add_parser(
+        "architect",
+        help="run the graph with and without the architect on the same datasets, then report",
+    )
+    spec.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; give one --raw per dataset",
+    )
+    spec.add_argument("--goal", type=Path, required=True, help="what to build, in plain English")
+    spec.add_argument(
+        "--checks", type=Path, required=True, help="the gate's JSON declaration of what to expect"
+    )
+    spec.add_argument("--out", type=Path, required=True, help="folder for the comparison")
+    spec.add_argument("--trials", type=int, default=4, help="runs of each arm on each dataset")
+    spec.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
+    spec.add_argument("--parallel", type=int, default=3, help="runs at the same time")
+    spec.add_argument(
+        "--approve-cost",
+        action="store_true",
+        help="run even when the comparison is estimated above US$5",
+    )
     show = commands.add_parser("report", help="report a comparison from its runs so far")
     show.add_argument("out", type=Path, help="the comparison's folder")
     args = parser.parse_args(argv)
@@ -1481,7 +1584,18 @@ def main(argv: list[str] | None = None) -> int:
         datasets = dict(args.raw)
         if len(datasets) != len(args.raw):
             raise ValueError("each dataset may be named only once")
-        if args.command == "repairs":
+        if args.command == "architect":
+            text = run_architect(
+                datasets,
+                args.goal,
+                args.checks,
+                args.out,
+                trials=args.trials,
+                seed=args.seed,
+                parallel=args.parallel,
+                approve_cost=args.approve_cost,
+            )
+        elif args.command == "repairs":
             text = run_repairs(
                 datasets,
                 args.goal,
