@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect equivalence compare parity repairs clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect equivalence compare parity repairs compare-architect clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -134,6 +134,26 @@ repairs:
 	$(PYTHON) -m tenx.compare repairs --goal demo/goal.md --checks tests/fixtures/demo_gate.json \
 		--out runs/repairs --trials $(REPAIRS_TRIALS) --repairs $(REPAIRS_MAX) --no-cross-source \
 		$(REPAIRS_FLAGS) $(foreach name,$(COMPARE_DATASETS),--raw $(name)=$(COMPARE_DATA)/$(name)/data)
+
+# The graph run on the brief goal with and without the Architect, both with
+# the cross-source agent, on the same eight datasets, ARCHITECT_TRIALS runs
+# of each (64 runs by default), each Architect's spec scored against the
+# gate's declaration. Needs Claude Code, signed in, and bubblewrap. Run it
+# again to resume. Estimated above US$5, so it needs approval:
+# make compare-architect ARCHITECT_FLAGS=--approve-cost
+ARCHITECT_TRIALS ?= 4
+ARCHITECT_FLAGS ?=
+
+compare-architect:
+	@for seed in $(COMPARE_SEEDS); do for size in $(COMPARE_SIZES); do \
+		folder=$(COMPARE_DATA)/s$$seed-$$size; \
+		test -d $$folder/data || $(PYTHON) demo/generate.py --seed $$seed --companies $$size \
+			--out $$folder/data --answers-out $$folder/answers || exit 1; \
+	done; done
+	$(PYTHON) -m tenx.compare architect --goal demo/brief.md \
+		--checks tests/fixtures/demo_gate.json --out runs/compare-architect \
+		--trials $(ARCHITECT_TRIALS) $(ARCHITECT_FLAGS) \
+		$(foreach name,$(COMPARE_DATASETS),--raw $(name)=$(COMPARE_DATA)/$(name)/data)
 
 clean:
 	rm -rf demo/data demo/answers profiles runs
