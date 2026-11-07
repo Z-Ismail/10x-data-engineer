@@ -6,6 +6,17 @@ Notable changes to this project.
 
 ### Added
 
+- An Architect comparison: `python -m tenx.compare architect` (and `make
+  compare-architect`) runs the graph with and without the Architect, both
+  with the cross-source agent, on the same datasets in shuffled blocks, and
+  judges them as the arm comparison does, the run without the Architect as
+  the baseline. Each Architect run's spec is scored against the gate's
+  declaration (keys, sources, rows to keep, money totals) and shown beside
+  its verdict. It resumes and is refused above US$5 without
+  `--approve-cost`; the 64 runs of `make compare-architect` are estimated
+  at US$20.48.
+- The Architect's step keeps what each model keeps of its source as
+  `counts.json` beside `contract.json`.
 - The Architect agent, in the graph run when asked (`python -m tenx.run run
   --architect`, `make engineer-architect`). After the cross-source agent it
   writes a spec for each model the goal names: what one row is, its key,

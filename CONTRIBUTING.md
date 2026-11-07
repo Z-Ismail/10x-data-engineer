@@ -40,6 +40,10 @@ is estimated above US$5.
 and is refused unless `REPAIRS_FLAGS=--approve-cost` is given, for the same
 reason.
 
+`make compare-architect` runs the graph with and without the Architect on
+the brief goal, 64 runs, and is refused unless `ARCHITECT_FLAGS=--approve-cost`
+is given, for the same reason.
+
 ## Guidelines
 
 - One logical change per commit, with its tests.

@@ -111,7 +111,7 @@ if:
 | Discovery | Cross-source agent: how the tables join, given to the engineer | Available, on by default |
 | Build | Engineer agent: dbt models on DuckDB from a plain-English goal | Available |
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
-| Specification | Architect agent: a machine-checked spec contract and `SPEC.md` for the engineer | In progress: built into the graph run, off by default (`python -m tenx.run run --architect`, `make engineer-architect`); not yet shown to raise the pass rate, which a measured comparison on the brief demo goal (`make engineer-brief`) will settle |
+| Specification | Architect agent: a machine-checked spec contract and `SPEC.md` for the engineer | In progress: built into the graph run, off by default (`python -m tenx.run run --architect`, `make engineer-architect`); not yet shown to raise the pass rate. The measured comparison on the brief demo goal (`make compare-architect`, 64 runs, each spec scored against the gate's hidden declaration) is built and has not been run |
 | Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available: the graph run works only through them |
 | Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available: the per-call caps and the comparison approval apply to every run; the run ceiling applies to graph runs (`python -m tenx.run`) |
@@ -142,6 +142,7 @@ make engineer-architect  # the same, with the Architect writing the spec first
 make equivalence     # the graph against the current runner, with a stand-in for Claude Code
 make parity          # the graph against the current runner with real agents (needs approval)
 make repairs         # repairs against no repairs with real agents (needs approval)
+make compare-architect  # the graph with and without the Architect on the brief goal (needs approval)
 ```
 
 The demo data is a billing system, a CRM and a product event log for the
