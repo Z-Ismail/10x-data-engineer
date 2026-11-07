@@ -54,6 +54,7 @@ from tenx.ports import (
     STRUCTURED_ANSWER,
     VALIDATE,
     AgentBackend,
+    KeptRows,
     Mounts,
     PlatformError,
     Role,
@@ -80,6 +81,7 @@ PROFILE_DIR = "profile"
 OVERLAP_DIR = "overlap"
 SPEC_FILE = "SPEC.md"
 CONTRACT_FILE = "contract.json"
+COUNTS_FILE = "counts.json"
 COUNT_DIR = "count"
 
 PLAN = "plan"
@@ -372,6 +374,15 @@ def cross_source_node(toolkit: Toolkit):
     return cross_source
 
 
+def _counts_json(counts: Mapping[str, KeptRows]) -> str:
+    """What each model keeps, as the spec states it, so the run can be scored later."""
+    document = {
+        name: {"source_rows": rows.source_rows, "excluded": dict(rows.excluded), "kept": rows.kept}
+        for name, rows in counts.items()
+    }
+    return json.dumps(document, indent=2) + "\n"
+
+
 def architect_node(toolkit: Toolkit):
     """The architect agent; its contract, checked and counted, becomes SPEC.md for the engineer.
 
@@ -416,6 +427,7 @@ def architect_node(toolkit: Toolkit):
             )
             return plain({**call.update, "findings": [finding.dump()]})
         artefacts.write_text(call.folder / CONTRACT_FILE, json.dumps(contract, indent=2) + "\n")
+        artefacts.write_text(call.folder / COUNTS_FILE, _counts_json(counts))
         spec = call.folder / SPEC_FILE
         artefacts.write_text(spec, render_spec(contract, counts))
         number = call.update["attempts"][ARCHITECT_STEP]

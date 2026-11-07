@@ -24,6 +24,8 @@ make compare     # runs the engineer with and without the other agents, 128 runs
                  # needs COMPARE_FLAGS=--approve-cost (estimated above US$5)
 make repairs     # repairs against no repairs, engineer alone, 32 runs;
                  # needs REPAIRS_FLAGS=--approve-cost (estimated above US$5)
+make compare-architect  # the graph on the brief goal with and without the Architect, 64 runs;
+                        # needs ARCHITECT_FLAGS=--approve-cost (estimated above US$5)
 ```
 
 ## Demo data
@@ -913,7 +915,8 @@ The run checks the contract against the profiles (every table and column it
 names must exist, a staging model takes columns only from its own table),
 then counts each rule on the raw files, in a separate process in the
 sandbox (see [security](security.md)). A checked and counted contract is
-kept as `architect/attempt-<n>/contract.json` and written out as `SPEC.md`,
+kept as `architect/attempt-<n>/contract.json`, with what each model keeps
+of its source in `counts.json`, and written out as `SPEC.md`,
 which every engineer attempt finds in its folder; the engineer is asked to
 follow it where it says more than the goal and not to change it. If an
 engineer attempt changes or removes its copy, the run records a finding
@@ -953,6 +956,55 @@ Whether the architect raises the pass rate on the brief goal has not been
 measured: in three runs on 2026-11-06 the spec reached the engineer each
 time, and one of the three passed (two specs matched billing customers to
 CRM accounts on the whole email address, which the gate fails).
+
+### Architect comparison
+
+```
+make compare-architect ARCHITECT_FLAGS=--approve-cost
+python -m tenx.compare architect --raw NAME=FOLDER [--raw NAME=FOLDER ...] \
+    --goal demo/brief.md --checks tests/fixtures/demo_gate.json \
+    --out runs/compare-architect [--trials 4] [--parallel 3] [--approve-cost]
+python -m tenx.compare report runs/compare-architect
+```
+
+`python -m tenx.compare architect` measures whether the Architect raises the
+pass rate. It runs the graph twice per dataset and trial, with and without
+`--architect`, both with the cross-source agent, in blocks of one dataset
+and one trial number whose two runs start in an order drawn from a seed, as
+the arm comparison does. The runs are judged as the arms are: each arm's
+pass rate with a 95% Beta interval, and the Architect **helps** when the
+chance that its pass rate is higher than the run without it is at least
+0.98, **hurts** when the chance that it is lower is, and is **not shown**
+otherwise. `make compare-architect` runs the brief goal on the eight
+comparison datasets four times each: 64 runs, three at a time. It resumes
+like the other comparisons.
+
+When an Architect run finishes, its spec is scored against the gate's
+declaration, which no agent sees, and the score is kept in the run's
+`agreement.json`. For each declared model it says whether the spec has the
+model, and whether the spec's key (as a set of columns), source table, rows
+to keep and money totals agree. Rows to keep are compared as counts on the
+same raw files, the count the engineer was told against the gate's own, so
+two rules written differently that leave out the same rows agree. How two
+sources are matched (the crosswalk's reference query) has no counterpart in
+a spec, so it is left to the gate's `expected` check. The report lists each
+Architect run's verdict beside its score, for example `4 of 5 models agree;
+int_customers_matched_to_accounts: rows to keep 157 not 147`, or `no spec`
+when the Architect's answer was not used. The score does not enter the
+verdict.
+
+The Architect is priced as the cross-source call its spend is capped as:
+
+```
+$ make compare-architect
+error: 64 runs to do, estimated at US$20.48, at most US$86.40 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
+```
+
+In a simulation of the rule with 32 runs per arm and the run without the
+Architect passing one run in eight, a rise to one in two is found about nine
+times in ten, a rise to three in eight about six times in ten, and a
+comparison of two equal arms says "helps" about once in a hundred. No live
+Architect comparison has been run yet.
 
 ### Equivalence with the earlier runner
 
@@ -1070,7 +1122,18 @@ $ make parity
 error: 128 runs to do, estimated at US$35.84, at most US$147.20 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
 ```
 
-No live paired comparison has been run yet.
+One live paired comparison has been run, on 2026-11-06, with Claude Code
+2.1.319 and Sonnet on the demo goal, at the code of 2026-11-02 (before the
+repair loop and the Architect were added, both off by default). Of 64
+pairs, 57 both passed, 2 passed only with the earlier runner, 5 only with
+the graph, and none failed both: the earlier runner passed 59 (92%), the
+graph 62 (97%). The difference, -4.7 points, had a 95% interval of -14.5 to
++4.2, wholly below the margin: non-inferior. The cost per pass was US$0.1672
+for the earlier runner and US$0.1604 for the graph, a ratio of 0.959 (95%
+0.878 to 1.037), within the limit. Overall: non-inferior. Every failing run,
+in both runners, failed only the `expected` check on the crosswalk. The
+runs cost US$19.81 in all by Claude Code's estimate. The figures hold for
+that day, Claude Code version, goal and data.
 
 ### Repair comparison
 
