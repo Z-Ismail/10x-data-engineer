@@ -21,11 +21,20 @@ are listed as extra.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
+import duckdb
+
+from tenx import artefacts
 from tenx.contract import to_declaration
-from tenx.gate import ModelSpec, Total, parse_declaration
+from tenx.gate import ModelSpec, Total, expected_rows, parse_declaration, source_files
+
+ARCHITECT_DIR = "architect"
+CONTRACT_FILE = "contract.json"
+COUNTS_FILE = "counts.json"
 
 
 @dataclass(frozen=True)
@@ -131,3 +140,30 @@ def score(
         models.append(ModelAgreement(model.name, tuple(found)))
     names = {model.name for model in declared}
     return Agreement(tuple(models), tuple(name for name in specs if name not in names))
+
+
+def declared_rows(declared: list[ModelSpec], raw: Path) -> dict[str, int]:
+    """The rows each declared model must hold, as the gate works them out."""
+    files = source_files(Path(raw))
+    con = duckdb.connect()
+    try:
+        return {
+            model.name: expected_rows(con, model, files[model.source]).expected_rows
+            for model in declared
+        }
+    finally:
+        con.close()
+
+
+def last_contract(run: Path) -> tuple[dict, dict[str, int]] | None:
+    """The contract and rows kept from the architect's last attempt, if it gave a usable one."""
+    numbers = artefacts.attempt_numbers(Path(run), ARCHITECT_DIR)
+    if not numbers:
+        return None
+    folder = Path(run) / ARCHITECT_DIR / f"{artefacts.ATTEMPT_PREFIX}{max(numbers)}"
+    try:
+        contract = json.loads((folder / CONTRACT_FILE).read_text(encoding="utf-8"))
+        counts = json.loads((folder / COUNTS_FILE).read_text(encoding="utf-8"))
+        return contract, {name: rows["kept"] for name, rows in counts.items()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None

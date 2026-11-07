@@ -1,10 +1,20 @@
 """Scoring an architect's contract against a declaration written apart from it."""
 
 import copy
+import csv
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from tenx.agreement import Agreement, ModelAgreement, score
-from tenx.gate import parse_declaration
+from demo.generate import generate
+from tenx.agreement import Agreement, ModelAgreement, declared_rows, last_contract, score
+from tenx.counting import count_kept
+from tenx.gate import load_declaration, parse_declaration
+
+ROOT = Path(__file__).resolve().parent.parent
+DEMO_CONTRACT = json.loads((ROOT / "tests" / "fixtures" / "demo_contract.json").read_text())
+DEMO_DECLARATION = load_declaration(ROOT / "tests" / "fixtures" / "demo_gate.json")
 
 
 def model(name, key, source, totals=(), exclusions=()):
@@ -151,6 +161,77 @@ class ScoreTest(unittest.TestCase):
                 },
                 "extra": [],
             },
+        )
+
+
+class LastContractTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.run = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def attempt(self, number, kept=None):
+        folder = self.run / "architect" / f"attempt-{number}"
+        folder.mkdir(parents=True)
+        if kept is not None:
+            (folder / "contract.json").write_text(json.dumps(CONTRACT))
+            counts = {n: {"source_rows": 10, "excluded": {}, "kept": k} for n, k in kept.items()}
+            (folder / "counts.json").write_text(json.dumps(counts))
+
+    def test_the_last_attempt_is_read(self):
+        self.attempt(1, {"stg_shop__orders": 1, "stg_shop__lines": 1})
+        self.attempt(2, KEPT)
+        self.assertEqual(last_contract(self.run), (CONTRACT, KEPT))
+
+    def test_no_usable_contract_reads_as_none(self):
+        self.assertIsNone(last_contract(self.run))
+        self.attempt(1)
+        self.assertIsNone(last_contract(self.run))
+        (self.run / "architect" / "attempt-1" / "contract.json").write_text("{}")
+        (self.run / "architect" / "attempt-1" / "counts.json").write_text("[1]")
+        self.assertIsNone(last_contract(self.run))
+
+
+class DemoDataTest(unittest.TestCase):
+    """The hand-written demo contract, counted on demo data, against the demo declaration."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        cls.raw = root / "data"
+        generate(42, 200, cls.raw, root / "answers")
+        cls.wanted = declared_rows(DEMO_DECLARATION, cls.raw)
+        cls.work = root / "count"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def scored(self, contract):
+        counts = count_kept(contract, self.raw, self.work)
+        kept = {name: rows.kept for name, rows in counts.items()}
+        return score(contract, kept, DEMO_DECLARATION, self.wanted)
+
+    def test_the_demo_contract_agrees_on_every_declared_model(self):
+        agreement = self.scored(DEMO_CONTRACT)
+        self.assertEqual(agreement.describe(), "5 of 5 models agree")
+
+    def test_a_contract_keeping_test_mode_invoices_differs_by_exactly_those(self):
+        with open(self.raw / "billing" / "invoices.csv", newline="") as file:
+            rows = list(csv.DictReader(file))
+        test_mode = sum(row["livemode"] == "false" for row in rows)
+        self.assertGreater(test_mode, 0)
+        contract = copy.deepcopy(DEMO_CONTRACT)
+        (invoices,) = [m for m in contract["models"] if m["name"] == "stg_billing__invoices"]
+        invoices["exclusions"] = []
+        agreement = self.scored(contract)
+        self.assertEqual(
+            agreement.describe(),
+            f"4 of 5 models agree; stg_billing__invoices: rows to keep {len(rows)} "
+            f"not {len(rows) - test_mode}",
         )
 
 

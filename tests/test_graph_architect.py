@@ -7,6 +7,7 @@ from pathlib import Path
 
 from graph_fakes import CONTRACT, Fakes, GraphCase, report
 
+from tenx.agreement import last_contract
 from tenx.domain import AgentFinding, ArtefactRef
 from tenx.graph.build import ledger, steps_for
 from tenx.ledger import render as render_usage
@@ -103,6 +104,8 @@ class ArchitectStepTest(ArchitectCase, unittest.TestCase):
         attempt = self.out / "architect" / "attempt-1"
         self.assertEqual((attempt / "SPEC.md").read_text(), SPEC)
         self.assertEqual(json.loads((attempt / "contract.json").read_text()), CONTRACT)
+        # The comparison scores the run from these files.
+        self.assertEqual(last_contract(self.out), (CONTRACT, {"stg_shop__orders": 5}))
         # The stand-in's counts, as SPEC.md states them: six rows, one left out.
         self.assertEqual(
             (attempt / "counts.json").read_text(),
