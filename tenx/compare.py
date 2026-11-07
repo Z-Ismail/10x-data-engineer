@@ -94,6 +94,9 @@ REPAIR_ARM = "repair"
 ARCHITECT = "architect"
 ARCHITECT_ARMS = ("graph", "architect")
 ARCHITECT_BASELINE = "graph"
+# Each architect run's contract scored against the declaration, written
+# into the run's folder when it finishes.
+AGREEMENT_FILE = "agreement.json"
 # An arm is said to help (or hurt) when the probability that its pass rate
 # is higher (or lower) than the baseline's reaches this. With three arms
 # compared with one baseline, 0.98 keeps the chance of wrongly keeping any
@@ -435,9 +438,13 @@ class Summary:
     without_verdict: tuple[Trial, ...]
     planned: int
     baseline: str = BASELINE
+    # For an architect comparison: each architect run with a verdict, its
+    # verdict and its agreement.json (None if the run left none).
+    agreements: tuple[tuple[Trial, str, dict | None], ...] = ()
 
     def to_dict(self) -> dict:
         return {
+            **({"spec_agreement": self._agreements()} if self.agreements else {}),
             "baseline": self.baseline,
             "decision": DECISION,
             "datasets": self.datasets,
@@ -450,6 +457,33 @@ class Summary:
             },
             "runs_without_verdict": [t.folder for t in self.without_verdict],
         }
+
+    def _agreements(self) -> list[dict]:
+        return [
+            {"run": trial.folder, "gate": gate, **(found or {"spec": None})}
+            for trial, gate, found in self.agreements
+        ]
+
+
+def read_agreement(out: Path, trial: Trial) -> dict | None:
+    """The run's agreement.json, or None if it has none that can be read."""
+    path = Path(out) / RUNS_DIR / trial.folder / AGREEMENT_FILE
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return found if isinstance(found, dict) and isinstance(found.get("spec"), bool) else None
+
+
+def agreement_text(found: dict | None) -> str:
+    """One run's agreement in words."""
+    if found is None:
+        return "not scored"
+    if not found["spec"]:
+        return "no spec"
+    differ = [f"{name}: {', '.join(d)}" for name, d in found["models"].items() if d]
+    extra = [f"extra: {', '.join(found['extra'])}"] if found["extra"] else []
+    return "; ".join([f"{found['agreeing']} of {found['declared']} models agree", *differ, *extra])
 
 
 def _verdict(arm: str, better: float | None, worse: float | None, baseline: str) -> str:
@@ -517,6 +551,11 @@ def summarise(out: Path) -> Summary:
         without_verdict=tuple(o.trial for o in outcomes if o.gate is None),
         planned=len(order),
         baseline=baseline,
+        agreements=tuple(
+            (o.trial, o.gate, read_agreement(out, o.trial))
+            for o in done
+            if document.get("mode") == ARCHITECT and o.trial.arm == ARCHITECT
+        ),
     )
 
 
@@ -577,11 +616,31 @@ def render(summary: Summary) -> str:
         for dataset in summary.datasets
     ]
     lines += _table(["dataset", *names], rows, left=1)
+    if summary.agreements:
+        lines += ["", *_agreement_lines(summary.agreements)]
     if summary.without_verdict:
         lines += ["", "runs with no gate verdict, not counted:"]
         lines += [f"  {trial.folder}" for trial in summary.without_verdict]
     lines += ["", "cost is Claude Code's own estimate, not a bill"]
     return "\n".join(lines) + "\n"
+
+
+def _agreement_lines(agreements) -> list[str]:
+    agree = sum(
+        f is not None and f["spec"] and f["agreeing"] == f["declared"] for _, _, f in agreements
+    )
+    no_spec = sum(f is not None and not f["spec"] for _, _, f in agreements)
+    lines = [
+        "each architect run's spec against the declaration (keys, sources, rows to keep",
+        "and money; how sources are matched is judged by the gate alone)",
+        (
+            f"{agree} of {len(agreements)} specs agree on every declared model; "
+            f"{no_spec} {'run' if no_spec == 1 else 'runs'} had no spec"
+        ),
+        "",
+    ]
+    rows = [[trial.folder, gate, agreement_text(found)] for trial, gate, found in agreements]
+    return lines + _table(["run", "gate", "spec"], rows, left=3)
 
 
 def _table(header: list[str], rows: list[list[str]], left: int) -> list[str]:
