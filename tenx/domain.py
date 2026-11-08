@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 __all__ = [
     "STEPS",
     "AgentFinding",
+    "ApprovalDecision",
     "ArtefactRef",
     "Cost",
     "CostRecord",
@@ -346,6 +347,15 @@ class EngineeringRequest(Record):
     # How many times the engineer may repair its work after the validator
     # fails it; none unless asked.
     repairs: Annotated[int, Field(ge=0, le=MAX_REPAIRS)] = 0
+    # Whether the run waits for a person to approve, edit or reject the
+    # architect's spec before the engineer starts.
+    review_spec: bool = False
+
+    @model_validator(mode="after")
+    def _review_needs_a_spec(self):
+        if self.review_spec and not self.architect:
+            raise ValueError("review_spec needs the architect, which writes the spec")
+        return self
 
 
 # Every step a workflow can take, in the only order they can be taken.
@@ -355,6 +365,7 @@ STEPS = (
     "scouts",
     "cross-source",
     "architect",
+    "review",
     "engineer",
     "gate",
     "report",
@@ -429,3 +440,18 @@ class ValidationResult(Record):
             ),
             report=saved,
         )
+
+
+class ApprovalDecision(Record):
+    """What a person decided about something a run waited on, and what it was.
+
+    ``approved`` and ``edited`` let the run carry on, ``edited`` with a spec
+    of the person's own; ``rejected`` stops it; ``refused`` is an answer the
+    run could not accept, and it waits again.
+    """
+
+    subject: Literal["spec"]
+    decision: Literal["approved", "edited", "rejected", "refused"]
+    # The SHA-256 of the spec decided on; none when there was no spec.
+    sha256: Sha256 | None = None
+    reason: str = ""
