@@ -33,7 +33,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from tenx import artefacts
-from tenx.contract import ContractError, contract_from_report
+from tenx.contract import ContractError, check_contract, contract_from_report
 from tenx.cross_source import NOTES_FILE, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
 from tenx.domain import (
@@ -469,14 +469,52 @@ def _decision(decision: str, sha256: str | None, reason: str = "") -> dict:
     return {"approvals": [made.dump()]}
 
 
-def _approve(state: GraphState, asked: dict, answer: dict) -> dict:
-    """Use the spec as it was shown, if it is still exactly that."""
+def _edited(toolkit: Toolkit, state: GraphState, asked: dict, contract) -> dict:
+    """Use a person's own contract, checked and counted as the architect's is.
+
+    Its rules are SQL that will run, wherever the person got them from, so
+    they are counted by the profiler apart from the run, in the sandbox.
+    """
+    request = _request(state)
+    out = Path(request.out)
+    values = {"contract": json.dumps(contract, sort_keys=True), "sandbox": toolkit.sandbox.name}
+    profiles = Path(state["artefacts"]["profiles"]["path"])
+    hashed = artefacts.input_files({"profiles": profiles})
+    attempt = artefacts.start(out, state["run_id"], REVIEW_STEP, hashed, values)
+    try:
+        checked = check_contract(contract, _profiles(state))
+        counts = toolkit.profiler.count_kept(
+            checked,
+            Path(request.raw).resolve(),
+            (attempt.folder / COUNT_DIR).resolve(),
+            toolkit.sandbox,
+            toolkit.hidden,
+        )
+    except (ContractError, PlatformError) as problem:
+        artefacts.finish(attempt, artefacts.FAILED)
+        reason = f"the edited contract cannot be used: {problem}"
+        return _decision("refused", asked["sha256"], reason)
+    artefacts.write_text(attempt.folder / CONTRACT_FILE, json.dumps(checked, indent=2) + "\n")
+    artefacts.write_text(attempt.folder / COUNTS_FILE, _counts_json(counts))
+    spec = attempt.folder / SPEC_FILE
+    artefacts.write_text(spec, render_spec(checked, counts))
+    artefacts.finish(attempt, artefacts.COMPLETE, [CONTRACT_FILE, COUNTS_FILE, SPEC_FILE])
+    approved = ArtefactRef.of(APPROVED, spec, attempt=attempt.number)
+    reason = f"edited from {asked['sha256'] or 'no spec'}"
+    update = _decision("edited", approved.sha256, reason)
+    return {**update, "artefacts": {APPROVED: approved.dump()}}
+
+
+def _approve(toolkit: Toolkit, state: GraphState, asked: dict, answer: dict) -> dict:
+    """Use the spec as it was shown, if it is still exactly that, or the person's edit of it."""
     if answer.get("sha256") != asked["sha256"]:
         reason = (
             f"the approval is for spec {answer.get('sha256')}, but the run is waiting on "
             f"{asked['sha256']}"
         )
         return _decision("refused", asked["sha256"], reason)
+    if answer.get("contract") is not None:
+        return _edited(toolkit, state, asked, answer["contract"])
     if asked["spec"] is None:
         return _decision("approved", None, "no spec; the engineer works from the goal alone")
     spec = ArtefactRef.load(state["artefacts"]["spec"])
@@ -510,7 +548,7 @@ def review_node(toolkit: Toolkit):
             update = _decision("rejected", asked["sha256"], reason)
             return _stop("spec rejected" + (f": {reason}" if reason else ""), **update)
         if choice == "approve":
-            return plain(_approve(state, asked, answer))
+            return plain(_approve(toolkit, state, asked, answer))
         return plain(
             _decision("refused", asked["sha256"], f"not an answer the run takes: {answer!r}")
         )

@@ -1,10 +1,11 @@
 """The spec review step of the build graph: wait, then approve, refuse or reject."""
 
+import copy
 import json
 import unittest
 from pathlib import Path
 
-from graph_fakes import Fakes, GraphCase
+from graph_fakes import CONTRACT, Fakes, GraphCase
 from langgraph.types import Command
 from test_graph_architect import SPEC
 
@@ -128,6 +129,84 @@ class ApproveTest(ReviewCase, unittest.TestCase):
         self.assertNotIn("engineer", self.fakes.calls)
 
 
+def edited() -> dict:
+    """The stand-in contract with a second rule, as a person might edit it."""
+    contract = copy.deepcopy(CONTRACT)
+    contract["models"][0]["exclusions"].append(
+        {"name": "refunds", "reason": "Money back.", "rule": "where", "where": "id like 'r%'"}
+    )
+    return contract
+
+
+class EditTest(ReviewCase, unittest.TestCase):
+    def test_an_edited_contract_is_counted_and_its_spec_given_to_the_engineer(self):
+        self.start()
+        draft = self.sha()
+        state = self.answer({"decision": "approve", "sha256": draft, "contract": edited()})
+        self.assertEqual(state["status"], "passed")
+        folder = self.out / "review" / "attempt-1"
+        spec = (folder / "SPEC.md").read_text()
+        self.assertEqual(self.given["spec"], spec)
+        # The stand-in counts six rows and one left out by each rule: 6 - 2 = 4.
+        self.assertIn("  - `refunds`, 1 row: Money back. Rule: `id like 'r%'`\n", spec)
+        self.assertIn("- Rows to keep: 4\n", spec)
+        self.assertEqual(json.loads((folder / "contract.json").read_text()), edited())
+        self.assertEqual(
+            json.loads((folder / "counts.json").read_text())["stg_shop__orders"]["kept"], 4
+        )
+        self.assertEqual(self.sha(), draft)  # the architect's draft is left as it was
+        new = artefacts.file_hash(folder / "SPEC.md")
+        self.assertEqual(self.decisions(state), [("edited", f"edited from {draft}")])
+        self.assertEqual(state["approvals"][0]["sha256"], new)
+        self.assertEqual(state["artefacts"]["approved spec"]["sha256"], new)
+        self.assertEqual(self.fakes.calls, BEFORE + ["count", "scaffold", "engineer", "gate"])
+
+    def refused(self, contract, expected: str, counted: bool):
+        self.start()
+        state = self.answer({"decision": "approve", "sha256": self.sha(), "contract": contract})
+        self.assertEqual(self.waiting(state)["refused"], expected)
+        self.assertEqual(self.decisions(state), [("refused", expected)])
+        self.assertEqual(self.fakes.calls, BEFORE + (["count"] if counted else []))
+        self.assertNotIn("approved spec", state["artefacts"])
+        self.assertFalse((self.out / "review" / "attempt-1" / "SPEC.md").exists())
+
+    def test_an_edited_contract_naming_a_column_not_profiled_is_refused(self):
+        wrong = edited()
+        wrong["models"][0]["columns"][0]["from"] = ["shop.orders.order_number"]
+        self.refused(
+            wrong,
+            "the edited contract cannot be used: model stg_shop__orders column order_id comes "
+            "from shop.orders.order_number, which is not a profiled column",
+            counted=False,
+        )
+
+    def test_an_edited_rule_that_does_not_run_is_refused(self):
+        broken = edited()
+        broken["models"][0]["exclusions"][1]["where"] = "nope = 1"
+        self.refused(
+            broken,
+            "the edited contract cannot be used: model stg_shop__orders: no column nope",
+            counted=True,
+        )
+
+    def test_an_edited_contract_that_is_not_a_contract_is_refused(self):
+        self.start()
+        state = self.answer({"decision": "approve", "sha256": self.sha(), "contract": "models"})
+        self.assertTrue(
+            self.waiting(state)["refused"].startswith("the edited contract cannot be used: ")
+        )
+
+    def test_a_refused_edit_can_be_followed_by_a_good_one(self):
+        broken = edited()
+        broken["models"][0]["exclusions"][1]["where"] = "nope = 1"
+        self.start()
+        self.answer({"decision": "approve", "sha256": self.sha(), "contract": broken})
+        state = self.answer({"decision": "approve", "sha256": self.sha(), "contract": edited()})
+        self.assertEqual([d for d, _ in self.decisions(state)], ["refused", "edited"])
+        self.assertIn("- Rows to keep: 4\n", self.given["spec"])
+        self.assertTrue((self.out / "review" / "attempt-2" / "SPEC.md").is_file())
+
+
 class NoSpecTest(ReviewCase, unittest.TestCase):
     def test_without_a_usable_spec_the_person_is_told_why_and_may_go_on(self):
         self.fakes.reports["architect"] = None
@@ -148,6 +227,13 @@ class NoSpecTest(ReviewCase, unittest.TestCase):
             self.decisions(state),
             [("approved", "no spec; the engineer works from the goal alone")],
         )
+
+    def test_without_a_spec_the_person_may_give_a_contract(self):
+        self.fakes.reports["architect"] = None
+        self.start()
+        state = self.answer({"decision": "approve", "sha256": None, "contract": edited()})
+        self.assertEqual(self.decisions(state), [("edited", "edited from no spec")])
+        self.assertIn("- Rows to keep: 4\n", self.given["spec"])
 
 
 class RejectTest(ReviewCase, unittest.TestCase):
