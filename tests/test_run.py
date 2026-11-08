@@ -25,6 +25,7 @@ import duckdb
 from test_engineer import ANSWER, DECLARATION, DEMO_GOAL, REFERENCE_MODELS, STUB
 
 from demo.generate import generate
+from tenx import artefacts
 from tenx.gate import expected_rows, load_declaration, source_files
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -218,6 +219,79 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(
             [role["role"] for role in usage["roles"]], ["cross-source", "architect", "engineer"]
         )
+
+    def waiting(self, done) -> str:
+        """The spec a waiting run names, checked against the text it printed."""
+        self.assertEqual(done.returncode, 4, done.stderr)
+        spec = self.out / "architect" / "attempt-1" / "SPEC.md"
+        out = self.out
+        self.assertTrue(
+            done.stdout.startswith(
+                f"status: waiting for approval of the spec\nspec: {spec}\n"
+                f"sha256: {artefacts.file_hash(spec)}\n"
+                f"the contract it was written from: {spec.with_name('contract.json')}\n"
+                f"approve with: python -m tenx.run approve --out {out}\n"
+            ),
+            done.stdout,
+        )
+        return done.stdout
+
+    def test_a_reviewed_spec_waits_then_is_approved_in_another_process(self):
+        self.waiting(self.start(False, "--architect", "--review-spec"))
+        self.assertFalse((self.out / "engineer").exists())
+        status = self.tenx("status", "--out", str(self.out))
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("status: waiting for approval of the spec\n", status.stdout)
+        self.assertIn("attempts: cross-source 1, architect 1\n", status.stdout)
+        # Resuming without a decision waits again and starts nothing.
+        self.waiting(self.tenx("resume", "--out", str(self.out)))
+        self.assertFalse((self.out / "engineer").exists())
+        done = self.tenx("approve", "--out", str(self.out))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: passed\n"), done.stdout)
+        spec = self.out / "architect" / "attempt-1" / "SPEC.md"
+        given = self.out / "engineer" / "attempt-1" / "work" / "SPEC.md"
+        self.assertEqual(given.read_text(), spec.read_text())
+        again = self.tenx("approve", "--out", str(self.out))
+        self.assertEqual(again.returncode, 2)
+        self.assertIn("is not waiting for approval", again.stderr)
+
+    def test_an_edited_contract_is_refused_or_used_and_a_spec_can_be_rejected(self):
+        self.waiting(self.start(False, "--architect", "--review-spec"))
+        contract = json.loads(CONTRACT.read_text())
+        contract["models"][0]["exclusions"][0]["where"] = "no_such_column = 1"
+        broken = self.root / "broken.json"
+        broken.write_text(json.dumps(contract))
+        refused = self.tenx("approve", "--out", str(self.out), "--contract", str(broken))
+        self.assertEqual(refused.returncode, 4, refused.stderr)
+        self.assertIn("last answer refused: the edited contract cannot be used: ", refused.stdout)
+        self.assertIn("no_such_column", refused.stdout)
+        self.assertFalse((self.out / "engineer").exists())
+        contract = json.loads(CONTRACT.read_text())
+        contract["assumptions"] = ["Reviewed by a person."]
+        mine = self.root / "mine.json"
+        mine.write_text(json.dumps(contract))
+        done = self.tenx("approve", "--out", str(self.out), "--contract", str(mine))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        given = (self.out / "engineer" / "attempt-1" / "work" / "SPEC.md").read_text()
+        self.assertEqual(given, (self.out / "review" / "attempt-2" / "SPEC.md").read_text())
+        self.assertIn("- Reviewed by a person.\n", given)
+
+    def test_a_rejected_spec_stops_the_run(self):
+        self.waiting(self.start(False, "--architect", "--review-spec"))
+        done = self.tenx("reject", "--out", str(self.out), "--reason", "wrong grain")
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertTrue(
+            done.stdout.startswith("status: stopped\nreason: spec rejected: wrong grain\n"),
+            done.stdout,
+        )
+        self.assertFalse((self.out / "engineer").exists())
+
+    def test_a_review_needs_the_architect(self):
+        done = self.start(False, "--review-spec")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("--review-spec needs --architect", done.stderr)
+        self.assertFalse(self.out.exists())
 
     def test_repairs_outside_none_to_three_are_refused(self):
         for value in ("-1", "4", "two"):

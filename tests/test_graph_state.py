@@ -110,7 +110,7 @@ class GraphStateTest(unittest.TestCase):
         }
         self.assertEqual(
             set(reducers),
-            {"artefacts", "findings", "validations", "costs", "attempts", "rounds"},
+            {"artefacts", "findings", "validations", "costs", "attempts", "rounds", "approvals"},
         )
         self.assertIs(reducers["artefacts"], merge_artefacts)
         self.assertIs(reducers["attempts"], merge_attempts)
