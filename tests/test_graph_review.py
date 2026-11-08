@@ -5,7 +5,7 @@ import json
 import unittest
 from pathlib import Path
 
-from graph_fakes import CONTRACT, Fakes, GraphCase
+from graph_fakes import CONTRACT, Fakes, GraphCase, report
 from langgraph.types import Command
 from test_graph_architect import SPEC
 
@@ -227,6 +227,16 @@ class NoSpecTest(ReviewCase, unittest.TestCase):
             self.decisions(state),
             [("approved", "no spec; the engineer works from the goal alone")],
         )
+
+    def test_an_answer_that_failed_its_check_is_offered_as_a_draft(self):
+        wrong = edited()
+        wrong["models"][0]["columns"][0]["from"] = ["shop.orders.order_number"]
+        self.fakes.reports["architect"] = report(0.09, 10, wrong)
+        asked = self.waiting(self.start())
+        answer = self.out / "architect" / "attempt-1" / "agent.json"
+        self.assertEqual(asked["answer"], str(answer))
+        self.assertEqual(json.loads(answer.read_text())["structured_output"], wrong)
+        self.assertTrue(asked["missing"].startswith("no spec for the engineer: model "))
 
     def test_without_a_spec_the_person_may_give_a_contract(self):
         self.fakes.reports["architect"] = None

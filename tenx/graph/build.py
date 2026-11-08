@@ -458,6 +458,11 @@ def waiting_on(state: GraphState) -> dict:
             item["claim"] for item in state.get("findings") or [] if item["agent"] == ARCHITECT_STEP
         ]
         asked["missing"] = notes[-1] if notes else "the architect gave no spec"
+        # An answer that failed its check is still a draft a person can correct.
+        number = (state.get("attempts") or {}).get(ARCHITECT_STEP)
+        answer = Path(_request(state).out) / ARCHITECT_STEP / f"{artefacts.ATTEMPT_PREFIX}{number}"
+        if number is not None and (answer / AGENT_FILE).is_file():
+            asked["answer"] = str(answer / AGENT_FILE)
     earlier = state.get("approvals") or []
     if earlier and earlier[-1]["decision"] == "refused":
         asked["refused"] = earlier[-1]["reason"]

@@ -254,6 +254,11 @@ def waiting_text(out: Path, waiting: dict) -> str:
         lines.append(f"last answer refused: {waiting['refused']}")
     if waiting["spec"] is None:
         lines.append(f"no spec: {waiting['missing']}")
+        if waiting.get("answer"):
+            lines.append(
+                f"the architect's answer, to correct and approve as your own contract: "
+                f"{waiting['answer']} (structured_output)"
+            )
     else:
         lines.append(f"spec: {waiting['spec']}")
         lines.append(f"sha256: {waiting['sha256']}")
