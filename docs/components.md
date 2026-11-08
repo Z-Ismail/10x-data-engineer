@@ -957,6 +957,67 @@ measured: in three runs on 2026-11-06 the spec reached the engineer each
 time, and one of the three passed (two specs matched billing customers to
 CRM accounts on the whole email address, which the gate fails).
 
+### Spec review
+
+```
+python -m tenx.run run --raw demo/data --goal demo/brief.md \
+    --checks tests/fixtures/demo_gate.json --out runs/demo-review --architect --review-spec
+python -m tenx.run status --out runs/demo-review
+python -m tenx.run approve --out runs/demo-review [--contract <file>]
+python -m tenx.run reject --out runs/demo-review [--reason <text>]
+```
+
+With `--review-spec` (only with `--architect`) the run stops after the
+architect and waits for a person, with exit status 4, before anything of
+the engineer starts. It says what it is waiting on: the path of `SPEC.md`
+and its SHA-256, and the `contract.json` it was written from; or, when the
+architect gave no usable spec, why not and where its answer is. Nothing is
+spent while it waits, and `status` and `resume` show the same thing until
+someone decides:
+
+- `approve` gives the engineer the spec as it was written. If `SPEC.md`
+  was changed on disk since, the approval is refused and the run waits
+  again; to change the spec, approve a contract instead.
+- `approve --contract <file>` gives the engineer a contract of your own, in
+  the architect's JSON shape. It is checked against the profiles and its
+  rules are counted on the raw files in the sandbox, as the architect's are,
+  and kept under `review/attempt-<n>/` (`contract.json`, `counts.json`,
+  `SPEC.md`). A contract that fails either is refused with the reason, and
+  the run waits again. With no usable spec from the architect, `approve`
+  alone lets the engineer work from the goal.
+- `reject` stops the run (exit status 3, `reason: spec rejected: ...`)
+  before the engineer starts.
+
+Each decision, refused answers included, is kept in the run's saved state
+with the spec's hash. A real run on the brief goal (seed 42, 200 companies,
+Claude Code 2.1.319, in bubblewrap; paths shortened):
+
+```
+$ python -m tenx.run run ... --out runs/demo-review2 --architect --review-spec
+status: waiting for approval of the spec
+spec: runs/demo-review2/architect/attempt-1/SPEC.md
+sha256: c3c7a97bcccffeb78fbee5ed239aa439ffa3a7bb50fe2c74f2e6e693a4331b38
+the contract it was written from: runs/demo-review2/architect/attempt-1/contract.json
+approve with: python -m tenx.run approve --out runs/demo-review2
+or approve your own contract: python -m tenx.run approve --out runs/demo-review2 --contract <file>
+reject with: python -m tenx.run reject --out runs/demo-review2 --reason <text>
+```
+
+Its spec matched billing customers to CRM accounts on the exact email
+address, "no domain fallback". After a line was added to `SPEC.md` by hand,
+`approve` was refused (`last answer refused: .../SPEC.md was changed after
+it was written; to use a changed spec, approve an edited contract`). The
+contract was then edited to match on the email's domain, since a company's
+CRM account may hold another mailbox there, and approved with
+`--contract`; the run counted it in the sandbox and the engineer, given the
+new `SPEC.md`, passed the gate 24 of 24 (US$0.2345 for the three agents).
+One run shows the step working, not that a review raises the pass rate. In
+an earlier run the architect's answer failed its check (a money total
+named its column with the table in front), and the run said why; a
+corrected contract was approved, but the engineer kept
+one billing customer per email address despite the spec's 147 rows to keep,
+and the gate failed it: the spec guides the engineer, the gate decides.
+
 ### Architect comparison
 
 ```

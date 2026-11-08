@@ -62,6 +62,14 @@ is refused inside the counting process; that with those guards taken out,
 the sandbox alone shows the rule an empty file and keeps the raw folder
 unchanged; and that the same rules read and write without either.
 
+A run that waits for a person to review the spec (`--review-spec`) treats a
+contract the person gives (`approve --contract`) the same way: it is checked
+against the profiles and its rules are counted in that sandbox before it
+becomes the engineer's `SPEC.md`, wherever the rules came from. An approval
+is for the spec the run showed, by its SHA-256: if `SPEC.md` was changed on
+disk after the run wrote it, the approval is refused and the run keeps
+waiting, so the engineer never works from a spec that was not checked.
+
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and
 later, AppArmor allows bubblewrap to set up a sandbox only with a profile

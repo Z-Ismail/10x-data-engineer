@@ -6,6 +6,16 @@ Notable changes to this project.
 
 ### Added
 
+- Spec review in the graph run: with `--architect --review-spec`, the run
+  waits after the Architect writes its spec (exit status 4) and carries on
+  only when a person decides. `python -m tenx.run approve --out <run>`
+  gives the engineer that spec; `approve --contract <file>` gives it a
+  contract of the person's own, checked against the profiles and counted
+  in the sandbox as the Architect's is; `reject --out <run> --reason
+  <text>` stops the run before the engineer starts. An approval is refused
+  if `SPEC.md` was changed after the run wrote it, and the run waits
+  again. Every decision is kept with the run, and `status` says what a
+  waiting run is waiting on.
 - An Architect comparison: `python -m tenx.compare architect` (and `make
   compare-architect`) runs the graph with and without the Architect, both
   with the cross-source agent, on the same datasets in shuffled blocks, and
