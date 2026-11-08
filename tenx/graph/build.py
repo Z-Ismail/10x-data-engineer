@@ -1,5 +1,8 @@
 """The build workflow as a graph: profile, overlap, cross-source, architect, engineer, gate, report.
 
+With a spec review, the run waits after the architect for a person to
+approve, edit or reject the spec (``review``) before the engineer starts.
+
 Each step is a node. The graph is saved after every step (``durability="sync"``),
 so a run that stops part way, by a crash or a closed laptop, resumes at the
 step it was in and never runs a finished step again.
@@ -27,6 +30,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from tenx import artefacts
 from tenx.contract import ContractError, contract_from_report
@@ -34,6 +38,7 @@ from tenx.cross_source import NOTES_FILE, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
 from tenx.domain import (
     AgentFinding,
+    ApprovalDecision,
     ArtefactRef,
     CostRecord,
     EngineeringRequest,
@@ -86,13 +91,14 @@ COUNT_DIR = "count"
 
 PLAN = "plan"
 PROFILE_STEP, OVERLAP_STEP, CROSS_SOURCE_STEP = "profile", "overlap", "cross-source"
-ARCHITECT_STEP, ENGINEER_STEP = "architect", "engineer"
+ARCHITECT_STEP, REVIEW_STEP, ENGINEER_STEP = "architect", "review", "engineer"
 GATE_STEP, REPORT_STEP = "gate", "report"
 WORK_STEPS = (
     PROFILE_STEP,
     OVERLAP_STEP,
     CROSS_SOURCE_STEP,
     ARCHITECT_STEP,
+    REVIEW_STEP,
     ENGINEER_STEP,
     GATE_STEP,
 )
@@ -136,6 +142,7 @@ def steps_for(request: EngineeringRequest) -> tuple[str, ...]:
     """The steps the build workflow takes for a request, in order."""
     middle = (CROSS_SOURCE_STEP,) if request.cross_source else ()
     middle += (ARCHITECT_STEP,) if request.architect else ()
+    middle += (REVIEW_STEP,) if request.review_spec else ()
     overlap = (OVERLAP_STEP,) if middle else ()
     return (PROFILE_STEP, *overlap, *middle, ENGINEER_STEP, GATE_STEP, REPORT_STEP)
 
@@ -437,6 +444,87 @@ def architect_node(toolkit: Toolkit):
     return architect
 
 
+APPROVED = "approved spec"
+
+
+def waiting_on(state: GraphState) -> dict:
+    """What a person is asked to decide: the spec, its hash, and why it may be missing."""
+    spec = (state.get("artefacts") or {}).get("spec")
+    asked = {"subject": "spec", "spec": None, "sha256": None}
+    if spec is not None:
+        asked.update(spec=spec["path"], sha256=spec["sha256"])
+    else:
+        notes = [
+            item["claim"] for item in state.get("findings") or [] if item["agent"] == ARCHITECT_STEP
+        ]
+        asked["missing"] = notes[-1] if notes else "the architect gave no spec"
+    earlier = state.get("approvals") or []
+    if earlier and earlier[-1]["decision"] == "refused":
+        asked["refused"] = earlier[-1]["reason"]
+    return asked
+
+
+def _decision(decision: str, sha256: str | None, reason: str = "") -> dict:
+    made = ApprovalDecision(subject="spec", decision=decision, sha256=sha256, reason=reason)
+    return {"approvals": [made.dump()]}
+
+
+def _approve(state: GraphState, asked: dict, answer: dict) -> dict:
+    """Use the spec as it was shown, if it is still exactly that."""
+    if answer.get("sha256") != asked["sha256"]:
+        reason = (
+            f"the approval is for spec {answer.get('sha256')}, but the run is waiting on "
+            f"{asked['sha256']}"
+        )
+        return _decision("refused", asked["sha256"], reason)
+    if asked["spec"] is None:
+        return _decision("approved", None, "no spec; the engineer works from the goal alone")
+    spec = ArtefactRef.load(state["artefacts"]["spec"])
+    if not spec.unchanged():
+        reason = (
+            f"{spec.path} was changed after it was written; to use a changed spec, "
+            "approve an edited contract"
+        )
+        return _decision("refused", spec.sha256, reason)
+    approved = ArtefactRef(
+        name=APPROVED, path=spec.path, kind=spec.kind, sha256=spec.sha256, attempt=spec.attempt
+    )
+    return {**_decision("approved", spec.sha256), "artefacts": {APPROVED: approved.dump()}}
+
+
+def review_node(toolkit: Toolkit):
+    """Wait for a person to approve, edit or reject the architect's spec.
+
+    The node is run again from its start when the run resumes with an answer,
+    so it only reads before it waits. An answer it cannot accept is recorded
+    as refused and the run waits again; nothing reaches the engineer that the
+    person did not see.
+    """
+
+    def review(state: GraphState) -> dict:
+        asked = waiting_on(state)
+        answer = interrupt(asked)
+        choice = answer.get("decision") if isinstance(answer, dict) else None
+        if choice == "reject":
+            reason = str(answer.get("reason") or "").strip()
+            update = _decision("rejected", asked["sha256"], reason)
+            return _stop("spec rejected" + (f": {reason}" if reason else ""), **update)
+        if choice == "approve":
+            return plain(_approve(state, asked, answer))
+        return plain(
+            _decision("refused", asked["sha256"], f"not an answer the run takes: {answer!r}")
+        )
+
+    return review
+
+
+def _after_review(state: GraphState) -> str:
+    approvals = state.get("approvals") or []
+    if state.get("status") == RUNNING and approvals and approvals[-1]["decision"] == "refused":
+        return REVIEW_STEP
+    return _after(REVIEW_STEP)(state)
+
+
 # What a repair does not carry over from the attempt it repairs: what the
 # build left, and the inputs, which every attempt is given afresh.
 NOT_CARRIED = ("target", "logs", "dbt_packages", "*.duckdb", "*.duckdb.wal", "*.duckdb.tmp")
@@ -466,8 +554,9 @@ def engineer_node(toolkit: Toolkit):
         files = {"goal": Path(request.goal), "profiles": profiles}
         if "joins" in found:
             files["joins"] = Path(found["joins"]["path"])
-        if "spec" in found:
-            files["spec"] = Path(found["spec"]["path"])
+        spec = found.get(APPROVED if request.review_spec else "spec")
+        if spec is not None:
+            files["spec"] = Path(spec["path"])
         checked = [ValidationResult.load(item) for item in state.get("validations") or []]
         repairing = bool(checked) and not checked[-1].passed
         if repairing:
@@ -498,7 +587,7 @@ def engineer_node(toolkit: Toolkit):
         project = ArtefactRef.of("project", call.folder / artefacts.WORK_DIR, attempt=number)
         update = {**call.update, "artefacts": {"project": project.dump()}, "rounds": [number]}
         if "spec" in files:
-            given = ArtefactRef.load(found["spec"])
+            given = ArtefactRef.load(spec)
             held = Path(project.path) / SPEC_FILE
             if not (held.is_file() and artefacts.file_hash(held) == given.sha256):
                 claim = f"the engineer changed or removed SPEC.md in attempt {number}"
@@ -625,6 +714,7 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
         OVERLAP_STEP: overlap_node(toolkit),
         CROSS_SOURCE_STEP: cross_source_node(toolkit),
         ARCHITECT_STEP: architect_node(toolkit),
+        REVIEW_STEP: review_node(toolkit),
         ENGINEER_STEP: engineer_node(toolkit),
         GATE_STEP: gate_node(toolkit),
         REPORT_STEP: report_node(toolkit),
@@ -638,6 +728,8 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
     for name in made:
         if name == GATE_STEP:
             graph.add_conditional_edges(name, _after_gate, targets)
+        elif name == REVIEW_STEP:
+            graph.add_conditional_edges(name, _after_review, targets)
         elif name != REPORT_STEP:
             graph.add_conditional_edges(name, _after(name), targets)
     graph.add_edge(REPORT_STEP, END)
