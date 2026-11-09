@@ -1,4 +1,4 @@
-"""The reviewer test bed: how its variants are made."""
+"""The reviewer test bed: how its variants are made, and that the gate passes them."""
 
 from __future__ import annotations
 
@@ -7,7 +7,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from review_bed import DEFECT, GOOD, REFERENCE, VARIANTS, Edit, Variant, make, variant
+from review_bed import (
+    CROSSWALK,
+    DECLARATION,
+    DEFECT,
+    EVENTS,
+    GOOD,
+    REFERENCE,
+    VARIANTS,
+    BedError,
+    Edit,
+    Variant,
+    differences,
+    make,
+    variant,
+)
+
+from demo.generate import generate
+from tenx.gate import PASS, run_gate
 
 
 def same_tree(one: Path, other: Path) -> bool:
@@ -78,6 +95,94 @@ class Making(unittest.TestCase):
     def test_an_unknown_name_is_refused(self):
         with self.assertRaises(KeyError):
             variant("nothing")
+
+
+def failures(results) -> list[tuple[str, str, str]]:
+    return [(r.check, r.subject, r.status) for r in results if r.status != PASS]
+
+
+class GatePasses(unittest.TestCase):
+    """Every variant passes the gate; only a defect's own columns differ from the reference."""
+
+    SEED = 11
+    COMPANIES = 60
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.raw = cls.root / "data"
+        generate(cls.SEED, cls.COMPANIES, cls.raw, cls.root / "answers")
+        cls.reference = cls.root / "reference-build"
+        results = run_gate(REFERENCE, cls.raw, DECLARATION, cls.reference)
+        assert not failures(results), failures(results)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def build(self, chosen: Variant, name: str | None = None):
+        name = name or chosen.name
+        project = make(chosen, self.root / f"project-{name}")
+        workdir = self.root / f"build-{name}"
+        return run_gate(project, self.raw, DECLARATION, workdir), workdir
+
+    def test_each_variant_passes_and_differs_only_where_planted(self):
+        for chosen in VARIANTS:
+            with self.subTest(chosen.name):
+                results, workdir = self.build(chosen)
+                self.assertEqual(failures(results), [])
+                counts = differences(self.reference, workdir, chosen)
+                self.assertEqual(len(counts), 19)
+                wrong = {pair for pair, count in counts.items() if count}
+                self.assertEqual(wrong, set(chosen.columns))
+                for pair in chosen.columns:
+                    self.assertGreater(counts[pair], 0)
+
+    def test_a_defect_that_changes_nothing_is_seen(self):
+        chosen = variant("contact_name_from_email")
+        idle = Variant(chosen.name, DEFECT, chosen.summary, (), chosen.columns)
+        results, workdir = self.build(idle, "idle")
+        self.assertEqual(failures(results), [])
+        self.assertEqual(differences(self.reference, workdir, idle)[chosen.columns[0]], 0)
+
+    def test_an_unintended_change_in_a_good_variant_is_seen(self):
+        chosen = variant("columns_renamed")
+        careless = Variant(
+            chosen.name,
+            GOOD,
+            chosen.summary,
+            (
+                *chosen.edits,
+                Edit(EVENTS, "event_name,", "upper(event_name) as event_name,"),
+            ),
+            mapping=chosen.mapping,
+        )
+        results, workdir = self.build(careless, "careless")
+        self.assertEqual(failures(results), [])
+        counts = differences(self.reference, workdir, careless)
+        self.assertEqual(
+            {pair for pair, count in counts.items() if count},
+            {("stg_events__events", "event_name")},
+        )
+
+    def test_a_variant_the_gate_catches_fails_the_gate(self):
+        caught = Variant(
+            "inner_crosswalk",
+            DEFECT,
+            "The crosswalk drops customers with no account.",
+            (Edit(CROSSWALK, "left join", "join"),),
+            (("int_customers_matched_to_accounts", "account_id"),),
+        )
+        results, _ = self.build(caught)
+        self.assertIn(("rows", "int_customers_matched_to_accounts", "fail"), failures(results))
+
+    def test_a_variant_without_a_reference_column_cannot_be_compared(self):
+        chosen = variant("columns_renamed")
+        unmapped = Variant(chosen.name, GOOD, chosen.summary, chosen.edits)
+        _, workdir = self.build(unmapped, "unmapped")
+        with self.assertRaisesRegex(BedError, "no column contact_name"):
+            differences(self.reference, workdir, unmapped)
 
 
 if __name__ == "__main__":

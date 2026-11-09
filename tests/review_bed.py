@@ -11,11 +11,20 @@ variant's own folder.
 from __future__ import annotations
 
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import duckdb
+
+from tenx.gate import DATABASE_FILE, load_declaration
+
 REFERENCE = ROOT / "tests" / "fixtures" / "demo_project"
+DECLARATION = ROOT / "tests" / "fixtures" / "demo_gate.json"
 
 STAGING = "models/staging/"
 CUSTOMERS = STAGING + "stg_billing__customers.sql"
@@ -204,3 +213,60 @@ def make(chosen: Variant, destination: Path, reference: Path = REFERENCE) -> Pat
             )
         path.write_text(text.replace(edit.old, edit.new), encoding="utf-8")
     return destination
+
+
+class BedError(Exception):
+    """A variant's build cannot be compared with the reference's."""
+
+
+def _rows(database: Path, model: str, key: tuple[str, ...], columns: dict[str, str]) -> dict:
+    """Each row's columns as text, by key: {key: {column: value}}."""
+    con = duckdb.connect(str(database), read_only=True)
+    try:
+        names = [row[0] for row in con.execute(f"describe {model}").fetchall()]
+        picked = [*key, *columns.values()]
+        missing = [name for name in picked if name.isidentifier() and name not in names]
+        if missing:
+            raise BedError(f"{model} has no column {', '.join(missing)}")
+        select = ", ".join(f"cast({expression} as varchar)" for expression in picked)
+        found = con.execute(f"select {select} from {model}").fetchall()
+    finally:
+        con.close()
+    rows = {}
+    for row in found:
+        rows[row[: len(key)]] = dict(zip(columns, row[len(key) :]))
+    if len(rows) != len(found):
+        raise BedError(f"{model} repeats a key")
+    return rows
+
+
+def differences(reference: Path, built: Path, chosen: Variant) -> dict[tuple[str, str], int]:
+    """How many rows of each (model, column) differ between two gate work folders.
+
+    Every column of the reference build is compared, by the model's declared
+    key, after reading the variant through the variant's mapping. Columns
+    the variant adds are not compared.
+    """
+    mapped = {(model, column): sql for model, column, sql in chosen.mapping}
+    counts = {}
+    for spec in load_declaration(DECLARATION):
+        con = duckdb.connect(str(Path(reference) / DATABASE_FILE), read_only=True)
+        try:
+            names = [row[0] for row in con.execute(f"describe {spec.name}").fetchall()]
+        finally:
+            con.close()
+        columns = [name for name in names if name not in spec.key]
+        ours = _rows(Path(reference) / DATABASE_FILE, spec.name, spec.key, {c: c for c in columns})
+        theirs = _rows(
+            Path(built) / DATABASE_FILE,
+            spec.name,
+            spec.key,
+            {c: mapped.get((spec.name, c), c) for c in columns},
+        )
+        if set(ours) != set(theirs):
+            raise BedError(f"{spec.name} holds other keys than the reference")
+        for column in columns:
+            counts[(spec.name, column)] = sum(
+                ours[key][column] != theirs[key][column] for key in ours
+            )
+    return counts
