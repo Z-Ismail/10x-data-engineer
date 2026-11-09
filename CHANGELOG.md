@@ -6,6 +6,17 @@ Notable changes to this project.
 
 ### Added
 
+- A test bed for measuring a reviewer: `python tests/review_bed.py --out
+  <folder>` writes twelve variants of the reference dbt project under
+  neutral names (`project-01` to `project-12`, in an order shuffled by
+  `--seed`) and, beside them, `answers.json` saying which is which. Six
+  carry one planted mistake in a column the gate does not check (invoice
+  times read as milliseconds, CRM dates read month first, two event
+  columns swapped, a constant currency, a contact name taken from the
+  email, event times cut to the day); six are correct but written
+  differently. The tests check that the gate passes all twelve, that a
+  mistake changes only its own columns, and that the correct ones equal
+  the reference.
 - Spec review in the graph run: with `--architect --review-spec`, the run
   waits after the Architect writes its spec (exit status 4) and carries on
   only when a person decides. `python -m tenx.run approve --out <run>`
