@@ -1,15 +1,22 @@
 """Projects that pass the gate, for measuring a reviewer.
 
+    python tests/review_bed.py --out DIR [--seed N]
+
 Each variant is the reference project with a few exact edits. A defect
 variant carries one planted mistake in a column the gate does not check, so
 the gate passes it while its values are wrong. A good variant is correct but
 written differently, so a reviewer that rejects it is wrong. What each
 variant is stays in this file and in the bed's answers, never in the
-variant's own folder.
+variant's own folder: the bed's projects are named project-01, project-02
+and so on, in an order shuffled by the seed, and answers.json beside them
+says which is which.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+import random
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -270,3 +277,47 @@ def differences(reference: Path, built: Path, chosen: Variant) -> dict[tuple[str
                 ours[key][column] != theirs[key][column] for key in ours
             )
     return counts
+
+
+def write_bed(out: Path, seed: int = 0) -> dict:
+    """Write every variant under neutral names in out/projects, and out/answers.json."""
+    out = Path(out)
+    if out.exists() and any(out.iterdir()):
+        raise BedError(f"{out} is not empty")
+    order = list(VARIANTS)
+    random.Random(f"{seed}:review-bed").shuffle(order)
+    answers = {"seed": seed, "projects": {}}
+    for number, chosen in enumerate(order, start=1):
+        name = f"project-{number:02d}"
+        make(chosen, out / "projects" / name)
+        answers["projects"][name] = {
+            "variant": chosen.name,
+            "kind": chosen.kind,
+            "summary": chosen.summary,
+            "columns": [list(pair) for pair in chosen.columns],
+        }
+    text = json.dumps(answers, indent=2, sort_keys=True) + "\n"
+    (out / "answers.json").write_text(text, encoding="utf-8")
+    return answers
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Write the reviewer test bed.")
+    parser.add_argument("--out", type=Path, required=True, help="empty folder to write into")
+    parser.add_argument("--seed", type=int, default=0, help="seed for the projects' order")
+    args = parser.parse_args(argv)
+    try:
+        answers = write_bed(args.out, args.seed)
+    except BedError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    defects = sum(entry["kind"] == DEFECT for entry in answers["projects"].values())
+    print(
+        f"{len(answers['projects'])} projects ({defects} with a defect) in {args.out / 'projects'}"
+    )
+    print(f"answers in {args.out / 'answers.json'}; keep them away from any reviewer")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import filecmp
+import json
+import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +25,7 @@ from review_bed import (
     differences,
     make,
     variant,
+    write_bed,
 )
 
 from demo.generate import generate
@@ -95,6 +100,82 @@ class Making(unittest.TestCase):
     def test_an_unknown_name_is_refused(self):
         with self.assertRaises(KeyError):
             variant("nothing")
+
+
+class Bed(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_projects_have_neutral_names_and_the_answers_say_which_is_which(self):
+        answers = write_bed(self.root / "bed", seed=3)
+        projects = sorted(path.name for path in (self.root / "bed" / "projects").iterdir())
+        self.assertEqual(projects, [f"project-{n:02d}" for n in range(1, len(VARIANTS) + 1)])
+        self.assertEqual(sorted(answers["projects"]), projects)
+        written = json.loads((self.root / "bed" / "answers.json").read_text(encoding="utf-8"))
+        self.assertEqual(written, answers)
+        self.assertEqual(
+            sorted(entry["variant"] for entry in answers["projects"].values()),
+            sorted(chosen.name for chosen in VARIANTS),
+        )
+        for name, entry in answers["projects"].items():
+            chosen = variant(entry["variant"])
+            self.assertEqual(entry["kind"], chosen.kind)
+            self.assertEqual(entry["columns"], [list(pair) for pair in chosen.columns])
+            fresh = make(chosen, self.root / "fresh" / name)
+            self.assertTrue(same_tree(self.root / "bed" / "projects" / name, fresh))
+
+    def test_nothing_inside_a_project_names_what_it_is(self):
+        write_bed(self.root / "bed")
+        words = {"defect", "planted", "variant", "reviewer", "answer"}
+        words |= {chosen.name for chosen in VARIANTS} - {"reference", "views"}
+        for path in (self.root / "bed" / "projects").rglob("*"):
+            text = path.name + (path.read_text(encoding="utf-8") if path.is_file() else "")
+            for word in words:
+                self.assertNotIn(word, text.lower(), str(path))
+
+    def test_the_same_seed_gives_the_same_bed_and_another_seed_another_order(self):
+        one = write_bed(self.root / "one", seed=5)
+        self.assertEqual(write_bed(self.root / "two", seed=5), one)
+        self.assertTrue(same_tree(self.root / "one", self.root / "two"))
+        other = write_bed(self.root / "three", seed=6)
+        order = [entry["variant"] for entry in one["projects"].values()]
+        self.assertNotEqual([entry["variant"] for entry in other["projects"].values()], order)
+
+    def test_a_folder_that_is_not_empty_is_refused(self):
+        (self.root / "bed").mkdir()
+        (self.root / "bed" / "kept.txt").write_text("x", encoding="utf-8")
+        with self.assertRaisesRegex(BedError, "not empty"):
+            write_bed(self.root / "bed")
+        self.assertEqual([path.name for path in (self.root / "bed").iterdir()], ["kept.txt"])
+
+    def test_the_command_line_writes_the_bed(self):
+        script = Path(__file__).resolve().parent / "review_bed.py"
+        done = subprocess.run(
+            [sys.executable, str(script), "--out", str(self.root / "bed"), "--seed", "2"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertRegex(done.stdout, re.escape("12 projects (6 with a defect)"))
+        self.assertEqual(
+            write_bed(self.root / "again", seed=2)["projects"],
+            json.loads((self.root / "bed" / "answers.json").read_text(encoding="utf-8"))[
+                "projects"
+            ],
+        )
+        again = subprocess.run(
+            [sys.executable, str(script), "--out", str(self.root / "bed")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(again.returncode, 2)
+        self.assertIn("not empty", again.stderr)
 
 
 def failures(results) -> list[tuple[str, str, str]]:
