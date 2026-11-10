@@ -6,6 +6,15 @@ Notable changes to this project.
 
 ### Added
 
+- The review packet (`tenx/review.py`): the folder a reviewer will be
+  given after the gate passes a project, holding the goal, the spec when
+  there is one, the source profiles, the project's settings and models,
+  and `PACKET.md`, which lists every check the gate ran with what an agent
+  may be told of it and names anything left out of the project and why.
+  It never holds the gate's declaration or working files. The copy follows
+  no link, opens only regular files and caps file and packet size, and a
+  file with the same bytes as a hidden file refuses the packet. No run
+  uses it yet.
 - A test bed for measuring a reviewer: `python tests/review_bed.py --out
   <folder>` writes twelve variants of the reference dbt project under
   neutral names (`project-01` to `project-12`, in an order shuffled by

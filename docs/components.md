@@ -1244,6 +1244,72 @@ error: 32 runs to do, estimated at US$19.20, at most US$72.00 at each agent call
 
 No live repair comparison has been run yet.
 
+## Review packet
+
+`tenx/review.py` makes the folder a reviewer will be given after the gate
+passes a project. No run uses it yet: the reviewer agent that reads it is
+the next part of the review work.
+
+| In the packet | From |
+| --- | --- |
+| `GOAL.md` | The run's goal, not the engineer's copy |
+| `SPEC.md` | The spec the engineer was given, when the run has one |
+| `source_profiles/` | The profiles and overlap report the engineer was given |
+| `project/` | The project's `dbt_project.yml`, and the `.sql`, `.py`, `.yml`, `.yaml`, `.md` and `.csv` files under `models/`, `macros/`, `tests/`, `seeds/`, `snapshots/` and `analyses/` |
+| `PACKET.md` | What each part is, every check the gate ran with what an agent may be told of it, and what was left out of `project/` and why |
+| `packet.json` | The SHA-256 of every file in the packet, and what was left out |
+
+Not in the packet: the gate's declaration and working files (its expected
+rows among them), the cross-source agent's notes, what the build left
+(`target/`, logs, databases) and `profiles.yml`. Each check is listed with
+what the gate lets an agent be told of it, the same text a repair is given:
+an `expected` check gives its counts, never its rows.
+
+The engineer's folder is written by code that ran in the sandbox, and the
+packet is made outside it, so the copy follows no link (a link is left out
+and named), opens nothing but regular files (a named pipe would otherwise
+stop the run), and leaves out any file over 256 KiB and anything past 2 MiB
+in all. As a second guard, a packet file with the same bytes as the
+declaration or any of the gate's working files refuses the whole packet. A
+project the gate failed is not packed.
+
+The start of `PACKET.md` for the reference project on seed 11, 60
+companies, with links to the declaration and the gate's files planted in
+its models:
+
+```
+# Review packet
+
+The project in `project/` was built from an empty database and passed every
+check the validator ran (24 checks), listed below
+with what may be said of each. The checks ran on every row.
+
+## Files
+
+- `GOAL.md`: the goal the project was built for.
+- `source_profiles/`: a profile of each raw table, and the overlap report.
+- `project/`: the project's settings and models, 9 files.
+
+## Checks that passed
+
+- build on project: dbt build exited 0 after running 15 nodes
+```
+
+Further down, the crosswalk's `expected` check, and the first of the links
+left out:
+
+```
+- expected on int_customers_matched_to_accounts: customer_id, account_id: the 44 expected rows, and no other
+```
+
+```
+- `models/declaration.yml`: a link, not followed.
+```
+
+On the eight comparison datasets the packet for the reference project is
+about 41 KB, of which about 10 KB is the project and `PACKET.md` and the
+rest the profiles.
+
 ## Run records and graph state
 
 The graph run (above) saves its state after every step, so that a
@@ -1290,7 +1356,7 @@ construct objects of any class a checkpoint file names.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, and the run records |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, and the review packet |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |
