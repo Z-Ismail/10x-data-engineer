@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from tenx import review
+from tenx.ports import CheckResult, ValidationReport
 
 
 def _write(path: Path, text: str = "select 1\n") -> Path:
@@ -152,6 +153,71 @@ class SelectTest(unittest.TestCase):
         for path in (self.root / "missing", self.secret, link):
             with self.subTest(path=path.name), self.assertRaises(review.PacketError):
                 review.select(path)
+
+
+def _report(passed: bool = True) -> ValidationReport:
+    results = (
+        CheckResult("build", "stg_a", "pass", "built as table", feedback="built as table"),
+        CheckResult(
+            "expected",
+            "int_b",
+            "pass" if passed else "fail",
+            "int_b: 2 rows expected\n  only expected: cus_000001A, 001\n  only expected: x",
+            feedback="int_b: 2 rows expected\n(the rows themselves are not shown)",
+        ),
+        CheckResult("repeat", "stg_a", "pass", "the same 3 rows in both builds"),
+    )
+    return ValidationReport(results, passed, "the full report\n")
+
+
+class RenderTest(unittest.TestCase):
+    def test_lists_the_files_the_checks_and_what_was_left_out(self):
+        chosen = review.Selection(
+            files={"dbt_project.yml": b"a", "models/stg_a.sql": b"b"},
+            left_out=[("models/leak.sql", review.LINK)],
+        )
+        self.assertEqual(
+            review.render(_report(), chosen, spec=True),
+            "# Review packet\n"
+            "\n"
+            "The project in `project/` was built from an empty database and passed every\n"
+            "check the validator ran (3 checks), listed below\n"
+            "with what may be said of each. The checks ran on every row.\n"
+            "\n"
+            "## Files\n"
+            "\n"
+            "- `GOAL.md`: the goal the project was built for.\n"
+            "- `SPEC.md`: the spec the engineer was given.\n"
+            "- `source_profiles/`: a profile of each raw table, and the overlap report.\n"
+            "- `project/`: the project's settings and models, 2 files.\n"
+            "\n"
+            "## Checks that passed\n"
+            "\n"
+            "- build on stg_a: built as table\n"
+            "- expected on int_b: int_b: 2 rows expected\n"
+            "  (the rows themselves are not shown)\n"
+            "- repeat on stg_a: No more is said about this check.\n"
+            "\n"
+            "## Left out of `project/`\n"
+            "\n"
+            "- `models/leak.sql`: a link, not followed.\n",
+        )
+
+    def test_without_a_spec_or_anything_left_out(self):
+        chosen = review.Selection(files={"models/stg_a.sql": b"b"})
+        text = review.render(_report(), chosen, spec=False)
+        self.assertNotIn("SPEC.md", text)
+        self.assertIn("models, 1 file.\n", text)
+        self.assertTrue(text.endswith("## Left out of `project/`\n\nNothing.\n"))
+
+    def test_never_shows_a_checks_detail(self):
+        text = review.render(_report(), review.Selection(), spec=False)
+        for hidden in ("cus_000001A", "only expected", "the same 3 rows", "the full report"):
+            self.assertNotIn(hidden, text)
+
+    def test_refuses_a_failed_validation(self):
+        with self.assertRaisesRegex(review.PacketError, "failed is not reviewed"):
+            review.render(_report(passed=False), review.Selection(), spec=False)
 
 
 if __name__ == "__main__":

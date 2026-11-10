@@ -20,6 +20,8 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tenx.ports import ValidationReport
+
 __all__ = [
     "CARRIED_DIRS",
     "CARRIED_FILES",
@@ -28,6 +30,7 @@ __all__ = [
     "MAX_TOTAL_BYTES",
     "PacketError",
     "Selection",
+    "render",
     "select",
 ]
 
@@ -111,3 +114,49 @@ def select(project: Path) -> Selection:
         if os.path.lexists(path):
             _take(selection, project, path)
     return selection
+
+
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def render(report: ValidationReport, selection: Selection, spec: bool) -> str:
+    """``PACKET.md``: what is in the packet, the checks that ran, and what was left out.
+
+    Each check is shown with what the validator lets an agent be told of it
+    (its feedback), never its full detail, so a check built from something
+    hidden says only what it chose to.
+    """
+    if not report.passed:
+        raise PacketError("a project the validator failed is not reviewed")
+    lines = [
+        "# Review packet",
+        "",
+        "The project in `project/` was built from an empty database and passed every",
+        f"check the validator ran ({_counted(len(report.results), 'check')}), listed below",
+        "with what may be said of each. The checks ran on every row.",
+        "",
+        "## Files",
+        "",
+        "- `GOAL.md`: the goal the project was built for.",
+    ]
+    if spec:
+        lines.append("- `SPEC.md`: the spec the engineer was given.")
+    lines += [
+        "- `source_profiles/`: a profile of each raw table, and the overlap report.",
+        f"- `project/`: the project's settings and models, {_counted(len(selection.files), 'file')}.",
+        "",
+        "## Checks that passed",
+        "",
+    ]
+    for result in report.results:
+        said = result.feedback or "No more is said about this check."
+        first, *rest = said.splitlines() or [""]
+        lines.append(f"- {result.check} on {result.subject}: {first}")
+        lines += [f"  {line}" for line in rest]
+    lines += ["", "## Left out of `project/`", ""]
+    if selection.left_out:
+        lines += [f"- `{name}`: {reason}." for name, reason in selection.left_out]
+    else:
+        lines.append("Nothing.")
+    return "\n".join(lines) + "\n"
