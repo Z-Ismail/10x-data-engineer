@@ -15,11 +15,16 @@ This module reaches no platform, so the graph can make the packet itself.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import stat
+import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tenx import artefacts
 from tenx.ports import ValidationReport
 
 __all__ = [
@@ -28,11 +33,21 @@ __all__ = [
     "CARRIED_SUFFIXES",
     "MAX_FILE_BYTES",
     "MAX_TOTAL_BYTES",
+    "PACKET_FILE",
+    "Packet",
     "PacketError",
     "Selection",
+    "build",
     "render",
     "select",
 ]
+
+PACKET_FILE = "PACKET.md"
+MANIFEST_FILE = "packet.json"
+GOAL_FILE = "GOAL.md"
+SPEC_FILE = "SPEC.md"
+PROFILES_DIR = "source_profiles"
+PROJECT_DIR = "project"
 
 # What of a project the packet carries: its settings, and the files under
 # the folders dbt reads code and data from, of the kinds dbt reads.
@@ -160,3 +175,80 @@ def render(report: ValidationReport, selection: Selection, spec: bool) -> str:
     else:
         lines.append("Nothing.")
     return "\n".join(lines) + "\n"
+
+
+@dataclass(frozen=True)
+class Packet:
+    """A packet made: its folder, each file's SHA-256 by path in it, and what was left out."""
+
+    folder: Path
+    files: dict[str, str]
+    left_out: tuple[tuple[str, str], ...]
+
+
+def _secret_hashes(secrets: Iterable[Path]) -> set[str]:
+    found = set()
+    for secret in secrets:
+        secret = Path(secret)
+        paths = sorted(secret.rglob("*")) if secret.is_dir() else [secret]
+        for path in paths:
+            if path.is_file() and not path.is_symlink():
+                found.add(artefacts.file_hash(path))
+    return found
+
+
+def build(
+    folder: Path,
+    *,
+    goal: Path,
+    profiles: Path,
+    project: Path,
+    report: ValidationReport,
+    spec: Path | None = None,
+    secrets: Iterable[Path] = (),
+) -> Packet:
+    """Make the review packet for a project the validator passed, in ``folder``.
+
+    The goal and spec come from the run's own files, not the copies in the
+    project, which the engineer could have changed. ``secrets`` are the files
+    and folders the reviewer must never see (the validator's declaration and
+    working files): a packet file with the same bytes as any of them refuses
+    the whole packet, which is then not made.
+    """
+    folder = Path(folder)
+    if os.path.lexists(folder) and (not folder.is_dir() or any(folder.iterdir())):
+        raise PacketError(f"{folder} already exists and is not an empty folder")
+    chosen = select(project)
+    text = render(report, chosen, spec is not None)
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=f".{folder.name}.", dir=folder.parent))
+    try:
+        shutil.copyfile(goal, work / GOAL_FILE)
+        if spec is not None:
+            shutil.copyfile(spec, work / SPEC_FILE)
+        shutil.copytree(profiles, work / PROFILES_DIR)
+        for name, data in chosen.files.items():
+            path = work / PROJECT_DIR / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (work / PACKET_FILE).write_text(text, encoding="utf-8")
+        files = {
+            path.relative_to(work).as_posix(): artefacts.file_hash(path)
+            for path in sorted(work.rglob("*"))
+            if path.is_file()
+        }
+        hidden = _secret_hashes(secrets)
+        for name, digest in files.items():
+            if digest in hidden:
+                raise PacketError(f"{name} has the same bytes as a file hidden from agents")
+        manifest = {"files": files, "left_out": [list(item) for item in chosen.left_out]}
+        (work / MANIFEST_FILE).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if folder.is_dir():
+            folder.rmdir()
+        os.replace(work, folder)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    return Packet(folder, files, tuple(chosen.left_out))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import signal
 import socket
@@ -218,6 +220,109 @@ class RenderTest(unittest.TestCase):
     def test_refuses_a_failed_validation(self):
         with self.assertRaisesRegex(review.PacketError, "failed is not reviewed"):
             review.render(_report(passed=False), review.Selection(), spec=False)
+
+
+class BuildTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: os.system(f"rm -rf '{self.root}'"))
+        self.goal = _write(self.root / "run" / "goal.md", "# Goal\n")
+        self.spec = _write(self.root / "run" / "SPEC.md", "# Spec\n")
+        self.profiles = self.root / "run" / "profiles"
+        _write(self.profiles / "billing.customers.txt", "profile\n")
+        _write(self.profiles / "overlap.txt", "overlap\n")
+        self.project = self.root / "engineer"
+        _write(self.project / "dbt_project.yml", "name: demo\n")
+        _write(self.project / "models" / "stg_a.sql")
+        # The engineer's own copies, which it could have changed.
+        _write(self.project / "GOAL.md", "# A goal the engineer rewrote\n")
+        _write(self.project / "SPEC.md", "# A spec the engineer rewrote\n")
+        self.declaration = _write(self.root / "checks" / "declaration.json", '{"models": []}\n')
+        self.out = self.root / "out" / "packet"
+
+    def build(self, **changes) -> review.Packet:
+        arguments = {
+            "goal": self.goal,
+            "profiles": self.profiles,
+            "project": self.project,
+            "report": _report(),
+            "spec": self.spec,
+            "secrets": (self.declaration,),
+        }
+        return review.build(self.out, **{**arguments, **changes})
+
+    def test_holds_exactly_the_packet_files(self):
+        packet = self.build()
+        found = sorted(p.relative_to(self.out).as_posix() for p in self.out.rglob("*"))
+        self.assertEqual(
+            found,
+            [
+                "GOAL.md",
+                "PACKET.md",
+                "SPEC.md",
+                "packet.json",
+                "project",
+                "project/dbt_project.yml",
+                "project/models",
+                "project/models/stg_a.sql",
+                "source_profiles",
+                "source_profiles/billing.customers.txt",
+                "source_profiles/overlap.txt",
+            ],
+        )
+        self.assertEqual((self.out / "GOAL.md").read_text(), "# Goal\n")
+        self.assertEqual((self.out / "SPEC.md").read_text(), "# Spec\n")
+        self.assertEqual((self.out / "project" / "models" / "stg_a.sql").read_text(), "select 1\n")
+        manifest = json.loads((self.out / "packet.json").read_text())
+        self.assertEqual(manifest["left_out"], [])
+        self.assertEqual(
+            set(manifest["files"]),
+            set(found) - {"packet.json", "project", "project/models", "source_profiles"},
+        )
+        for name, digest in manifest["files"].items():
+            data = (self.out / name).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+        self.assertEqual(packet.files, manifest["files"])
+        self.assertEqual(os.listdir(self.root / "out"), ["packet"])
+
+    def test_without_a_spec_and_with_files_left_out(self):
+        (self.project / "models" / "leak.sql").symlink_to(self.declaration)
+        packet = self.build(spec=None)
+        self.assertFalse((self.out / "SPEC.md").exists())
+        self.assertEqual(packet.left_out, (("models/leak.sql", review.LINK),))
+        manifest = json.loads((self.out / "packet.json").read_text())
+        self.assertEqual(manifest["left_out"], [["models/leak.sql", review.LINK]])
+        self.assertIn(
+            "- `models/leak.sql`: a link, not followed.", (self.out / "PACKET.md").read_text()
+        )
+
+    def test_a_copy_of_a_secret_refuses_the_packet(self):
+        workdir = self.root / "gate"
+        _write(workdir / "expected" / "rows.csv", "cus_000001A,001\n")
+        cases = {
+            "the declaration": self.declaration.read_text(),
+            "a file in a secret folder": "cus_000001A,001\n",
+        }
+        for case, text in cases.items():
+            with self.subTest(case=case):
+                _write(self.project / "models" / "copy.yml", text)
+                with self.assertRaisesRegex(review.PacketError, "project/models/copy.yml"):
+                    self.build(secrets=(self.declaration, workdir, self.root / "missing"))
+                self.assertFalse(self.out.exists())
+                self.assertEqual(os.listdir(self.root / "out"), [])
+
+    def test_refuses_a_folder_that_holds_something(self):
+        _write(self.out / "old.txt", "x")
+        with self.assertRaisesRegex(review.PacketError, "not an empty folder"):
+            self.build()
+        (self.out / "old.txt").unlink()
+        self.build()
+        self.assertTrue((self.out / "PACKET.md").is_file())
+
+    def test_refuses_a_failed_validation_and_writes_nothing(self):
+        with self.assertRaises(review.PacketError):
+            self.build(report=_report(passed=False))
+        self.assertFalse((self.root / "out").exists() and os.listdir(self.root / "out"))
 
 
 if __name__ == "__main__":
