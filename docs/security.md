@@ -70,6 +70,18 @@ is for the spec the run showed, by its SHA-256: if `SPEC.md` was changed on
 disk after the run wrote it, the approval is refused and the run keeps
 waiting, so the engineer never works from a spec that was not checked.
 
+The review packet (`tenx/review.py`), which a reviewer will be given after
+a gate pass, is copied from the engineer's folder outside the sandbox. The copy follows no link the engineer left (a link to the
+declaration is left out and named, never read), opens only regular files
+(a named pipe left in the models cannot stall it), and caps each file and
+the whole packet. A packet file with the same bytes as the declaration or
+any of the gate's working files refuses the packet. The tests plant links
+to the declaration, the expected rows and the gate's folder in a project
+the real gate passed, and check that none of them, no reference query and
+no expected row reaches the packet; with links followed and the second
+guard taken out, the declaration and its reference query do. No run makes
+a packet yet.
+
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and
 later, AppArmor allows bubblewrap to set up a sandbox only with a profile
