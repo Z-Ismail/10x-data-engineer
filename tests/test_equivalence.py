@@ -271,8 +271,9 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(found.graph_exits, [0])
         # Project: goal, notes, 2 dbt files, 8 profile files, 8 model files (20).
         # Cross-source folder: goal, 8 profile files, 2 overlap files (11). profile/ (8),
-        # overlap/ (2), the add-on (4), 5 single files and the gate's file names (1).
-        self.assertEqual(len(found.comparison.compared), 20 + 11 + 8 + 2 + 4 + 5 + 1)
+        # overlap/ (2), the add-on (manifest and 5 agents, 6), 5 single files and
+        # the gate's file names (1).
+        self.assertEqual(len(found.comparison.compared), 20 + 11 + 8 + 2 + 6 + 5 + 1)
         usage = self.usage(found)
         self.assertEqual(usage["gate"], "PASS")
         self.assertEqual([role["role"] for role in usage["roles"]], ["cross-source", "engineer"])

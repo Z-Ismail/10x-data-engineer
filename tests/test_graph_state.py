@@ -109,7 +109,8 @@ class GraphStateTest(unittest.TestCase):
             if typing.get_origin(hint) is typing.Annotated
         }
         self.assertEqual(
-            set(reducers), {"artefacts", "findings", "validations", "costs", "attempts"}
+            set(reducers),
+            {"artefacts", "findings", "validations", "costs", "attempts", "rounds", "approvals"},
         )
         self.assertIs(reducers["artefacts"], merge_artefacts)
         self.assertIs(reducers["attempts"], merge_attempts)

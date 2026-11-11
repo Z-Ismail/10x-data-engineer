@@ -67,6 +67,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from tenx import artefacts
+from tenx.contract import SCHEMA as CONTRACT_SCHEMA
 from tenx.cross_source import NOTES_FILE, SCHEMA, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
 from tenx.gate import GateError, Result, load_declaration, passed, render, run_gate
@@ -76,6 +77,7 @@ from tenx.overlap import overlap_folder, write_report
 from tenx.policy import Policy
 from tenx.ports import AgentRun, Role
 from tenx.profile import ProfileError, profile_folder
+from tenx.reviewer import SCHEMA as REVIEW_SCHEMA
 from tenx.sample import sample
 from tenx.sandbox import (
     Mounts,
@@ -137,6 +139,32 @@ CROSS_SOURCE = Role(
     allowed_tools=(),
     max_turns=20,
     json_schema=SCHEMA,
+)
+
+
+# Writes the spec in the graph run when asked; read-only like the
+# cross-source agent, and capped as one.
+ARCHITECT = Role(
+    name="architect",
+    agent="tenx:architect",
+    prompt="Write the spec for the models GOAL.md asks for.",
+    allowed_tools=(),
+    max_turns=15,
+    json_schema=CONTRACT_SCHEMA,
+    kind="cross-source",
+)
+
+
+# Reviews a project the gate passed, in the graph run when asked; read-only,
+# and capped as a cross-source call.
+REVIEWER = Role(
+    name="reviewer",
+    agent="tenx:reviewer",
+    prompt="Review the project in project/.",
+    allowed_tools=(),
+    max_turns=20,
+    json_schema=REVIEW_SCHEMA,
+    kind="cross-source",
 )
 
 

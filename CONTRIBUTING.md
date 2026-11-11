@@ -12,6 +12,8 @@ make profile
 Python 3.10 or later. `make install` installs the package in editable mode
 together with DuckDB, dbt, and LangGraph and Pydantic for the workflow.
 The gate tests run `dbt build` many times and take a few minutes.
+`make test-parallel` runs the same tests one module per process, as many
+at a time as there are processors; CI uses it.
 
 The sandbox tests need bubblewrap (`sudo apt install bubblewrap`) and are
 skipped without it, unless `TENX_REQUIRE_SANDBOX=1` is set, as CI does; then
@@ -34,6 +36,14 @@ bubblewrap.
 pairs, and is refused unless `PARITY_FLAGS=--approve-cost` is given, since it
 is estimated above US$5.
 
+`make repairs` runs the graph with repairs on the engineer alone, 32 runs,
+and is refused unless `REPAIRS_FLAGS=--approve-cost` is given, for the same
+reason.
+
+`make compare-architect` runs the graph with and without the Architect on
+the brief goal, 64 runs, and is refused unless `ARCHITECT_FLAGS=--approve-cost`
+is given, for the same reason.
+
 ## Guidelines
 
 - One logical change per commit, with its tests.
@@ -52,7 +62,7 @@ is estimated above US$5.
 | `agents/` | The agents' instructions |
 | `docs/` | The component reference |
 | `demo/` | Generator for the three demo source systems, and their goal |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the spec contract's check, the run artefacts, the spending policy, and the capability interfaces |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the spec contract's check and its row counts, the run artefacts, the spending policy, and the capability interfaces |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/`, `tenx/run.py` | The graph run: its steps, state and checkpoints, and its command line |
-| `tests/` | Tests, the dbt project the gate is tested against, and the equivalence check (`tests/equivalence.py`) |
+| `tests/` | Tests, the dbt project the gate is tested against, the equivalence check (`tests/equivalence.py`) and the reviewer test bed (`tests/review_bed.py`) |

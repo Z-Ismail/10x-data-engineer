@@ -6,6 +6,72 @@ Notable changes to this project.
 
 ### Added
 
+- The reviewer agent in the graph run, off by default: with `--reviewer`
+  (`make engineer-reviewer`), a project the gate passes is given to
+  `agents/reviewer.md` (read-only, in the sandbox), which reads the review
+  packet and answers whether any column no longer holds what the raw data
+  or its name says. Every finding must cite a project file in the packet, a
+  line that file has, a model it defines and a column it mentions, and the
+  verdict must follow from the findings; an answer that fails is dropped
+  and the run says why. The advice is saved as `REVIEW.md`, shown at the
+  end of the run and given a row in the usage ledger; it never changes the
+  run's status or exit status. A failed project is not reviewed.
+- The review packet (`tenx/review.py`): the folder a reviewer will be
+  given after the gate passes a project, holding the goal, the spec when
+  there is one, the source profiles, the project's settings and models,
+  and `PACKET.md`, which lists every check the gate ran with what an agent
+  may be told of it and names anything left out of the project and why.
+  It never holds the gate's declaration or working files. The copy follows
+  no link, opens only regular files and caps file and packet size, and a
+  file with the same bytes as a hidden file refuses the packet.
+- A test bed for measuring a reviewer: `python tests/review_bed.py --out
+  <folder>` writes twelve variants of the reference dbt project under
+  neutral names (`project-01` to `project-12`, in an order shuffled by
+  `--seed`) and, beside them, `answers.json` saying which is which. Six
+  carry one planted mistake in a column the gate does not check (invoice
+  times read as milliseconds, CRM dates read month first, two event
+  columns swapped, a constant currency, a contact name taken from the
+  email, event times cut to the day); six are correct but written
+  differently. The tests check that the gate passes all twelve, that a
+  mistake changes only its own columns, and that the correct ones equal
+  the reference.
+- Spec review in the graph run: with `--architect --review-spec`, the run
+  waits after the Architect writes its spec (exit status 4) and carries on
+  only when a person decides. `python -m tenx.run approve --out <run>`
+  gives the engineer that spec; `approve --contract <file>` gives it a
+  contract of the person's own, checked against the profiles and counted
+  in the sandbox as the Architect's is; `reject --out <run> --reason
+  <text>` stops the run before the engineer starts. An approval is refused
+  if `SPEC.md` was changed after the run wrote it, and the run waits
+  again. Every decision is kept with the run, and `status` says what a
+  waiting run is waiting on.
+- An Architect comparison: `python -m tenx.compare architect` (and `make
+  compare-architect`) runs the graph with and without the Architect, both
+  with the cross-source agent, on the same datasets in shuffled blocks, and
+  judges them as the arm comparison does, the run without the Architect as
+  the baseline. Each Architect run's spec is scored against the gate's
+  declaration (keys, sources, rows to keep, money totals) and shown beside
+  its verdict. It resumes and is refused above US$5 without
+  `--approve-cost`; the 64 runs of `make compare-architect` are estimated
+  at US$20.48.
+- The Architect's step keeps what each model keeps of its source as
+  `counts.json` beside `contract.json`.
+- The Architect agent, in the graph run when asked (`python -m tenx.run run
+  --architect`, `make engineer-architect`). After the cross-source agent it
+  writes a spec for each model the goal names: what one row is, its key,
+  its source, the rows to leave out and why, where each column comes from
+  and which money must add up. The answer is checked against the source
+  profiles, each rule for leaving rows out is counted on the raw files, and
+  the result goes to the engineer as `SPEC.md`; the run notes it if the
+  engineer changes it. A spec that fails its check or its count is not
+  used, and the run says why. Its spend is capped as a cross-source call.
+- A spec's rules are counted in a separate process in the sandbox, with
+  DuckDB limited to the raw folder, one `SELECT` per count and a time limit,
+  since an agent wrote them.
+- A brief goal for the demo data, `demo/brief.md`, and `make engineer-brief`:
+  the same models, keys and money column as `demo/goal.md`, without the
+  rows to leave out, the grain or how to match billing to the CRM. It is the
+  test bed for writing a spec before the build.
 - Every agent runs in a bubblewrap sandbox on Linux. It sees its own folder,
   the add-on, the programs it runs, Claude Code's settings and, for the
   engineer, the raw files; the gate's expectations, the repository, the run
@@ -77,6 +143,22 @@ Notable changes to this project.
   10% limit (`tenx/parity.py`). It resumes, and is priced and refused above
   US$5 without `--approve-cost`; the 64 pairs of `make parity` are estimated
   at US$35.84.
+- Repairs in the graph run, off by default: `python -m tenx.run run
+  --repairs N` (0 to 3) gives the engineer up to N more attempts when the
+  gate fails its project. Each repair starts from the project just checked,
+  in a new attempt folder, with `GATE_REPORT.md` saying which checks failed,
+  on which model and by how much. The rows of an `expected` check are not
+  shown, only their counts, because they come from the gate's hidden
+  reference query. Repairs stop when one fails no fewer checks than the
+  attempt before it, when the run ceiling cannot hold another, or at N.
+  Every round is charged and has its own row in `usage.json`.
+- A repair comparison: `python -m tenx.compare repairs` (and `make
+  repairs`) runs the graph with repairs and pairs each run with its own
+  first round, which is a run without repairs. Repairs are better when
+  Tango's 95% interval on the difference in pass rates lies wholly above 0;
+  the cost per pass with and without repairs is reported. It resumes, and
+  is priced on every call a run may make and refused above US$5 without
+  `--approve-cost`; the 32 runs of `make repairs` are estimated at US$19.20.
 
 ### Fixed
 
@@ -93,6 +175,15 @@ Notable changes to this project.
 
 ### Changed
 
+- A spec's row counts come from `tenx.counting.count_kept` (through the
+  source profiler's "count the rows a spec keeps") instead of
+  `tenx.spec.count_rows`, which ran the rules in the caller's own process;
+  `tenx.spec` now only writes `SPEC.md`.
+- CI runs the tests one module per process, four at a time
+  (`make test-parallel`, `tests/parallel.py`): about 5 minutes instead of 13
+  to 19. A module passes only if it runs exactly the tests counted for it,
+  and one that hangs is stopped after 15 minutes and named. `make test` is
+  unchanged.
 - `make install` also installs the new `graph` extra (LangGraph, its SQLite
   checkpointer and Pydantic), pinned to one LangGraph minor version. The
   core package still depends only on DuckDB.

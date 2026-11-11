@@ -31,6 +31,10 @@ class ProfilesOnly:
         require(self, OVERLAP)
         return {}
 
+    def count_kept(self, contract, raw, workdir, sandbox=None, hidden=()) -> dict:
+        require(self, ports.COUNT_KEPT)
+        return {}
+
 
 class NoMethods:
     name = "nothing"
@@ -61,6 +65,7 @@ class CapabilityTest(unittest.TestCase):
             ports.VALIDATE,
             ports.RUN_AGENT,
             ports.STRUCTURED_ANSWER,
+            ports.COUNT_KEPT,
         ]
         self.assertEqual(len(set(names)), len(names))
 
@@ -102,6 +107,11 @@ class SharedTypesTest(unittest.TestCase):
         self.assertTrue(BuildResult(0, None, "").ok)
         self.assertFalse(BuildResult(1, {}, "error").ok)
         self.assertFalse(BuildResult(2, None, "").ok)
+
+
+class FeedbackDefaultTest(unittest.TestCase):
+    def test_a_check_says_nothing_to_agents_unless_its_validator_says_so(self):
+        self.assertIsNone(ports.CheckResult("rows", "m", "fail", "4 rows, 5 expected").feedback)
 
 
 if __name__ == "__main__":

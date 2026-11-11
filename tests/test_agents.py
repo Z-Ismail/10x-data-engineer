@@ -11,6 +11,20 @@ from pathlib import Path
 
 import yaml
 
+from tenx.contract import (
+    COLUMN_FIELDS,
+    CONTRACT_FIELDS,
+    EXCLUSION_FIELDS,
+    MODEL_FIELDS,
+    RULES,
+    SCHEMA,
+    TOTAL_FIELDS,
+)
+from tenx.engineer import ARCHITECT, REVIEWER
+from tenx.repair import REPORT_FILE
+from tenx.reviewer import ANSWER_FIELDS, FINDING_FIELDS, SEVERITIES, VERDICTS
+from tenx.reviewer import SCHEMA as REVIEW_SCHEMA
+
 AGENTS = Path(__file__).resolve().parent.parent / "agents"
 
 SUPPORTED = {
@@ -69,9 +83,22 @@ class EngineerAgentTest(unittest.TestCase):
         self.assertIn("`JOINS.md`, only in some runs", self.body)
         self.assertIn("When it is there, read it", self.body)
 
+    def test_follows_the_spec_only_when_it_is_there_and_leaves_it_alone(self):
+        self.assertIn("`SPEC.md`, only in some runs", self.body)
+        self.assertIn(
+            "follow it where it says more than `GOAL.md`, and do not change it", self.body
+        )
+
     def test_reads_the_table_notes_only_when_they_are_there(self):
         self.assertIn("`TABLE_NOTES.md`, only in some runs", self.body)
         self.assertIn("When it is there, read it before you write the staging models", self.body)
+
+    def test_repairs_from_the_gate_report_only_when_it_is_there(self):
+        self.assertIn("`GATE_REPORT.md`, only in some runs", self.body)
+        self.assertIn("fix it for every\n  row it affects", self.body)
+        self.assertIn("Never write rows or values into a model by hand", self.body)
+        # The file name the prompt gives is the one the run writes.
+        self.assertEqual(REPORT_FILE, "GATE_REPORT.md")
 
     def test_reads_raw_files_through_raw_dir(self):
         self.assertIn("{{ var('raw_dir') }}", self.body)
@@ -150,6 +177,82 @@ class ScoutAgentTest(unittest.TestCase):
 
     def test_leaves_joins_to_the_cross_source_agent(self):
         self.assertIn("do not advise how to join it to other tables", self.body)
+
+
+class ArchitectAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.fields, self.body = read_agent(AGENTS / "architect.md")
+
+    def test_sets_only_fields_a_plugin_agent_may_set(self):
+        self.assertLessEqual(set(self.fields), SUPPORTED)
+        self.assertEqual(self.fields["name"], "architect")
+        self.assertTrue(self.fields["description"].strip())
+
+    def test_pins_the_model(self):
+        self.assertEqual(self.fields["model"], "sonnet")
+
+    def test_can_only_read_files_and_give_its_answer(self):
+        tools = {tool.strip() for tool in self.fields["tools"].split(",")}
+        self.assertEqual(tools, {"Read", "Glob", "Grep", "StructuredOutput"})
+
+    def test_starts_without_claude_md_files(self):
+        self.assertIs(self.fields["omitClaudeMd"], True)
+
+    def test_asks_for_every_field_of_the_contract(self):
+        fields = {*CONTRACT_FIELDS, *MODEL_FIELDS, *COLUMN_FIELDS, *EXCLUSION_FIELDS}
+        fields |= {*TOTAL_FIELDS, *RULES}
+        for field in sorted(fields):
+            with self.subTest(field):
+                self.assertIn(f"`{field}`", self.body)
+
+    def test_reads_the_files_its_folder_holds(self):
+        for name in ("GOAL.md", "source_profiles/", "overlap.txt", "JOINS.md"):
+            with self.subTest(name):
+                self.assertIn(f"`{name}`", self.body)
+
+    def test_keeps_the_role_in_step_with_the_contract(self):
+        self.assertEqual(ARCHITECT.agent, "tenx:architect")
+        self.assertIs(ARCHITECT.json_schema, SCHEMA)
+        self.assertEqual(ARCHITECT.allowed_tools, ())
+        self.assertEqual(ARCHITECT.max_turns, 15)
+        self.assertEqual(ARCHITECT.budget_kind, "cross-source")
+
+
+class ReviewerAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.fields, self.body = read_agent(AGENTS / "reviewer.md")
+
+    def test_sets_only_fields_a_plugin_agent_may_set(self):
+        self.assertLessEqual(set(self.fields), SUPPORTED)
+        self.assertEqual(self.fields["name"], "reviewer")
+        self.assertTrue(self.fields["description"].strip())
+
+    def test_pins_the_model(self):
+        self.assertEqual(self.fields["model"], "sonnet")
+
+    def test_can_only_read_files_and_give_its_answer(self):
+        tools = {tool.strip() for tool in self.fields["tools"].split(",")}
+        self.assertEqual(tools, {"Read", "Glob", "Grep", "StructuredOutput"})
+
+    def test_starts_without_claude_md_files(self):
+        self.assertIs(self.fields["omitClaudeMd"], True)
+
+    def test_asks_for_every_field_and_value_of_the_answer(self):
+        for word in (*ANSWER_FIELDS, *FINDING_FIELDS, *SEVERITIES, *VERDICTS):
+            with self.subTest(word):
+                self.assertIn(f"`{word}`", self.body)
+
+    def test_reads_the_files_its_folder_holds(self):
+        for name in ("PACKET.md", "GOAL.md", "SPEC.md", "source_profiles/", "project/"):
+            with self.subTest(name):
+                self.assertIn(f"`{name}`", self.body)
+
+    def test_keeps_the_role_in_step_with_the_answer(self):
+        self.assertEqual(REVIEWER.agent, "tenx:reviewer")
+        self.assertIs(REVIEWER.json_schema, REVIEW_SCHEMA)
+        self.assertEqual(REVIEWER.allowed_tools, ())
+        self.assertEqual(REVIEWER.max_turns, 20)
+        self.assertEqual(REVIEWER.budget_kind, "cross-source")
 
 
 if __name__ == "__main__":

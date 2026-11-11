@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from tenx.domain import (
     AgentFinding,
+    ApprovalDecision,
     ArtefactRef,
     CostRecord,
     EngineeringRequest,
@@ -377,7 +378,11 @@ def request(**changes) -> dict:
         "out": "runs/demo",
         "cross_source": True,
         "scouts": False,
+        "architect": False,
         "isolation": "bubblewrap",
+        "repairs": 0,
+        "review_spec": False,
+        "reviewer": False,
     }
     value.update(changes)
     return value
@@ -400,10 +405,48 @@ class RequestAndPlanTest(unittest.TestCase):
             (request(isolation="none"), "isolation:"),
             (request(raw=""), "raw:"),
             (missing, "declaration: Field required"),
+            (request(repairs=-1), "repairs:"),
+            (request(repairs=4), "repairs:"),
+            (request(repairs=True), "repairs:"),
+            (request(repairs="2"), "repairs:"),
+            (request(review_spec="yes"), "review_spec:"),
+            (request(review_spec=True), "review_spec needs the architect"),
+            (request(reviewer="yes"), "reviewer:"),
         ]:
             with self.subTest(expected=expected), self.assertRaises(RecordError) as caught:
                 EngineeringRequest.load(value)
             self.assertIn(expected, str(caught.exception))
+
+    def test_repairs_from_none_to_three(self):
+        self.assertEqual(
+            EngineeringRequest.load({k: v for k, v in request().items() if k != "repairs"}).repairs,
+            0,
+        )
+        for repairs in range(4):
+            self.assertEqual(EngineeringRequest.load(request(repairs=repairs)).repairs, repairs)
+
+    def test_a_spec_is_reviewed_only_when_the_architect_writes_one(self):
+        self.assertFalse(EngineeringRequest.load(request()).review_spec)
+        record = EngineeringRequest.load(request(architect=True, review_spec=True))
+        self.assertTrue(record.review_spec)
+        steps = ["profile", "overlap", "architect", "review", "engineer", "gate", "report"]
+        self.assertEqual(
+            ExecutionPlan.load({"workflow": "build", "steps": steps}).steps[3], "review"
+        )
+        with self.assertRaises(RecordError) as caught:
+            ExecutionPlan.load({"workflow": "build", "steps": ["review", "architect"]})
+        self.assertIn("got review, architect", str(caught.exception))
+
+    def test_the_reviewer_comes_after_the_gate_and_is_off_unless_asked(self):
+        self.assertFalse(EngineeringRequest.load(request()).reviewer)
+        self.assertTrue(EngineeringRequest.load(request(reviewer=True)).reviewer)
+        steps = ["profile", "engineer", "gate", "reviewer", "report"]
+        self.assertEqual(
+            ExecutionPlan.load({"workflow": "build", "steps": steps}).steps[3], "reviewer"
+        )
+        with self.assertRaises(RecordError) as caught:
+            ExecutionPlan.load({"workflow": "build", "steps": ["reviewer", "gate"]})
+        self.assertIn("got reviewer, gate", str(caught.exception))
 
     def test_a_plan_takes_its_steps_once_in_order(self):
         steps = ["profile", "overlap", "cross-source", "engineer", "gate", "report"]
@@ -421,6 +464,27 @@ class RequestAndPlanTest(unittest.TestCase):
             self.assertIn(expected, str(caught.exception))
         with self.assertRaises(RecordError):
             ExecutionPlan.load({"workflow": "operate", "steps": ["profile"]})
+
+
+class ApprovalDecisionTest(unittest.TestCase):
+    def test_a_decision_reads_back_equal(self):
+        value = {"subject": "spec", "decision": "approved", "sha256": "a" * 64, "reason": ""}
+        self.assertEqual(ApprovalDecision.load(value).dump(), value)
+        bare = ApprovalDecision.load({"subject": "spec", "decision": "rejected"})
+        self.assertEqual((bare.sha256, bare.reason), (None, ""))
+
+    def test_a_wrong_decision_is_refused(self):
+        good = {"subject": "spec", "decision": "edited", "sha256": "a" * 64}
+        for change, expected in [
+            ({"decision": "maybe"}, "decision:"),
+            ({"subject": "project"}, "subject:"),
+            ({"sha256": "A" * 64}, "sha256:"),
+            ({"sha256": "a" * 63}, "sha256:"),
+            ({"by": "zak"}, "by:"),
+        ]:
+            with self.subTest(change), self.assertRaises(RecordError) as caught:
+                ApprovalDecision.load({**good, **change})
+            self.assertIn(expected, str(caught.exception))
 
 
 def check(name, subject, status) -> CheckResult:
@@ -450,8 +514,18 @@ class ValidationResultTest(unittest.TestCase):
                 "passed": False,
                 "checks": 4,
                 "failures": [
-                    {"check": "rows", "subject": "stg_invoices", "status": "fail"},
-                    {"check": "repeat", "subject": "project", "status": "skip"},
+                    {
+                        "check": "rows",
+                        "subject": "stg_invoices",
+                        "status": "fail",
+                        "feedback": None,
+                    },
+                    {
+                        "check": "repeat",
+                        "subject": "project",
+                        "status": "skip",
+                        "feedback": None,
+                    },
                 ],
                 "report": {
                     "name": "gate-report",
@@ -474,6 +548,18 @@ class ValidationResultTest(unittest.TestCase):
                 "report": None,
             },
         )
+
+    def test_a_failure_keeps_what_its_validator_lets_an_agent_be_told(self):
+        told = CheckResult("rows", "stg_invoices", "fail", "detail", {}, "4 rows, 5 expected")
+        report = ValidationReport(
+            (told, CheckResult("key", "stg_invoices", "fail", "x")), False, ""
+        )
+        failures = ValidationResult.of("duckdb gate", report).failures
+        self.assertEqual([f.feedback for f in failures], ["4 rows, 5 expected", None])
+        # An empty statement says nothing, like no statement.
+        empty = CheckResult("rows", "m", "fail", "detail", {}, "")
+        quiet = ValidationReport((empty,), False, "")
+        self.assertIsNone(ValidationResult.of("duckdb gate", quiet).failures[0].feedback)
 
     def test_a_verdict_that_disagrees_with_its_checks_is_refused(self):
         failure = {"check": "rows", "subject": "stg_invoices", "status": "fail"}

@@ -16,11 +16,17 @@ make engineer    # the cross-source agent, then the engineer builds the demo pro
 make engineer-alone    # the same without the cross-source agent
 make engineer-scouts   # the same as make engineer, with a scout for each raw table first
 make engineer-graph    # the same as make engineer, as a graph that can be resumed
+make engineer-architect  # the graph run on the brief goal, the Architect writing a spec first
+make engineer-reviewer   # the graph run with the reviewer reading the project after a gate pass
 make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
 make parity      # the graph against the earlier runner with real agents, 64 pairs;
                  # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
 make compare     # runs the engineer with and without the other agents, 128 runs;
                  # needs COMPARE_FLAGS=--approve-cost (estimated above US$5)
+make repairs     # repairs against no repairs, engineer alone, 32 runs;
+                 # needs REPAIRS_FLAGS=--approve-cost (estimated above US$5)
+make compare-architect  # the graph on the brief goal with and without the Architect, 64 runs;
+                        # needs ARCHITECT_FLAGS=--approve-cost (estimated above US$5)
 ```
 
 ## Demo data
@@ -324,6 +330,22 @@ what one row of it means, its key and which source rows to leave out.
 for each source table, and a crosswalk that matches each billing customer to
 its company's CRM account, for which the goal says only that the two systems
 share the customer's email address.
+
+[demo/brief.md](../demo/brief.md) is a brief goal for the same data, for
+measuring whether writing a spec before the build helps. It names the same
+models, their keys, the crosswalk's `account_id` and the money column,
+because the gate's checks read those by name, and says the models are for
+reporting on real customers, so they should hold real business records only,
+each once. It does not say what one row means, which rows to leave out or
+how to match the two systems. `make engineer-brief` runs the graph run on
+it. On 2026-11-05 (Claude Code 2.1.318, cross-source agent on) it passed 1
+of 8 runs on seeds 1, 7, 42 and 2026 with 200 and 1,000 companies. Seven
+crosswalks matched whole email addresses, missing the customers whose
+company's CRM account holds another mailbox, and one engineer also kept a
+single billing customer per email address. For comparison, the current
+runner with the cross-source agent passed the full goal in 31 of 32 runs on
+2026-10-22, on another day and Claude Code version. These figures hold for
+that day, version and data.
 
 The runner prepares a folder for the agent with the goal, a profile of every
 raw table and a dbt project with no models, set to read the raw files from
@@ -771,6 +793,50 @@ and the run stops with `stopped: budget` before a call that would pass the
 ceiling (US$2.00 by default). After a resume, every call settled before the
 stop counts against the ceiling again.
 
+### Repairs
+
+`run --repairs N` (0 to 3, default 0) lets the engineer repair its project
+when the gate fails it. The repair is a new engineer attempt, in its own
+folder, that starts from the project the gate just checked: its models and
+project files, without the database, `target/` and logs of its own builds,
+and with the same goal, profiles and `JOINS.md` as before. A link the
+engineer made in its project is copied as a link and never followed, so the
+copy, which runs outside the sandbox, cannot bring in a file the engineer
+could not read. The attempt also gets `GATE_REPORT.md`, here for a crosswalk
+that matched whole addresses after lower case and trimming, on the demo data
+(seed 42, 200 companies):
+
+```
+# What the checks found
+
+Your previous attempt was built from an empty database and checked after you
+finished. 1 check failed, 23 passed.
+The project in this folder is that attempt. Find the cause of each failure
+and fix it in the models, for every row it affects, not only for the rows or
+values named here, and run `dbt build` again before you stop.
+
+## expected: int_customers_matched_to_accounts
+
+customer_id, account_id: 147 rows expected and 147 in the model, of which 13 not expected and 13 expected but missing
+(the rows themselves are not shown)
+```
+
+Each check says what the engineer may be told of it. The gate tells it what
+its report says, except the rows an `expected` check lists: those come from
+the declared reference query, which the engineer never sees, and a model
+could pass by adding exactly those rows. The counts stay. A check that says
+nothing is shown only by its name, model and status.
+
+The gate checks every repair. Another repair follows only if the last one
+failed fewer checks (failed or not run) than the attempt before it, and
+only if the run ceiling can hold the engineer's cap again; otherwise the run
+ends failed, with the reason (for example `the repairs allowed (2) were
+made`). A repair that cannot be afforded does not stop the run part way:
+the run already has a verdict. `usage.json` lists every round
+(`engineer`, `engineer repair 1`, ...), so its totals include them;
+`budget.json` lists every charge, as for any attempt. A resumed run repairs
+from where it stopped, like any other step.
+
 Agent calls and gate runs each get an attempt folder:
 
 ```
@@ -827,6 +893,180 @@ cost US$0.0923. In the sandbox, killing the run also ends the agent it had
 started (bubblewrap's `--die-with-parent`). A run started with
 `--unisolated` and then killed leaves its agent running until the agent
 finishes, and that agent's cost is not known to the run.
+
+### Architect
+
+```
+make engineer-architect
+python -m tenx.run run --raw demo/data --goal demo/brief.md \
+    --checks tests/fixtures/demo_gate.json --out runs/demo-architect --architect
+```
+
+`run --architect` adds the architect agent after the cross-source agent and
+before the engineer. It works in its own folder with the goal, the source
+profiles, the overlap report and the cross-source agent's `JOINS.md`, with
+read-only tools, and answers with a spec contract: for each model the goal
+names, what one row is, its key, the raw table its rows come from, the rows
+to leave out (each a SQL condition on the raw table, or exact copies of
+another row) with the reason, where each column comes from, and which money
+column must add up to the raw data; then the assumptions it made and at
+most three questions for the requester.
+
+The run checks the contract against the profiles (every table and column it
+names must exist, a staging model takes columns only from its own table),
+then counts each rule on the raw files, in a separate process in the
+sandbox (see [security](security.md)). A checked and counted contract is
+kept as `architect/attempt-<n>/contract.json`, with what each model keeps
+of its source in `counts.json`, and written out as `SPEC.md`,
+which every engineer attempt finds in its folder; the engineer is asked to
+follow it where it says more than the goal and not to change it. If an
+engineer attempt changes or removes its copy, the run records a finding
+saying so. A contract that fails the check or the count, or no answer at
+all, leaves the engineer without a spec, and the run records why, for
+example `no spec for the engineer: the contract lists no models`.
+
+The architect's spend is capped as a cross-source call (US$0.40), and it
+has its own row in the usage ledger. A real run on the brief goal (seed
+2026, 200 companies, Claude Code 2.1.318), the ledger and the start of its
+`SPEC.md`:
+
+```
+role          outcome    turns  refused     time  cost (US$)
+cross-source  success        9        0   29.7 s      0.0659
+architect     success       10        0   41.1 s      0.0926
+engineer      success       18        0   63.8 s      0.1426
+run           gate PASS     37        0  134.6 s      0.3011
+```
+
+```
+## `stg_billing__customers` (staging)
+
+One row per real (live, non-test) billing customer.
+
+- Source: `billing.customers`, 157 rows
+- Key: `customer_id`
+- Leave out:
+  - `not_livemode`, 10 rows: Goal asks for real business records only; livemode false marks test-mode records (10 of 157 rows). Rule: `livemode = 'false'`
+  - `internal_test_email`, 0 rows: Emails like test1@internal.example are test records (e.g. test1, test2, test10) with no CRM match; real records only. Rule: `lower(trim(email)) LIKE 'test%@internal.example'`
+- Rows to keep: 147
+```
+
+The gate still checks the run against its own declaration, which the
+architect never sees; the spec guides the engineer and is not the test.
+Whether the architect raises the pass rate on the brief goal has not been
+measured: in three runs on 2026-11-06 the spec reached the engineer each
+time, and one of the three passed (two specs matched billing customers to
+CRM accounts on the whole email address, which the gate fails).
+
+### Spec review
+
+```
+python -m tenx.run run --raw demo/data --goal demo/brief.md \
+    --checks tests/fixtures/demo_gate.json --out runs/demo-review --architect --review-spec
+python -m tenx.run status --out runs/demo-review
+python -m tenx.run approve --out runs/demo-review [--contract <file>]
+python -m tenx.run reject --out runs/demo-review [--reason <text>]
+```
+
+With `--review-spec` (only with `--architect`) the run stops after the
+architect and waits for a person, with exit status 4, before anything of
+the engineer starts. It says what it is waiting on: the path of `SPEC.md`
+and its SHA-256, and the `contract.json` it was written from; or, when the
+architect gave no usable spec, why not and where its answer is. Nothing is
+spent while it waits, and `status` and `resume` show the same thing until
+someone decides:
+
+- `approve` gives the engineer the spec as it was written. If `SPEC.md`
+  was changed on disk since, the approval is refused and the run waits
+  again; to change the spec, approve a contract instead.
+- `approve --contract <file>` gives the engineer a contract of your own, in
+  the architect's JSON shape. It is checked against the profiles and its
+  rules are counted on the raw files in the sandbox, as the architect's are,
+  and kept under `review/attempt-<n>/` (`contract.json`, `counts.json`,
+  `SPEC.md`). A contract that fails either is refused with the reason, and
+  the run waits again. With no usable spec from the architect, `approve`
+  alone lets the engineer work from the goal.
+- `reject` stops the run (exit status 3, `reason: spec rejected: ...`)
+  before the engineer starts.
+
+Each decision, refused answers included, is kept in the run's saved state
+with the spec's hash. A real run on the brief goal (seed 42, 200 companies,
+Claude Code 2.1.319, in bubblewrap; paths shortened):
+
+```
+$ python -m tenx.run run ... --out runs/demo-review2 --architect --review-spec
+status: waiting for approval of the spec
+spec: runs/demo-review2/architect/attempt-1/SPEC.md
+sha256: c3c7a97bcccffeb78fbee5ed239aa439ffa3a7bb50fe2c74f2e6e693a4331b38
+the contract it was written from: runs/demo-review2/architect/attempt-1/contract.json
+approve with: python -m tenx.run approve --out runs/demo-review2
+or approve your own contract: python -m tenx.run approve --out runs/demo-review2 --contract <file>
+reject with: python -m tenx.run reject --out runs/demo-review2 --reason <text>
+```
+
+Its spec matched billing customers to CRM accounts on the exact email
+address, "no domain fallback". After a line was added to `SPEC.md` by hand,
+`approve` was refused (`last answer refused: .../SPEC.md was changed after
+it was written; to use a changed spec, approve an edited contract`). The
+contract was then edited to match on the email's domain, since a company's
+CRM account may hold another mailbox there, and approved with
+`--contract`; the run counted it in the sandbox and the engineer, given the
+new `SPEC.md`, passed the gate 24 of 24 (US$0.2345 for the three agents).
+One run shows the step working, not that a review raises the pass rate. In
+an earlier run the architect's answer failed its check (a money total
+named its column with the table in front), and the run said why; a
+corrected contract was approved, but the engineer kept
+one billing customer per email address despite the spec's 147 rows to keep,
+and the gate failed it: the spec guides the engineer, the gate decides.
+
+### Architect comparison
+
+```
+make compare-architect ARCHITECT_FLAGS=--approve-cost
+python -m tenx.compare architect --raw NAME=FOLDER [--raw NAME=FOLDER ...] \
+    --goal demo/brief.md --checks tests/fixtures/demo_gate.json \
+    --out runs/compare-architect [--trials 4] [--parallel 3] [--approve-cost]
+python -m tenx.compare report runs/compare-architect
+```
+
+`python -m tenx.compare architect` measures whether the Architect raises the
+pass rate. It runs the graph twice per dataset and trial, with and without
+`--architect`, both with the cross-source agent, in blocks of one dataset
+and one trial number whose two runs start in an order drawn from a seed, as
+the arm comparison does. The runs are judged as the arms are: each arm's
+pass rate with a 95% Beta interval, and the Architect **helps** when the
+chance that its pass rate is higher than the run without it is at least
+0.98, **hurts** when the chance that it is lower is, and is **not shown**
+otherwise. `make compare-architect` runs the brief goal on the eight
+comparison datasets four times each: 64 runs, three at a time. It resumes
+like the other comparisons.
+
+When an Architect run finishes, its spec is scored against the gate's
+declaration, which no agent sees, and the score is kept in the run's
+`agreement.json`. For each declared model it says whether the spec has the
+model, and whether the spec's key (as a set of columns), source table, rows
+to keep and money totals agree. Rows to keep are compared as counts on the
+same raw files, the count the engineer was told against the gate's own, so
+two rules written differently that leave out the same rows agree. How two
+sources are matched (the crosswalk's reference query) has no counterpart in
+a spec, so it is left to the gate's `expected` check. The report lists each
+Architect run's verdict beside its score, for example `4 of 5 models agree;
+int_customers_matched_to_accounts: rows to keep 157 not 147`, or `no spec`
+when the Architect's answer was not used. The score does not enter the
+verdict.
+
+The Architect is priced as the cross-source call its spend is capped as:
+
+```
+$ make compare-architect
+error: 64 runs to do, estimated at US$20.48, at most US$86.40 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
+```
+
+In a simulation of the rule with 32 runs per arm and the run without the
+Architect passing one run in eight, a rise to one in two is found about nine
+times in ten, a rise to three in eight about six times in ten, and a
+comparison of two equal arms says "helps" about once in a hundred. No live
+Architect comparison has been run yet.
 
 ### Equivalence with the earlier runner
 
@@ -944,7 +1184,192 @@ $ make parity
 error: 128 runs to do, estimated at US$35.84, at most US$147.20 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
 ```
 
-No live paired comparison has been run yet.
+One live paired comparison has been run, on 2026-11-06, with Claude Code
+2.1.319 and Sonnet on the demo goal, at the code of 2026-11-02 (before the
+repair loop and the Architect were added, both off by default). Of 64
+pairs, 57 both passed, 2 passed only with the earlier runner, 5 only with
+the graph, and none failed both: the earlier runner passed 59 (92%), the
+graph 62 (97%). The difference, -4.7 points, had a 95% interval of -14.5 to
++4.2, wholly below the margin: non-inferior. The cost per pass was US$0.1672
+for the earlier runner and US$0.1604 for the graph, a ratio of 0.959 (95%
+0.878 to 1.037), within the limit. Overall: non-inferior. Every failing run,
+in both runners, failed only the `expected` check on the crosswalk. The
+runs cost US$19.81 in all by Claude Code's estimate. The figures hold for
+that day, Claude Code version, goal and data.
+
+### Repair comparison
+
+```
+make repairs REPAIRS_FLAGS=--approve-cost
+python -m tenx.compare repairs --raw NAME=FOLDER [--raw NAME=FOLDER ...] \
+    --goal demo/goal.md --checks tests/fixtures/demo_gate.json --out runs/repairs \
+    [--trials 4] [--repairs 2] [--no-cross-source] [--parallel 3] [--approve-cost]
+python -m tenx.compare report runs/repairs
+```
+
+`python -m tenx.compare repairs` measures whether repairs (above) raise the
+pass rate. It runs the graph with `--repairs N` (1 to 3, default 2) on every
+dataset, `--trials` times, and pairs each run with its own first round. The
+first round is a run without repairs: nothing the engineer sees in its first
+attempt depends on N, and a repair is made only after a round fails. So
+each run gives both outcomes, at the cost of one run, and the only runs
+whose two outcomes differ are those a repair rescued. Both are read from
+the run's `usage.json`: the first round passed when the run passed with no
+`engineer repair` row.
+
+The difference in pass rates, with repairs minus the first round, gets
+Tango's 95% interval, as in the paired comparison. Repairs are **better**
+when the whole interval lies above 0, **worse** when it lies below 0, and
+the result is **inconclusive** otherwise, including a limit exactly on 0.
+The cost per pass is reported for both: the first round's spend (the
+cross-source agent, if it ran, and the engineer's first attempt) over the
+first rounds that passed, and the whole run's spend over the runs that
+passed, with a bootstrap interval of their ratio. It says what a pass costs
+with repairs; it does not decide the verdict.
+
+`make repairs` runs the engineer alone (`--no-cross-source`), where a first
+attempt fails often enough for a repair to show, on the eight comparison
+datasets four times each: 32 runs, three at a time. With the cross-source
+agent, which passes nearly every first attempt on the demo data, a gain
+could hardly show. A run left without a verdict is not counted and runs
+again on the next start; a start with another number of repairs, or with
+the cross-source agent switched, in the same folder is refused.
+
+Every call a run may make is priced, each repair as another engineer call,
+so the estimate is above what a run usually spends:
+
+```
+$ make repairs
+error: 32 runs to do, estimated at US$19.20, at most US$72.00 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
+```
+
+No live repair comparison has been run yet.
+
+## Review packet
+
+`tenx/review.py` makes the folder the reviewer agent is given after the
+gate passes a project (see [Reviewer](#reviewer)).
+
+| In the packet | From |
+| --- | --- |
+| `GOAL.md` | The run's goal, not the engineer's copy |
+| `SPEC.md` | The spec the engineer was given, when the run has one |
+| `source_profiles/` | The profiles and overlap report the engineer was given |
+| `project/` | The project's `dbt_project.yml`, and the `.sql`, `.py`, `.yml`, `.yaml`, `.md` and `.csv` files under `models/`, `macros/`, `tests/`, `seeds/`, `snapshots/` and `analyses/` |
+| `PACKET.md` | What each part is, every check the gate ran with what an agent may be told of it, and what was left out of `project/` and why |
+| `packet.json` | The SHA-256 of every file in the packet, and what was left out |
+
+Not in the packet: the gate's declaration and working files (its expected
+rows among them), the cross-source agent's notes, what the build left
+(`target/`, logs, databases) and `profiles.yml`. Each check is listed with
+what the gate lets an agent be told of it, the same text a repair is given:
+an `expected` check gives its counts, never its rows.
+
+The engineer's folder is written by code that ran in the sandbox, and the
+packet is made outside it, so the copy follows no link (a link is left out
+and named), opens nothing but regular files (a named pipe would otherwise
+stop the run), and leaves out any file over 256 KiB and anything past 2 MiB
+in all. As a second guard, a packet file with the same bytes as the
+declaration or any of the gate's working files refuses the whole packet. A
+project the gate failed is not packed.
+
+The start of `PACKET.md` for the reference project on seed 11, 60
+companies, with links to the declaration and the gate's files planted in
+its models:
+
+```
+# Review packet
+
+The project in `project/` was built from an empty database and passed every
+check the validator ran (24 checks), listed below
+with what may be said of each. The checks ran on every row.
+
+## Files
+
+- `GOAL.md`: the goal the project was built for.
+- `source_profiles/`: a profile of each raw table, and the overlap report.
+- `project/`: the project's settings and models, 9 files.
+
+## Checks that passed
+
+- build on project: dbt build exited 0 after running 15 nodes
+```
+
+Further down, the crosswalk's `expected` check, and the first of the links
+left out:
+
+```
+- expected on int_customers_matched_to_accounts: customer_id, account_id: the 44 expected rows, and no other
+```
+
+```
+- `models/declaration.yml`: a link, not followed.
+```
+
+On the eight comparison datasets the packet for the reference project is
+about 41 KB, of which about 10 KB is the project and `PACKET.md` and the
+rest the profiles.
+
+## Reviewer
+
+With `--reviewer` (`make engineer-reviewer`), the graph run gives a project
+the gate passed to the reviewer agent (`agents/reviewer.md`). It works in
+the sandbox like the cross-source agent: read-only, in a folder holding
+only the [review packet](#review-packet), without the raw files. It looks
+for what the checks cannot see: a column whose values no longer hold what
+the raw column or the column's name says (information lost, read in the
+wrong format or unit, taken from the wrong raw column, or replaced). It is
+told not to report what the listed checks cover, and that ways of writing a
+project that keep every value correct are not findings.
+
+It answers with a verdict (`approve` or `request changes`), a summary and
+its findings, each `blocking` or `advisory`, naming a model, a column, a
+project file and a line, with the evidence. The answer is checked in code
+before anyone reads it: each finding's file must be a project file in the
+packet, its line one that file has, its model one the project defines and
+its column one the file mentions; and the verdict must be `request changes`
+exactly when a finding is blocking. An answer that fails is dropped, and
+the run records why ("no review: ...").
+
+The advice is saved as `REVIEW.md` beside the reviewer's report and shown
+at the end of the run, and the reviewer has a row in the usage ledger. It
+never changes the run's status, the gate row in `usage.json` or the exit
+status. A failed project is not reviewed; after repairs, the project that
+passed is. A packet that cannot be made, a reviewer that crashes and a
+review the run's ceiling cannot hold each leave the run without a review,
+and the run says why. The reviewer is capped and priced as a cross-source
+call.
+
+The end of a real run with `--reviewer` on seed 42, 200 companies (the run
+folder shortened; Claude Code's estimates, not a bill):
+
+```
+# Review
+
+Advice from the reviewer on a project that passed every check. It does not
+change the checks' verdict.
+
+Verdict: approve
+
+I found no column in any of the five models that is wrong against its raw column or the goal. The conversions are correct: Unix seconds for `created`, day/month/year for the CRM `created_date`, and `amount_minor` kept as integer minor units. CRM `account_id` stays text because the CSVs are read as `all_varchar`, so its leading zeros are kept.
+
+No findings.
+(advice only; saved as <run>/reviewer/attempt-1/REVIEW.md)
+
+usage by role (cost is Claude Code's own estimate, not a bill)
+
+role          outcome    turns  refused    time  cost (US$)
+cross-source  success        9        0  27.6 s      0.0770
+engineer      success       18        2  27.4 s      0.1090
+reviewer      success       17        1  16.4 s      0.0669
+run           gate PASS     44        3  71.3 s      0.2529
+```
+
+How often it catches a planted mistake, and how often it asks for changes
+to correct work, has not been measured yet. Before it was built into the
+run, one review each of four test-bed projects caught both planted
+mistakes tried and approved both correct projects tried; that is not a
+rate.
 
 ## Run records and graph state
 
@@ -992,9 +1417,9 @@ construct objects of any class a checkpoint file names.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, and the run records |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |
-| `tests/` | Tests, the dbt project the gate is tested against, and the equivalence check (`tests/equivalence.py`) |
+| `tests/` | Tests, the dbt project the gate is tested against, the equivalence check (`tests/equivalence.py`) and the reviewer test bed (`tests/review_bed.py`) |
 

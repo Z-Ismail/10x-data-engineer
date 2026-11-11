@@ -111,14 +111,14 @@ if:
 | Discovery | Cross-source agent: how the tables join, given to the engineer | Available, on by default |
 | Build | Engineer agent: dbt models on DuckDB from a plain-English goal | Available |
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
-| Specification | Machine-checked spec contract and `SPEC.md` | Available as code; the Architect agent is next |
+| Specification | Architect agent: a machine-checked spec contract and `SPEC.md` for the engineer | In progress: built into the graph run, off by default (`python -m tenx.run run --architect`, `make engineer-architect`); not yet shown to raise the pass rate. With `--review-spec` the run waits for a person to approve, edit or reject the spec before the engineer starts. The measured comparison on the brief demo goal (`make compare-architect`, 64 runs, each spec scored against the gate's hidden declaration) is built and has not been run |
 | Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available: the graph run works only through them |
 | Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available: the per-call caps and the comparison approval apply to every run; the run ceiling applies to graph runs (`python -m tenx.run`) |
-| Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the build workflow runs as a graph that is saved after every step and can be resumed (`python -m tenx.run`), with the run ceiling enforced; with a stand-in for Claude Code it leaves byte-identical projects, notes, reports and usage to the current runner's on eight demo datasets (`make equivalence`). A paired comparison with real agents against the current runner (`make parity`, 64 pairs, a predeclared 10-point margin) is built; it has not been run, and the graph replaces that runner only on a non-inferior verdict. Approvals and the other roles come later |
-| Build | Repair loop driven by the gate's report | Planned |
+| Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the build workflow runs as a graph that is saved after every step and can be resumed (`python -m tenx.run`), with the run ceiling enforced; with a stand-in for Claude Code it leaves byte-identical projects, notes, reports and usage to the current runner's on eight demo datasets (`make equivalence`). A paired comparison with real agents against the current runner (`make parity`, 64 pairs, a predeclared 10-point margin) was run on 2026-11-06 and found the graph non-inferior: 62 of 64 passes against 59 of 64, at 0.96 times the cost per pass. `make engineer` still uses the current runner. A run can wait for approval of the Architect's spec (`--review-spec`); approval of the handover and the other roles come later |
+| Build | Repair loop driven by the gate's report | In progress: built into the graph run, off by default (`python -m tenx.run run --repairs N`); the comparison that measures it against runs without it (`make repairs`, each run against its own first round) is built and has not been run |
 | Operations | Diagnostics for failing pipelines; performance and cost tuning | Planned |
-| Review | Advisory reviewer, measured on planted defects | Planned |
+| Review | Advisory reviewer, measured on planted defects | In progress: the reviewer agent is built into the graph run, off by default (`python -m tenx.run run --reviewer`, `make engineer-reviewer`): after a gate pass it reads the review packet (the goal, spec, profiles, the project's models and the checks that already ran, never the gate's hidden checks) and advises, with every finding checked in code against a file and line of the project; its advice is saved as `REVIEW.md` and never changes the gate's verdict. A test bed of twelve dbt projects that all pass the gate, six with one planted mistake in a column the gate does not check and six correct but written differently, is ready for measuring how often it catches mistakes and how often it rejects good work (`python tests/review_bed.py --out <folder>`); that measurement has not been run |
 | Platforms | Snowflake first, then Databricks and BigQuery, read-only first | Planned |
 | Transformation | Marts and incremental models; plain SQL, Python and PySpark | Planned |
 | Ingestion | REST and GraphQL APIs, database extraction, change data capture, streaming | Planned |
@@ -137,8 +137,13 @@ make demo-data  # three demo source systems with planted defects
 make test
 make engineer   # the agents build the demo project, then the gate checks it
 make engineer-graph  # the same as a graph run that can be resumed if it stops
+make engineer-brief  # the graph run on a brief goal that leaves the spec unwritten
+make engineer-architect  # the same, with the Architect writing the spec first
+make engineer-reviewer   # the graph run, with the reviewer advising after a gate pass
 make equivalence     # the graph against the current runner, with a stand-in for Claude Code
 make parity          # the graph against the current runner with real agents (needs approval)
+make repairs         # repairs against no repairs with real agents (needs approval)
+make compare-architect  # the graph with and without the Architect on the brief goal (needs approval)
 ```
 
 The demo data is a billing system, a CRM and a product event log for the

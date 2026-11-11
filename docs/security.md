@@ -41,6 +41,53 @@ project, the raw files and the home folder; every attempt fails in the
 sandbox and succeeds without it. `python -m tenx.gate` also builds in the
 sandbox, and refuses where none can be set up unless given `--unisolated`.
 
+When a graph run repairs a failed project (`--repairs`), the engineer is
+told what the gate found, but never the rows the gate worked out from its
+hidden reference query, only how many differ; a check that does not say
+what may be shown is reported by name alone. The engineer's project is
+copied into the repair's folder outside the sandbox, with any link it made
+copied as a link and not followed.
+
+When a graph run has the architect agent write a spec (`--architect`),
+the spec's rules for leaving rows out are SQL the agent wrote, and the run
+counts them on the raw files. DuckDB's own advice is to treat SQL like code
+and not to run it from an untrusted source without a sandbox, so the counts
+are made by a separate Python process in the same sandbox: it sees the raw
+files read-only and nothing of the run, the repository or the gate's
+expectations. Inside it, DuckDB may read only the raw folder and cannot
+change its settings, each count must be a single `SELECT`, and the process
+is stopped after five minutes. The tests check that a rule which adds a
+statement of its own, reads a file outside the raw folder or writes into it
+is refused inside the counting process; that with those guards taken out,
+the sandbox alone shows the rule an empty file and keeps the raw folder
+unchanged; and that the same rules read and write without either.
+
+A run that waits for a person to review the spec (`--review-spec`) treats a
+contract the person gives (`approve --contract`) the same way: it is checked
+against the profiles and its rules are counted in that sandbox before it
+becomes the engineer's `SPEC.md`, wherever the rules came from. An approval
+is for the spec the run showed, by its SHA-256: if `SPEC.md` was changed on
+disk after the run wrote it, the approval is refused and the run keeps
+waiting, so the engineer never works from a spec that was not checked.
+
+The review packet (`tenx/review.py`), which a reviewer will be given after
+a gate pass, is copied from the engineer's folder outside the sandbox. The copy follows no link the engineer left (a link to the
+declaration is left out and named, never read), opens only regular files
+(a named pipe left in the models cannot stall it), and caps each file and
+the whole packet. A packet file with the same bytes as the declaration or
+any of the gate's working files refuses the packet. The tests plant links
+to the declaration, the expected rows and the gate's folder in a project
+the real gate passed, and check that none of them, no reference query and
+no expected row reaches the packet; with links followed and the second
+guard taken out, the declaration and its reference query do.
+
+The reviewer agent (`--reviewer`) runs in the same sandbox as the
+cross-source agent: read-only tools, its own folder holding only the
+packet, no raw files, and the repository, the run folder and the
+declaration hidden. It has no shell and no access to the built database.
+Its findings are checked against the packet's files before they are kept,
+and they are advice: nothing it says changes the gate's verdict.
+
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and
 later, AppArmor allows bubblewrap to set up a sandbox only with a profile

@@ -12,6 +12,7 @@ process.
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -20,9 +21,12 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
+import duckdb
 from test_engineer import ANSWER, DECLARATION, DEMO_GOAL, REFERENCE_MODELS, STUB
 
 from demo.generate import generate
+from tenx import artefacts
+from tenx.gate import expected_rows, load_declaration, source_files
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -38,6 +42,59 @@ if "tenx:engineer" in sys.argv and marker and not Path(marker).exists():
     sys.exit(1)
 """
 
+# Started as the engineer with no GATE_REPORT.md in its folder, the stand-in
+# copies STUB_FIRST_MODELS, when set, instead of STUB_MODELS: a first attempt
+# that fails, then a repair that passes.
+FIRST_MODELS = """
+if "tenx:engineer" in sys.argv and os.environ.get("STUB_FIRST_MODELS"):
+    if not Path("GATE_REPORT.md").exists():
+        os.environ["STUB_MODELS"] = os.environ["STUB_FIRST_MODELS"]
+"""
+CROSSWALK = "intermediate/int_customers_matched_to_accounts.sql"
+
+# Started as the architect, the stand-in answers with the hand-written demo
+# contract, whose rules the run then counts on the raw files.
+ARCHITECT = """
+if "tenx:architect" in sys.argv:
+    import json
+    print(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 10,
+        "duration_ms": 61000, "total_cost_usd": 0.0931,
+        "modelUsage": {"claude-sonnet-5-5": {
+            "inputTokens": 12, "cacheCreationInputTokens": 15000,
+            "cacheReadInputTokens": 60000, "outputTokens": 4000, "costBasis": "list"}},
+        "permission_denials": [],
+        "structured_output": json.loads(Path(os.environ["STUB_CONTRACT"]).read_text()),
+    }))
+    sys.exit(0)
+"""
+CONTRACT = ROOT / "tests" / "fixtures" / "demo_contract.json"
+
+# Started as the reviewer, the stand-in asks for one change to a reference
+# model, citing a line the model has, and notes the files it was given.
+REVIEWER = """
+if "tenx:reviewer" in sys.argv:
+    import json
+    Path(os.environ["STUB_RECORD"]).with_name("reviewer.json").write_text(json.dumps(
+        sorted(str(path) for path in Path.cwd().rglob("*") if path.is_file())))
+    finding = {
+        "severity": "blocking", "model": "stg_billing__customers", "column": "email",
+        "file": "models/staging/stg_billing__customers.sql", "line": 3,
+        "claim": "Emails are lower-cased.", "evidence": "Line 3: lower(trim(email)).",
+    }
+    print(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 15,
+        "duration_ms": 40000, "total_cost_usd": 0.0612,
+        "modelUsage": {"claude-sonnet-5-5": {
+            "inputTokens": 12, "cacheCreationInputTokens": 15000,
+            "cacheReadInputTokens": 60000, "outputTokens": 3000, "costBasis": "list"}},
+        "permission_denials": [],
+        "structured_output": {
+            "verdict": "request changes", "summary": "One column.", "findings": [finding]},
+    }))
+    sys.exit(0)
+"""
+
 
 class CommandLineTest(unittest.TestCase):
     @classmethod
@@ -49,9 +106,24 @@ class CommandLineTest(unittest.TestCase):
         bin_dir = root / "bin"
         bin_dir.mkdir()
         claude = bin_dir / "claude"
-        claude.write_text(f"#!{sys.executable}\n{KILL_ONCE}\n{STUB}", encoding="utf-8")
+        claude.write_text(
+            f"#!{sys.executable}\n{KILL_ONCE}\n{ARCHITECT}\n{REVIEWER}\n{FIRST_MODELS}\n{STUB}",
+            encoding="utf-8",
+        )
         claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
         cls.bin = bin_dir
+        # The reference models with a crosswalk on whole addresses, which the
+        # gate fails on the expected rows.
+        cls.whole_address = root / "whole_address"
+        shutil.copytree(REFERENCE_MODELS, cls.whole_address)
+        (cls.whole_address / CROSSWALK).write_text(
+            "select customers.customer_id, accounts.account_id\n"
+            "from {{ ref('stg_billing__customers') }} as customers\n"
+            "left join {{ ref('stg_crm__accounts') }} as accounts\n"
+            "    on customers.email = accounts.billing_email\n",
+            encoding="utf-8",
+        )
+        cls.first_models = ""
 
     @classmethod
     def tearDownClass(cls):
@@ -71,6 +143,8 @@ class CommandLineTest(unittest.TestCase):
             "STUB_MODELS": str(REFERENCE_MODELS),
             "STUB_ANSWER": json.dumps(ANSWER),
             "STUB_KILL_ONCE": str(self.root / "killed") if kill else "",
+            "STUB_FIRST_MODELS": self.first_models,
+            "STUB_CONTRACT": str(CONTRACT),
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
         }
         return subprocess.run(
@@ -124,6 +198,159 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertTrue(again.stdout.startswith("status: passed\n"))
         self.assertFalse((self.out / "engineer" / "attempt-2").exists())
+
+    def test_a_run_repaired_after_the_gate_fails(self):
+        self.first_models = str(self.whole_address)
+        done = self.start(False, "--repairs", "2")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: passed\n"), done.stdout)
+        self.assertIn("engineer repair 1  success", done.stdout)
+        first = self.out / "gate" / "attempt-1" / "report.txt"
+        self.assertRegex(first.read_text(), r"FAIL\s+expected\s+int_customers_matched")
+        told = (self.out / "engineer" / "attempt-2" / "work" / "GATE_REPORT.md").read_text()
+        self.assertIn("## expected: int_customers_matched_to_accounts\n", told)
+        self.assertIn("(the rows themselves are not shown)", told)
+        self.assertNotIn("cus_", told)
+        seen = json.loads(self.record.read_text())
+        self.assertIn("GATE_REPORT.md", seen["files"])
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(
+            [role["role"] for role in usage["roles"]],
+            ["cross-source", "engineer", "engineer repair 1"],
+        )
+
+    def test_a_run_with_the_architect_gives_the_engineer_the_spec(self):
+        done = self.start(False, "--architect")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: passed\n"), done.stdout)
+        self.assertIn("architect     success", done.stdout)
+        seen = json.loads(self.record.read_text())
+        self.assertIn("SPEC.md", seen["files"])
+        spec = self.out / "architect" / "attempt-1" / "SPEC.md"
+        given = self.out / "engineer" / "attempt-1" / "work" / "SPEC.md"
+        self.assertEqual(given.read_text(), spec.read_text())
+        # Each model's rows to keep are the gate's own expected rows for it.
+        declared = {model.name: model for model in load_declaration(DECLARATION)}
+        con = duckdb.connect()
+        files = source_files(self.raw)
+        sections = {part.split("`")[0]: part for part in spec.read_text().split("\n## `")[1:]}
+        self.assertEqual(set(sections), set(declared))
+        for name, model in declared.items():
+            with self.subTest(model=name):
+                rows = expected_rows(con, model, files[model.source])
+                self.assertIn(f"- Rows to keep: {rows.expected_rows}\n", sections[name])
+        con.close()
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(
+            [role["role"] for role in usage["roles"]], ["cross-source", "architect", "engineer"]
+        )
+
+    def test_a_run_with_the_reviewer_shows_its_advice_and_keeps_the_verdict(self):
+        done = self.start(False, "--reviewer")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: passed\n"), done.stdout)
+        review = self.out / "reviewer" / "attempt-1" / "REVIEW.md"
+        self.assertIn(review.read_text() + f"(advice only; saved as {review})\n", done.stdout)
+        self.assertIn("Verdict: request changes\n", done.stdout)
+        self.assertIn("reviewer      success", done.stdout)
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(usage["gate"], "PASS")
+        self.assertEqual(
+            [role["role"] for role in usage["roles"]], ["cross-source", "engineer", "reviewer"]
+        )
+        # The packet lists every check the real gate passed, with what may be said of it.
+        work = self.out / "reviewer" / "attempt-1" / "work"
+        packet = (work / "PACKET.md").read_text()
+        report = (self.out / "gate" / "attempt-1" / "report.txt").read_text()
+        passes = sum(line.startswith("PASS") for line in report.splitlines())
+        self.assertIn(f"passed every\ncheck the validator ran ({passes} checks)", packet)
+        seen = json.loads(self.record.with_name("reviewer.json").read_text())
+        names = {Path(path).relative_to(work).as_posix() for path in seen}
+        self.assertIn("project/models/staging/stg_billing__customers.sql", names)
+        self.assertFalse(any("declaration" in name or "JOINS" in name for name in names))
+        declaration = DECLARATION.read_bytes()
+        self.assertFalse(any(Path(path).read_bytes() == declaration for path in seen))
+
+    def waiting(self, done) -> str:
+        """The spec a waiting run names, checked against the text it printed."""
+        self.assertEqual(done.returncode, 4, done.stderr)
+        spec = self.out / "architect" / "attempt-1" / "SPEC.md"
+        out = self.out
+        self.assertTrue(
+            done.stdout.startswith(
+                f"status: waiting for approval of the spec\nspec: {spec}\n"
+                f"sha256: {artefacts.file_hash(spec)}\n"
+                f"the contract it was written from: {spec.with_name('contract.json')}\n"
+                f"approve with: python -m tenx.run approve --out {out}\n"
+            ),
+            done.stdout,
+        )
+        return done.stdout
+
+    def test_a_reviewed_spec_waits_then_is_approved_in_another_process(self):
+        self.waiting(self.start(False, "--architect", "--review-spec"))
+        self.assertFalse((self.out / "engineer").exists())
+        status = self.tenx("status", "--out", str(self.out))
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("status: waiting for approval of the spec\n", status.stdout)
+        self.assertIn("attempts: cross-source 1, architect 1\n", status.stdout)
+        # Resuming without a decision waits again and starts nothing.
+        self.waiting(self.tenx("resume", "--out", str(self.out)))
+        self.assertFalse((self.out / "engineer").exists())
+        done = self.tenx("approve", "--out", str(self.out))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: passed\n"), done.stdout)
+        spec = self.out / "architect" / "attempt-1" / "SPEC.md"
+        given = self.out / "engineer" / "attempt-1" / "work" / "SPEC.md"
+        self.assertEqual(given.read_text(), spec.read_text())
+        again = self.tenx("approve", "--out", str(self.out))
+        self.assertEqual(again.returncode, 2)
+        self.assertIn("is not waiting for approval", again.stderr)
+
+    def test_an_edited_contract_is_refused_or_used_and_a_spec_can_be_rejected(self):
+        self.waiting(self.start(False, "--architect", "--review-spec"))
+        contract = json.loads(CONTRACT.read_text())
+        contract["models"][0]["exclusions"][0]["where"] = "no_such_column = 1"
+        broken = self.root / "broken.json"
+        broken.write_text(json.dumps(contract))
+        refused = self.tenx("approve", "--out", str(self.out), "--contract", str(broken))
+        self.assertEqual(refused.returncode, 4, refused.stderr)
+        self.assertIn("last answer refused: the edited contract cannot be used: ", refused.stdout)
+        self.assertIn("no_such_column", refused.stdout)
+        self.assertFalse((self.out / "engineer").exists())
+        contract = json.loads(CONTRACT.read_text())
+        contract["assumptions"] = ["Reviewed by a person."]
+        mine = self.root / "mine.json"
+        mine.write_text(json.dumps(contract))
+        done = self.tenx("approve", "--out", str(self.out), "--contract", str(mine))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        given = (self.out / "engineer" / "attempt-1" / "work" / "SPEC.md").read_text()
+        self.assertEqual(given, (self.out / "review" / "attempt-2" / "SPEC.md").read_text())
+        self.assertIn("- Reviewed by a person.\n", given)
+
+    def test_a_rejected_spec_stops_the_run(self):
+        self.waiting(self.start(False, "--architect", "--review-spec"))
+        done = self.tenx("reject", "--out", str(self.out), "--reason", "wrong grain")
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertTrue(
+            done.stdout.startswith("status: stopped\nreason: spec rejected: wrong grain\n"),
+            done.stdout,
+        )
+        self.assertFalse((self.out / "engineer").exists())
+
+    def test_a_review_needs_the_architect(self):
+        done = self.start(False, "--review-spec")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("--review-spec needs --architect", done.stderr)
+        self.assertFalse(self.out.exists())
+
+    def test_repairs_outside_none_to_three_are_refused(self):
+        for value in ("-1", "4", "two"):
+            with self.subTest(value=value):
+                done = self.start(False, "--repairs", value)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("--repairs", done.stderr)
+                self.assertFalse(self.out.exists())
 
     def test_refusals_write_nothing(self):
         self.out.mkdir()

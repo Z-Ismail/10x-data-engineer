@@ -13,6 +13,11 @@ same figures.
         --goal <file> --checks <file> --out <folder> [--trials 4] [--parallel 3]
     python -m tenx.compare paired --raw NAME=FOLDER [--raw NAME=FOLDER ...]
         --goal <file> --checks <file> --out <folder> [--trials 8] [--parallel 3]
+    python -m tenx.compare repairs --raw NAME=FOLDER [--raw NAME=FOLDER ...]
+        --goal <file> --checks <file> --out <folder> [--trials 4] [--repairs 2]
+        [--no-cross-source] [--parallel 3]
+    python -m tenx.compare architect --raw NAME=FOLDER [--raw NAME=FOLDER ...]
+        --goal <file> --checks <file> --out <folder> [--trials 4] [--parallel 3]
     python -m tenx.compare report <folder>
 
 ``paired`` compares two runners rather than arms: today's runner and the
@@ -20,6 +25,18 @@ same run as a graph, each with the cross-source agent, on the same datasets
 and trials, the two runs of a pair next to each other. The pairs are
 compared by Tango's interval on the difference in pass rates against a
 10-point margin fixed in advance, and by the cost per pass (tenx.parity).
+
+``repairs`` runs the graph with repairs and pairs each run with its own
+first round, which is a run without repairs: nothing the engineer sees in
+its first attempt depends on the number of repairs, and a repair is made
+only after a round fails. Repairs are better when Tango's interval on the
+difference lies wholly above 0; the cost per pass of each is reported.
+
+``architect`` runs the graph with and without the architect agent, both
+with the cross-source agent, on the same datasets in shuffled blocks, and
+judges them as the arms are judged, the run without the architect as the
+baseline. Each architect run's spec is scored against the declaration
+(tenx.agreement), which the agents never see, and shown beside its verdict.
 
 Each run is an ordinary engineer run, in its own folder:
 
@@ -56,6 +73,8 @@ from math import comb, exp, lgamma, log
 from pathlib import Path
 
 from tenx import artefacts, parity
+from tenx.agreement import declared_rows, last_contract, score
+from tenx.engineer import ARCHITECT as ARCHITECT_ROLE
 from tenx.engineer import EngineerError
 from tenx.engineer import run as engineer_run
 from tenx.gate import GateError, load_declaration
@@ -74,6 +93,19 @@ BASELINE = "alone"
 # same run as a graph. Each dataset and trial runs both, back to back.
 PAIRED = "paired"
 PAIRED_ARMS = ("default", "graph")
+# The repair comparison: graph runs that may repair a failed project, each
+# compared with its own first round, which is a run without repairs.
+REPAIRS = "repairs"
+REPAIR_ARM = "repair"
+# The architect comparison: the graph run on the same datasets with and
+# without the architect agent, both with the cross-source agent, in
+# shuffled blocks as the arm comparison runs them.
+ARCHITECT = "architect"
+ARCHITECT_ARMS = ("graph", "architect")
+ARCHITECT_BASELINE = "graph"
+# Each architect run's contract scored against the declaration, written
+# into the run's folder when it finishes.
+AGREEMENT_FILE = "agreement.json"
 # An arm is said to help (or hurt) when the probability that its pass rate
 # is higher (or lower) than the baseline's reaches this. With three arms
 # compared with one baseline, 0.98 keeps the chance of wrongly keeping any
@@ -223,6 +255,42 @@ def paired_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Tri
     return _blocks(datasets, PAIRED_ARMS, trials, random.Random(f"{seed}:paired"))
 
 
+def repairs_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order of a repair comparison: one run per dataset and trial.
+
+    Runs go trial by trial, the datasets of each trial in an order drawn
+    from the seed.
+    """
+    _check_plan(datasets, [REPAIR_ARM], trials)
+    rng = random.Random(f"{seed}:repairs")
+    order = []
+    for trial in range(1, trials + 1):
+        names = list(datasets)
+        rng.shuffle(names)
+        order += [Trial(dataset, REPAIR_ARM, trial) for dataset in names]
+    return order
+
+
+def architect_plan(datasets: Sequence[str], trials: int, seed: int = 0) -> list[Trial]:
+    """The order of an architect comparison: blocks of one dataset and trial, as plan() makes.
+
+    Each block holds a run with the architect and one without, in an order
+    drawn from the seed.
+    """
+    _check_plan(datasets, ARCHITECT_ARMS, trials)
+    return _blocks(datasets, ARCHITECT_ARMS, trials, random.Random(f"{seed}:architect"))
+
+
+def _planned(datasets, arms, trials, seed, mode) -> list[Trial]:
+    if mode == ARCHITECT:
+        return architect_plan(datasets, trials, seed)
+    if mode == PAIRED:
+        return paired_plan(datasets, trials, seed)
+    if mode == REPAIRS:
+        return repairs_plan(datasets, trials, seed)
+    return plan(datasets, arms, trials, seed)
+
+
 def write_plan(
     out: Path,
     datasets: Sequence[str],
@@ -230,15 +298,16 @@ def write_plan(
     trials: int,
     seed: int,
     mode: str | None = None,
+    settings: dict | None = None,
 ) -> list[Trial]:
-    """Plan the runs and keep the plan in out, so the comparison can resume."""
-    order = (
-        paired_plan(datasets, trials, seed)
-        if mode == PAIRED
-        else plan(datasets, arms, trials, seed)
-    )
+    """Plan the runs and keep the plan in out, so the comparison can resume.
+
+    ``settings`` are kept beside the plan, and a resume must ask for the same.
+    """
+    order = _planned(datasets, arms, trials, seed, mode)
     document = {
         **({"mode": mode} if mode else {}),
+        **(settings or {}),
         "datasets": list(datasets),
         "arms": list(arms),
         "trials": trials,
@@ -276,23 +345,68 @@ def _cost(role) -> float | None:
     return cost if role.get("cost_known") is True else None
 
 
+def _ledger(out: Path, trial: Trial) -> tuple[str, list] | None:
+    """The run's gate verdict and role rows from its usage.json, if it has a verdict."""
+    path = Path(out) / RUNS_DIR / trial.folder / USAGE_FILE
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    gate = ledger.get("gate") if isinstance(ledger, dict) else None
+    if gate not in ("PASS", "FAIL"):
+        return None
+    roles = ledger.get("roles")
+    return gate, roles if isinstance(roles, list) else []
+
+
+def _spend(roles: list) -> float | None:
+    """What the roles cost together, known only when every role's cost is."""
+    costs = [_cost(role) for role in roles]
+    return sum(costs) if costs and all(cost is not None for cost in costs) else None
+
+
 def outcome(out: Path, trial: Trial) -> Outcome:
     """The run's verdict from its usage.json, or no verdict if it left none.
 
     The run's cost is known only when every role's cost is.
     """
-    path = Path(out) / RUNS_DIR / trial.folder / USAGE_FILE
-    try:
-        ledger = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    found = _ledger(out, trial)
+    if found is None:
         return Outcome(trial, None)
-    gate = ledger.get("gate") if isinstance(ledger, dict) else None
-    if gate not in ("PASS", "FAIL"):
-        return Outcome(trial, None)
-    roles = ledger.get("roles")
-    costs = [_cost(role) for role in roles] if isinstance(roles, list) else []
-    known = bool(costs) and all(cost is not None for cost in costs)
-    return Outcome(trial, gate, sum(costs) if known else None)
+    gate, roles = found
+    return Outcome(trial, gate, _spend(roles))
+
+
+# A repair round's row in usage.json: "engineer repair 1", "engineer repair 2".
+REPAIR_ROW = re.compile(r" repair [1-9][0-9]*$")
+
+
+@dataclass(frozen=True)
+class Rounds:
+    """A repairing run read as two: its first round alone, and the whole run.
+
+    A repair is made only after a round fails, so the first round passed
+    exactly when the run passed with no repair row in its usage.
+    """
+
+    trial: Trial
+    first: str | None
+    final: str | None
+    first_usd: float | None = None
+    total_usd: float | None = None
+
+
+def rounds(out: Path, trial: Trial) -> Rounds:
+    """The first round's and the run's verdicts and spend, or none if the run has no verdict."""
+    found = _ledger(out, trial)
+    if found is None:
+        return Rounds(trial, None, None)
+    gate, roles = found
+    names = [role.get("role") if isinstance(role, dict) else None for role in roles]
+    repaired = [isinstance(n, str) and REPAIR_ROW.search(n) is not None for n in names]
+    first_roles = [role for role, repair in zip(roles, repaired) if not repair]
+    first = "FAIL" if any(repaired) else gate
+    return Rounds(trial, first, gate, _spend(first_roles), _spend(roles))
 
 
 @dataclass(frozen=True)
@@ -332,10 +446,15 @@ class Summary:
     by_dataset: dict[str, dict[str, Tally]]
     without_verdict: tuple[Trial, ...]
     planned: int
+    baseline: str = BASELINE
+    # For an architect comparison: each architect run with a verdict, its
+    # verdict and its agreement.json (None if the run left none).
+    agreements: tuple[tuple[Trial, str, dict | None], ...] = ()
 
     def to_dict(self) -> dict:
         return {
-            "baseline": BASELINE,
+            **({"spec_agreement": self._agreements()} if self.agreements else {}),
+            "baseline": self.baseline,
             "decision": DECISION,
             "datasets": self.datasets,
             "trials": self.trials,
@@ -348,9 +467,36 @@ class Summary:
             "runs_without_verdict": [t.folder for t in self.without_verdict],
         }
 
+    def _agreements(self) -> list[dict]:
+        return [
+            {"run": trial.folder, "gate": gate, **(found or {"spec": None})}
+            for trial, gate, found in self.agreements
+        ]
 
-def _verdict(arm: str, better: float | None, worse: float | None) -> str:
-    if arm == BASELINE:
+
+def read_agreement(out: Path, trial: Trial) -> dict | None:
+    """The run's agreement.json, or None if it has none that can be read."""
+    path = Path(out) / RUNS_DIR / trial.folder / AGREEMENT_FILE
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return found if isinstance(found, dict) and isinstance(found.get("spec"), bool) else None
+
+
+def agreement_text(found: dict | None) -> str:
+    """One run's agreement in words."""
+    if found is None:
+        return "not scored"
+    if not found["spec"]:
+        return "no spec"
+    differ = [f"{name}: {', '.join(d)}" for name, d in found["models"].items() if d]
+    extra = [f"extra: {', '.join(found['extra'])}"] if found["extra"] else []
+    return "; ".join([f"{found['agreeing']} of {found['declared']} models agree", *differ, *extra])
+
+
+def _verdict(arm: str, better: float | None, worse: float | None, baseline: str) -> str:
+    if arm == baseline:
         return "baseline"
     if better is None or worse is None:
         return "no runs"
@@ -372,13 +518,14 @@ def summarise(out: Path) -> Summary:
     done = [o for o in outcomes if o.gate is not None]
     datasets = document["datasets"]
     arms = document["arms"]
-    base = _tally([o for o in done if o.trial.arm == BASELINE])
+    baseline = ARCHITECT_BASELINE if document.get("mode") == ARCHITECT else BASELINE
+    base = _tally([o for o in done if o.trial.arm == baseline])
     summaries = []
     for arm in arms:
         mine = [o for o in done if o.trial.arm == arm]
         tally = _tally(mine)
         better = worse = None
-        if arm != BASELINE and tally.runs and base.runs:
+        if arm != baseline and tally.runs and base.runs:
             better = prob_better(base, tally)
             worse = prob_better(tally, base)
         costs = [o.cost_usd for o in mine]
@@ -392,7 +539,7 @@ def summarise(out: Path) -> Summary:
                 high=high,
                 better=better,
                 worse=worse,
-                verdict=_verdict(arm, better, worse),
+                verdict=_verdict(arm, better, worse, baseline),
                 cost_usd=cost,
                 cost_per_pass=cost / tally.passes if cost is not None and tally.passes else None,
                 no_verdict=sum(o.trial.arm == arm and o.gate is None for o in outcomes),
@@ -412,6 +559,12 @@ def summarise(out: Path) -> Summary:
         by_dataset=by_dataset,
         without_verdict=tuple(o.trial for o in outcomes if o.gate is None),
         planned=len(order),
+        baseline=baseline,
+        agreements=tuple(
+            (o.trial, o.gate, read_agreement(out, o.trial))
+            for o in done
+            if document.get("mode") == ARCHITECT and o.trial.arm == ARCHITECT
+        ),
     )
 
 
@@ -433,7 +586,7 @@ def render(summary: Summary) -> str:
     )
     rule = (
         f"an arm helps (or hurts) when the chance that its pass rate is higher "
-        f"(or lower) than {BASELINE}'s is at least {DECISION}"
+        f"(or lower) than {summary.baseline}'s is at least {DECISION}"
     )
     lines = [heading, rule, ""]
     rows = []
@@ -459,7 +612,7 @@ def render(summary: Summary) -> str:
         "passes",
         "rate",
         "95% interval",
-        f"P(> {BASELINE})",
+        f"P(> {summary.baseline})",
         "US$ per run",
         "US$ per pass",
     ]
@@ -472,11 +625,31 @@ def render(summary: Summary) -> str:
         for dataset in summary.datasets
     ]
     lines += _table(["dataset", *names], rows, left=1)
+    if summary.agreements:
+        lines += ["", *_agreement_lines(summary.agreements)]
     if summary.without_verdict:
         lines += ["", "runs with no gate verdict, not counted:"]
         lines += [f"  {trial.folder}" for trial in summary.without_verdict]
     lines += ["", "cost is Claude Code's own estimate, not a bill"]
     return "\n".join(lines) + "\n"
+
+
+def _agreement_lines(agreements) -> list[str]:
+    agree = sum(
+        f is not None and f["spec"] and f["agreeing"] == f["declared"] for _, _, f in agreements
+    )
+    no_spec = sum(f is not None and not f["spec"] for _, _, f in agreements)
+    lines = [
+        "each architect run's spec against the declaration (keys, sources, rows to keep",
+        "and money; how sources are matched is judged by the gate alone)",
+        (
+            f"{agree} of {len(agreements)} specs agree on every declared model; "
+            f"{no_spec} {'run' if no_spec == 1 else 'runs'} had no spec"
+        ),
+        "",
+    ]
+    rows = [[trial.folder, gate, agreement_text(found)] for trial, gate, found in agreements]
+    return lines + _table(["run", "gate", "spec"], rows, left=3)
 
 
 def _table(header: list[str], rows: list[list[str]], left: int) -> list[str]:
@@ -685,12 +858,194 @@ def render_paired(summary: PairedSummary) -> str:
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True)
+class RepairSummary:
+    """Repairing runs against their own first rounds, and the cost per pass of each."""
+
+    datasets: list[str]
+    trials: int
+    repairs: int
+    cross_source: bool
+    # First: the run with its repairs; second: its first round alone.
+    pairs: parity.Pairs
+    interval: tuple[float, float] | None
+    verdict: str
+    cost_per_pass: dict[str, float | None]
+    cost_interval: tuple[float, float] | None
+    by_dataset: dict[str, parity.Pairs]
+    left_out: tuple[str, ...]
+    planned: int
+
+    def to_dict(self) -> dict:
+        def counts(pairs: parity.Pairs) -> dict:
+            return {
+                "passed_first_time": pairs.both,
+                "repaired": pairs.first_only,
+                "failed_after_passing": pairs.second_only,
+                "failed": pairs.neither,
+            }
+
+        def finite(value: float | None) -> float | str | None:
+            return "infinity" if value == float("inf") else value
+
+        n = self.pairs.n
+        return {
+            "mode": REPAIRS,
+            "datasets": self.datasets,
+            "trials": self.trials,
+            "repairs": self.repairs,
+            "cross_source": self.cross_source,
+            "planned_runs": self.planned,
+            "runs": counts(self.pairs),
+            "pass_rate": {
+                "first_round": (self.pairs.both + self.pairs.second_only) / n if n else None,
+                "with_repairs": (self.pairs.both + self.pairs.first_only) / n if n else None,
+            },
+            "difference": self.pairs.difference if n else None,
+            "interval_95": list(self.interval) if self.interval else None,
+            "verdict": self.verdict,
+            "cost_per_pass_usd": {k: finite(v) for k, v in self.cost_per_pass.items()},
+            "cost_ratio_interval_95": (
+                [finite(v) for v in self.cost_interval] if self.cost_interval else None
+            ),
+            "by_dataset": {name: counts(pairs) for name, pairs in self.by_dataset.items()},
+            "runs_left_out": list(self.left_out),
+        }
+
+
+def _count_rounds(found: list[Rounds]) -> parity.Pairs:
+    verdicts = [(r.final == "PASS", r.first == "PASS") for r in found]
+    return parity.Pairs(
+        both=verdicts.count((True, True)),
+        first_only=verdicts.count((True, False)),
+        second_only=verdicts.count((False, True)),
+        neither=verdicts.count((False, False)),
+    )
+
+
+def summarise_repairs(out: Path) -> RepairSummary:
+    """Pair each run that has a verdict with its own first round, and compare them."""
+    document, order = read_plan(out)
+    found = [rounds(out, trial) for trial in order]
+    counted = [r for r in found if r.final is not None]
+    pairs = _count_rounds(counted)
+    low_high = parity.interval(pairs) if counted else None
+    per_pass = {"first round": None, "with repairs": None}
+    cost_low_high = None
+    if counted and all(r.first_usd is not None and r.total_usd is not None for r in counted):
+        costs = [
+            parity.PairCost(r.first == "PASS", r.first_usd, r.final == "PASS", r.total_usd)
+            for r in counted
+        ]
+        per_pass = {
+            "first round": parity.cost_per_pass(
+                [c.first_usd for c in costs], pairs.both + pairs.second_only
+            ),
+            "with repairs": parity.cost_per_pass(
+                [c.second_usd for c in costs], pairs.both + pairs.first_only
+            ),
+        }
+        cost_low_high = parity.cost_interval(costs, seed=document.get("seed", 0))
+    datasets = document["datasets"]
+    return RepairSummary(
+        datasets=datasets,
+        trials=document["trials"],
+        repairs=document.get("repairs"),
+        cross_source=document.get("cross_source"),
+        pairs=pairs,
+        interval=low_high,
+        verdict=parity.superiority(*low_high) if low_high else "no runs",
+        cost_per_pass=per_pass,
+        cost_interval=cost_low_high,
+        by_dataset={
+            name: _count_rounds([r for r in counted if r.trial.dataset == name])
+            for name in datasets
+        },
+        left_out=tuple(r.trial.folder for r in found if r.final is None),
+        planned=len(order),
+    )
+
+
+def render_repairs(summary: RepairSummary) -> str:
+    """The repair comparison as plain text."""
+    pairs = summary.pairs
+    trials = f"{summary.trials} trial{'s' if summary.trials != 1 else ''}"
+    who = "with the cross-source agent" if summary.cross_source else "engineer alone"
+    lines = [
+        (
+            f"repair comparison: {len(summary.datasets)} datasets, {trials} each, "
+            f"up to {summary.repairs} repairs, {who}; "
+            f"{pairs.n} of {summary.planned} runs have a gate verdict"
+        ),
+        (
+            "each run is paired with its own first round; difference = pass rate with "
+            "repairs minus first round's; repairs are better when the 95% interval lies above 0"
+        ),
+        "",
+    ]
+    if not pairs.n:
+        return "\n".join(lines + ["no runs to compare yet"]) + "\n"
+    rows = [
+        ["passed first time", str(pairs.both)],
+        ["repaired", str(pairs.first_only)],
+        ["failed", str(pairs.neither)],
+    ]
+    if pairs.second_only:
+        rows.insert(2, ["failed after passing", str(pairs.second_only)])
+    lines += _table(["runs", "count"], rows, left=1)
+    low, high = summary.interval
+    first = (pairs.both + pairs.second_only) / pairs.n
+    final = (pairs.both + pairs.first_only) / pairs.n
+    lines += [
+        "",
+        f"pass rate: first round {_percent(first)}, with repairs {_percent(final)}",
+        (
+            f"difference: {_points(pairs.difference)} points, 95% interval (Tango) "
+            f"{_points(low)} to {_points(high)}"
+        ),
+        f"verdict: {summary.verdict}",
+        "",
+    ]
+    if summary.cost_interval is None:
+        lines.append("cost per pass: unknown (a counted run's cost was not reported)")
+    else:
+        cost_low, cost_high = summary.cost_interval
+        shown = {
+            name: "-" if v == float("inf") else _money(v)
+            for name, v in summary.cost_per_pass.items()
+        }
+        lines += [
+            (
+                f"US$ per pass: first round {shown['first round']}, "
+                f"with repairs {shown['with repairs']}"
+            ),
+            (
+                "with repairs / first round: 95% interval (bootstrap over runs) "
+                f"{_ratio(cost_low)} to {_ratio(cost_high)}"
+            ),
+        ]
+    lines += ["", "runs by dataset (first time, repaired, failed)", ""]
+    rows = [
+        [name, str(p.both), str(p.first_only), str(p.neither + p.second_only)]
+        for name, p in summary.by_dataset.items()
+    ]
+    lines += _table(["dataset", "first time", "repaired", "failed"], rows, left=1)
+    if summary.left_out:
+        lines += ["", "runs without a gate verdict, not counted:"]
+        lines += [f"  {name}" for name in summary.left_out]
+    lines += ["", "cost is Claude Code's own estimate, not a bill"]
+    return "\n".join(lines) + "\n"
+
+
 def report(out: Path) -> str:
     """Summarise the comparison in out, and write it there as text and JSON."""
     document, _ = read_plan(out)
     if document.get("mode") == PAIRED:
         summary = summarise_paired(out)
         text = render_paired(summary)
+    elif document.get("mode") == REPAIRS:
+        summary = summarise_repairs(out)
+        text = render_repairs(summary)
     else:
         summary = summarise(out)
         text = render(summary)
@@ -720,14 +1075,34 @@ class Estimate:
 
 
 def agent_calls(arm: str, tables: int) -> list[str]:
-    """The kind of each agent call one run of the arm makes: a scout per raw table."""
+    """The kind of each agent call one run of the arm makes: a scout per raw table.
+
+    The architect is priced by the kind of call its role is capped as.
+    """
+    if arm == ARCHITECT:
+        return [CROSS_SOURCE, ARCHITECT_ROLE.budget_kind, ENGINEER]
     scouts, cross_source = (False, True) if arm in PAIRED_ARMS else ARMS[arm]
     return [SCOUT] * (tables if scouts else 0) + [CROSS_SOURCE] * cross_source + [ENGINEER]
 
 
-def estimate(trials: Sequence[Trial], tables: dict[str, int], rules: Policy) -> Estimate:
-    """Price the given runs from each dataset's number of raw tables."""
-    calls = [kind for t in trials for kind in agent_calls(t.arm, tables[t.dataset])]
+def repair_calls(repairs: int, cross_source: bool) -> list[str]:
+    """Every agent call a repairing run can make: each repair is another engineer call."""
+    return [CROSS_SOURCE] * cross_source + [ENGINEER] * (1 + repairs)
+
+
+def estimate(
+    trials: Sequence[Trial], tables: dict[str, int], rules: Policy, calls: list[str] | None = None
+) -> Estimate:
+    """Price the given runs from each dataset's number of raw tables.
+
+    ``calls``, when given, are the calls every run may make, as for a
+    repair comparison, priced as if each were made.
+    """
+    calls = [
+        kind
+        for t in trials
+        for kind in (calls if calls is not None else agent_calls(t.arm, tables[t.dataset]))
+    ]
     return Estimate(
         len(trials),
         sum((rules.typical_usd[kind] for kind in calls), Decimal(0)),
@@ -742,29 +1117,30 @@ def _order(
     trials: int,
     seed: int,
     mode: str | None = None,
+    settings: dict | None = None,
 ) -> list[Trial]:
     """The planned order: the one kept in out, or a new one. Writes nothing."""
     if (out / PLAN_FILE).is_file():
         document, order = read_plan(out)
-        asked = (mode, list(datasets), list(arms), trials, seed)
+        settings = settings or {}
+        asked = (mode, list(datasets), list(arms), trials, seed, settings)
         kept = (
             document.get("mode"),
             document["datasets"],
             document["arms"],
             document["trials"],
             document.get("seed"),
+            {name: document.get(name) for name in settings},
         )
         if asked != kept:
             raise ValueError(
                 f"{out} holds a comparison of another kind, or of other datasets, arms, "
-                "trials or seed; use another folder"
+                "trials, seed or settings; use another folder"
             )
         return order
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise ValueError(f"{out} must be empty or hold a comparison to resume")
-    if mode == PAIRED:
-        return paired_plan(datasets, trials, seed)
-    return plan(datasets, arms, trials, seed)
+    return _planned(datasets, arms, trials, seed, mode)
 
 
 def _start(
@@ -774,12 +1150,13 @@ def _start(
     trials: int,
     seed: int,
     mode: str | None = None,
+    settings: dict | None = None,
 ) -> list[Trial]:
     """Check out and keep the plan there, so the comparison can resume."""
-    order = _order(out, datasets, arms, trials, seed, mode)
+    order = _order(out, datasets, arms, trials, seed, mode, settings)
     if not (out / PLAN_FILE).is_file():
         out.mkdir(parents=True, exist_ok=True)
-        write_plan(out, datasets, arms, trials, seed, mode)
+        write_plan(out, datasets, arms, trials, seed, mode, settings)
     return order
 
 
@@ -887,15 +1264,18 @@ def run_default(raw: Path, goal: Path, checks: Path, out: Path, claude: str) -> 
     engineer_run(raw, goal, checks, out, claude=claude, cross_source=True)
 
 
-def run_graph(raw: Path, goal: Path, checks: Path, out: Path, claude: str) -> None:
-    """The same run as a graph. Imported here, so other modes do not need the graph extra."""
+def run_graph(raw: Path, goal: Path, checks: Path, out: Path, claude: str, **options) -> None:
+    """The same run as a graph. Imported here, so other modes do not need the graph extra.
+
+    ``options`` go to the graph run in place of the cross-source agent alone.
+    """
     from tenx.policy import PolicyError
     from tenx.ports import PlatformError
     from tenx.run import RunError, start
     from tenx.sandbox import SandboxError
 
     try:
-        start(raw, goal, checks, out, cross_source=True, claude=claude)
+        start(raw, goal, checks, out, **(options or {"cross_source": True}), claude=claude)
     except (RunError, PlatformError, SandboxError, PolicyError) as error:
         raise ArmError(str(error)) from error
 
@@ -944,6 +1324,132 @@ def run_paired(
 
     def call(trial: Trial, folder: Path) -> None:
         runners[trial.arm](datasets[trial.dataset], goal, checks, folder, claude)
+
+    _execute(out, order, call, parallel, progress)
+    return report(out)
+
+
+def run_repairs(
+    datasets: dict[str, Path],
+    goal: Path,
+    checks: Path,
+    out: Path,
+    trials: int = 4,
+    repairs: int = 2,
+    cross_source: bool = True,
+    seed: int = 0,
+    parallel: int = 3,
+    claude: str = "claude",
+    runner=None,
+    progress=print,
+    approve_cost: bool = False,
+) -> str:
+    """Run the graph with repairs on every dataset, trials times, then report.
+
+    Each run is compared with its own first round, which is a run without
+    repairs. An error leaves the run without a verdict and out of every
+    figure; a second start runs it again. `runner` stands in for the graph
+    run in tests. Every call a run may make is priced first; above the
+    policy's limit nothing is written or run unless `approve_cost` is true.
+    """
+    if not isinstance(repairs, int) or isinstance(repairs, bool) or not 1 <= repairs <= 3:
+        raise ValueError(f"repairs must be a whole number from 1 to 3, not {repairs!r}")
+    runner = runner or run_graph
+    _check_inputs(datasets, goal, checks, parallel)
+    out = Path(out)
+    rules = Policy()
+    tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
+    settings = {"repairs": repairs, "cross_source": cross_source}
+    order = _order(out, list(datasets), [REPAIR_ARM], trials, seed, REPAIRS, settings)
+    pending = [t for t in order if outcome(out, t).gate is None]
+    cost = estimate(pending, tables, rules, repair_calls(repairs, cross_source))
+    if cost.typical_usd > rules.approve_above_usd and not approve_cost:
+        raise CostNotApproved(
+            f"{cost.describe()}; above US${rules.approve_above_usd}, so it needs approval: "
+            "run it again with --approve-cost to go ahead"
+        )
+    progress(cost.describe())
+    order = _start(out, list(datasets), [REPAIR_ARM], trials, seed, REPAIRS, settings)
+
+    def call(trial: Trial, folder: Path) -> None:
+        runner(
+            datasets[trial.dataset],
+            goal,
+            checks,
+            folder,
+            claude,
+            cross_source=cross_source,
+            repairs=repairs,
+        )
+
+    _execute(out, order, call, parallel, progress)
+    return report(out)
+
+
+def score_run(folder: Path, declared: list, wanted: dict[str, int]) -> dict:
+    """Score the run's spec against the declaration and keep it in the run's folder."""
+    found = last_contract(folder)
+    if found is None:
+        result = {"spec": False}
+    else:
+        contract, kept = found
+        result = {"spec": True, **score(contract, kept, declared, wanted).to_dict()}
+    artefacts.write_text(Path(folder) / AGREEMENT_FILE, json.dumps(result, indent=2) + "\n")
+    return result
+
+
+def run_architect(
+    datasets: dict[str, Path],
+    goal: Path,
+    checks: Path,
+    out: Path,
+    trials: int = 4,
+    seed: int = 0,
+    parallel: int = 3,
+    claude: str = "claude",
+    runner=None,
+    progress=print,
+    approve_cost: bool = False,
+) -> str:
+    """Run the graph with and without the architect on every dataset, trials times, then report.
+
+    Both arms run the cross-source agent; only the architect arm runs the
+    architect. Each architect run's spec is scored against the declaration
+    when the run finishes. An error leaves the run without a verdict, and a
+    second start runs it again. `runner` stands in for the graph run in
+    tests. Priced first; above the policy's limit nothing is written or run
+    unless `approve_cost` is true.
+    """
+    runner = runner or run_graph
+    _check_inputs(datasets, goal, checks, parallel)
+    out = Path(out)
+    rules = Policy()
+    tables = {name: len(discover(Path(folder))) for name, folder in datasets.items()}
+    order = _order(out, list(datasets), ARCHITECT_ARMS, trials, seed, ARCHITECT)
+    cost = estimate([t for t in order if outcome(out, t).gate is None], tables, rules)
+    if cost.typical_usd > rules.approve_above_usd and not approve_cost:
+        raise CostNotApproved(
+            f"{cost.describe()}; above US${rules.approve_above_usd}, so it needs approval: "
+            "run it again with --approve-cost to go ahead"
+        )
+    progress(cost.describe())
+    declared = load_declaration(checks)
+    wanted = {name: declared_rows(declared, folder) for name, folder in datasets.items()}
+    order = _start(out, list(datasets), ARCHITECT_ARMS, trials, seed, ARCHITECT)
+
+    def call(trial: Trial, folder: Path) -> None:
+        architect = trial.arm == ARCHITECT
+        runner(
+            datasets[trial.dataset],
+            goal,
+            checks,
+            folder,
+            claude,
+            cross_source=True,
+            architect=architect,
+        )
+        if architect:
+            score_run(folder, declared, wanted[trial.dataset])
 
     _execute(out, order, call, parallel, progress)
     return report(out)
@@ -1009,6 +1515,65 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run even when the comparison is estimated above US$5",
     )
+    fix = commands.add_parser(
+        "repairs",
+        help="run the graph with repairs, each run against its own first round, then report",
+    )
+    fix.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; give one --raw per dataset",
+    )
+    fix.add_argument("--goal", type=Path, required=True, help="what to build, in plain English")
+    fix.add_argument(
+        "--checks", type=Path, required=True, help="the gate's JSON declaration of what to expect"
+    )
+    fix.add_argument("--out", type=Path, required=True, help="folder for the comparison")
+    fix.add_argument("--trials", type=int, default=4, help="runs on each dataset")
+    fix.add_argument(
+        "--repairs", type=int, default=2, choices=range(1, 4), help="repairs a run may make"
+    )
+    fix.add_argument(
+        "--cross-source",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="run the cross-source agent first (default: on); --no-cross-source for the engineer alone",
+    )
+    fix.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
+    fix.add_argument("--parallel", type=int, default=3, help="runs at the same time")
+    fix.add_argument(
+        "--approve-cost",
+        action="store_true",
+        help="run even when the comparison is estimated above US$5",
+    )
+    spec = commands.add_parser(
+        "architect",
+        help="run the graph with and without the architect on the same datasets, then report",
+    )
+    spec.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; give one --raw per dataset",
+    )
+    spec.add_argument("--goal", type=Path, required=True, help="what to build, in plain English")
+    spec.add_argument(
+        "--checks", type=Path, required=True, help="the gate's JSON declaration of what to expect"
+    )
+    spec.add_argument("--out", type=Path, required=True, help="folder for the comparison")
+    spec.add_argument("--trials", type=int, default=4, help="runs of each arm on each dataset")
+    spec.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
+    spec.add_argument("--parallel", type=int, default=3, help="runs at the same time")
+    spec.add_argument(
+        "--approve-cost",
+        action="store_true",
+        help="run even when the comparison is estimated above US$5",
+    )
     show = commands.add_parser("report", help="report a comparison from its runs so far")
     show.add_argument("out", type=Path, help="the comparison's folder")
     args = parser.parse_args(argv)
@@ -1019,7 +1584,31 @@ def main(argv: list[str] | None = None) -> int:
         datasets = dict(args.raw)
         if len(datasets) != len(args.raw):
             raise ValueError("each dataset may be named only once")
-        if args.command == "paired":
+        if args.command == "architect":
+            text = run_architect(
+                datasets,
+                args.goal,
+                args.checks,
+                args.out,
+                trials=args.trials,
+                seed=args.seed,
+                parallel=args.parallel,
+                approve_cost=args.approve_cost,
+            )
+        elif args.command == "repairs":
+            text = run_repairs(
+                datasets,
+                args.goal,
+                args.checks,
+                args.out,
+                trials=args.trials,
+                repairs=args.repairs,
+                cross_source=args.cross_source,
+                seed=args.seed,
+                parallel=args.parallel,
+                approve_cost=args.approve_cost,
+            )
+        elif args.command == "paired":
             text = run_paired(
                 datasets,
                 args.goal,

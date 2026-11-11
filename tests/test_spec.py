@@ -1,16 +1,14 @@
-"""Tests for counting what a contract keeps of the raw files and writing SPEC.md.
+"""Tests for writing SPEC.md, with its text and its counts written out by hand.
 
-The raw files are handmade and small enough to count by eye, and the
-expected SPEC.md text is written out by hand.
+The counts are those of the handmade files in tests/test_counting.py, which
+checks that they are what the raw files give.
 """
 
 import copy
-import tempfile
 import unittest
-from pathlib import Path
 
-from tenx.contract import ContractError
-from tenx.spec import count_rows, render
+from tenx.ports import KeptRows
+from tenx.spec import render
 
 ORDERS = """id,amount,currency,livemode
 o1,100,usd,true
@@ -133,31 +131,15 @@ None.
 """
 
 
+COUNTS = {
+    "stg_shop__orders": KeptRows(4, (("test_mode", 1),), 3),
+    "stg_shop__visits": KeptRows(5, (("repeat_visits", 2),), 3),
+}
+
+
 class SpecTest(unittest.TestCase):
-    def setUp(self):
-        self.folder = tempfile.TemporaryDirectory()
-        self.raw = Path(self.folder.name)
-        (self.raw / "shop").mkdir()
-        (self.raw / "shop" / "orders.csv").write_text(ORDERS, encoding="utf-8")
-        (self.raw / "shop" / "visits.csv").write_text(VISITS, encoding="utf-8")
-
-    def tearDown(self):
-        self.folder.cleanup()
-
-    def test_rows_are_counted_from_the_raw_files(self):
-        counts = count_rows(CONTRACT, self.raw)
-        orders, visits = counts["stg_shop__orders"], counts["stg_shop__visits"]
-        self.assertEqual(
-            (orders.source_rows, orders.excluded, orders.expected_rows),
-            (4, (("test_mode", 1),), 3),
-        )
-        self.assertEqual(
-            (visits.source_rows, visits.excluded, visits.expected_rows),
-            (5, (("repeat_visits", 2),), 3),
-        )
-
     def test_the_spec_is_written_out(self):
-        self.assertEqual(render(CONTRACT, count_rows(CONTRACT, self.raw)), SPEC)
+        self.assertEqual(render(CONTRACT, COUNTS), SPEC)
 
     def test_a_model_with_nothing_left_out_and_questions(self):
         contract = copy.deepcopy(CONTRACT)
@@ -165,7 +147,7 @@ class SpecTest(unittest.TestCase):
         contract["models"][0]["exclusions"] = []
         contract["assumptions"] = []
         contract["questions"] = ["Should a repeated visit count twice?"]
-        text = render(contract, count_rows(contract, self.raw))
+        text = render(contract, {"stg_shop__visits": KeptRows(5, (), 5)})
         self.assertIn("- Leave out: nothing\n- Rows to keep: 5\n", text)
         self.assertTrue(
             text.endswith(
@@ -177,23 +159,8 @@ class SpecTest(unittest.TestCase):
     def test_a_total_without_grouping(self):
         contract = copy.deepcopy(CONTRACT)
         contract["models"][0]["totals"][0].update(by="", source_by="")
-        text = render(contract, count_rows(contract, self.raw))
+        text = render(contract, COUNTS)
         self.assertIn("- Money: `amount` must add up to `amount` in the source\n\n", text)
-
-    def test_a_rule_that_does_not_run_is_refused(self):
-        contract = copy.deepcopy(CONTRACT)
-        contract["models"][0]["exclusions"][0]["where"] = "mode = 'test'"
-        with self.assertRaisesRegex(
-            ContractError, r"^model stg_shop__orders: could not count the rows of shop.orders: "
-        ):
-            count_rows(contract, self.raw)
-
-    def test_a_source_with_no_raw_file_is_refused(self):
-        (self.raw / "shop" / "visits.csv").unlink()
-        with self.assertRaisesRegex(
-            ContractError, r"^model stg_shop__visits: no raw file for shop.visits$"
-        ):
-            count_rows(CONTRACT, self.raw)
 
 
 if __name__ == "__main__":

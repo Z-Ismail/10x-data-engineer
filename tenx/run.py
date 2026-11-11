@@ -3,14 +3,27 @@
     python -m tenx.run run --raw <folder> --goal <file> --checks <file> --out <folder>
     python -m tenx.run resume --out <folder>
     python -m tenx.run status --out <folder>
+    python -m tenx.run approve --out <folder> [--contract <file>]
+    python -m tenx.run reject --out <folder> [--reason <text>]
 
 ``run`` does what ``python -m tenx.engineer`` does (profile the raw files,
-compare their columns, the cross-source agent, the engineer, then the gate)
+compare their columns, the cross-source agent, the engineer, then the gate;
+with ``--architect``, the architect agent writes a spec before the engineer)
 as steps of a graph whose state is saved in ``<out>/checkpoints.sqlite``
 after each one. If the run stops part way, because the process was killed
 or a step failed, ``resume`` carries on from the step it was in: finished
 steps are not run again, and an agent call that finished before the stop is
 used rather than made again. ``status`` says where a run is.
+
+With ``--reviewer``, a project the gate passes is read by the reviewer agent,
+which advises on what the checks cannot see; its advice is kept as
+``REVIEW.md`` and changes neither the run's status nor its exit status.
+
+With ``--review-spec`` (and ``--architect``) the run waits after the spec is
+written. ``approve`` carries it on with that spec, or with ``--contract``,
+a contract of your own (the architect's is ``contract.json`` beside its
+``SPEC.md``), which is checked and counted as the architect's is; ``reject``
+stops it before the engineer starts.
 
 Every agent call reserves its spending cap first, and the run stops before a
 call that would take it past the policy's ceiling (US$2.00 unless ``--policy``
@@ -18,7 +31,8 @@ gives another). Agents and the gate's builds run in the sandbox, as with
 ``tenx.engineer``.
 
 Exit status: 0 passed, 1 failed the gate, 2 refused or stopped by an error
-(resume tries the step again), 3 stopped by the budget or the platform.
+(resume tries the step again), 3 stopped by the budget, the platform or a
+rejected spec, 4 waiting for approval of the spec.
 """
 
 from __future__ import annotations
@@ -29,15 +43,19 @@ import shutil
 import sys
 from pathlib import Path
 
+from langgraph.types import Command
+
 from tenx import policy as spending
 from tenx.adapters.duckdb import DbtDuckDB, DuckDBGate, DuckDBProfiler
 from tenx.backends.claude_code import ClaudeCode
-from tenx.domain import CostRecord, EngineeringRequest, ResourceBudget
+from tenx.domain import MAX_REPAIRS, CostRecord, EngineeringRequest, ResourceBudget
 from tenx.engineer import (
+    ARCHITECT,
     CROSS_SOURCE,
     ENGINEER,
     PLUGIN_COPY_DIR,
     PLUGIN_DIR,
+    REVIEWER,
     TIMEOUT_MINUTES,
     EngineerError,
     mounts,
@@ -60,7 +78,13 @@ from tenx.ports import PlatformError
 from tenx.sandbox import Sandbox, SandboxError, default_sandbox
 
 EXIT = {"passed": 0, "failed": 1, "stopped": 3}
-ROLES = {"cross-source": CROSS_SOURCE, "engineer": ENGINEER}
+WAITING = 4
+ROLES = {
+    "cross-source": CROSS_SOURCE,
+    "architect": ARCHITECT,
+    "engineer": ENGINEER,
+    "reviewer": REVIEWER,
+}
 
 
 class RunError(Exception):
@@ -111,7 +135,7 @@ def restored(state: dict, roles: dict) -> Budget:
     return budget
 
 
-def _invoke(request: EngineeringRequest, start: dict | None, kit: Toolkit) -> dict:
+def _invoke(request: EngineeringRequest, start: dict | Command | None, kit: Toolkit) -> dict:
     with open_checkpoints(Path(request.out) / CHECKPOINT_FILE) as saver:
         app = build_graph(kit).compile(checkpointer=saver)
         return app.invoke(start, config(request.run_id), durability="sync")
@@ -126,8 +150,19 @@ def start(
     rules: Policy | None = None,
     sandbox: Sandbox | None = None,
     claude: str = "claude",
+    repairs: int = 0,
+    architect: bool = False,
+    review_spec: bool = False,
+    reviewer: bool = False,
 ) -> dict:
-    """Check the inputs, then run the graph from its first step. Returns the final state."""
+    """Check the inputs, then run the graph from its first step. Returns the final state.
+
+    ``repairs`` is how many times the engineer may repair a project the gate
+    fails, given what the gate found; none by default. ``architect`` has the
+    architect agent write a spec for the engineer first, and ``review_spec``
+    has the run wait for a person to approve it (see ``approve``). ``reviewer``
+    has the reviewer agent advise on a project the gate passes.
+    """
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise RunError(f"the agent definitions are not in {PLUGIN_DIR}; run from a clone")
     load_declaration(checks)
@@ -148,6 +183,10 @@ def start(
         out=str(out.resolve()),
         cross_source=cross_source,
         isolation="unisolated" if sandbox.name == "none" else "bubblewrap",
+        repairs=repairs,
+        architect=architect,
+        review_spec=review_spec,
+        reviewer=reviewer,
     )
     budget = Budget(rules)
     begin = {
@@ -173,15 +212,77 @@ def saved(out: Path) -> tuple[dict, tuple[str, ...], list[str]]:
     return snapshot.values, tuple(snapshot.next), errors
 
 
-def resume(out: Path, claude: str = "claude") -> dict:
-    """Carry a stopped run on from the step it was in. Returns the final state."""
+def asked(out: Path) -> dict | None:
+    """What a run waits for a person to decide, or None if it is not waiting."""
+    path = Path(out) / CHECKPOINT_FILE
+    if not path.is_file():
+        raise RunError(f"no run is saved in {out}")
+    with open_checkpoints(path) as saver:
+        snapshot = (
+            build_graph(None)
+            .compile(checkpointer=saver)
+            .get_state(config(Path(out).resolve().name))
+        )
+    for task in snapshot.tasks:
+        for pause in task.interrupts:
+            return pause.value
+    return None
+
+
+def resume(out: Path, claude: str = "claude", answer: dict | None = None) -> dict:
+    """Carry a stopped run on from the step it was in. Returns the final state.
+
+    A run waiting for approval waits again unless ``answer`` gives the decision.
+    """
     state, pending, _ = saved(out)
     if not pending:
         return state
     request = EngineeringRequest.load(state["request"])
     sandbox = default_sandbox(unisolated=request.isolation == "unisolated")
     kit = toolkit(request, _claude(claude), sandbox, restored(state, ROLES))
-    return _invoke(request, None, kit)
+    return _invoke(request, None if answer is None else Command(resume=answer), kit)
+
+
+def decide(out: Path, answer: dict, claude: str = "claude") -> dict:
+    """Give a waiting run a person's decision on its spec, and carry it on."""
+    waiting = asked(out)
+    if waiting is None:
+        raise RunError(f"the run in {out} is not waiting for approval")
+    # The approval is for the spec the run showed; the run checks the file still holds it.
+    return resume(out, claude, {**answer, "sha256": waiting["sha256"]})
+
+
+def read_contract(path: Path) -> dict:
+    """A contract a person wrote, as JSON; it is checked and counted by the run."""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RunError(f"cannot read the contract {path}: {error}") from None
+
+
+def waiting_text(out: Path, waiting: dict) -> str:
+    """What a waiting run shows: the spec to read and the commands to decide."""
+    lines = ["status: waiting for approval of the spec"]
+    if waiting.get("refused"):
+        lines.append(f"last answer refused: {waiting['refused']}")
+    if waiting["spec"] is None:
+        lines.append(f"no spec: {waiting['missing']}")
+        if waiting.get("answer"):
+            lines.append(
+                f"the architect's answer, to correct and approve as your own contract: "
+                f"{waiting['answer']} (structured_output)"
+            )
+    else:
+        lines.append(f"spec: {waiting['spec']}")
+        lines.append(f"sha256: {waiting['sha256']}")
+        contract = Path(waiting["spec"]).with_name("contract.json")
+        lines.append(f"the contract it was written from: {contract}")
+    lines.append(f"approve with: python -m tenx.run approve --out {out}")
+    lines.append(
+        f"or approve your own contract: python -m tenx.run approve --out {out} --contract <file>"
+    )
+    lines.append(f"reject with: python -m tenx.run reject --out {out} --reason <text>")
+    return "\n".join(lines) + "\n"
 
 
 def describe(out: Path) -> str:
@@ -189,7 +290,10 @@ def describe(out: Path) -> str:
     state, pending, errors = saved(out)
     status = state.get("status", "running")
     lines = [f"run: {state['run_id']}"]
-    if pending:
+    waiting = asked(out)
+    if waiting is not None:
+        lines += waiting_text(out, waiting).splitlines()
+    elif pending:
         lines.append(f"status: stopped part way; next step: {', '.join(pending)}")
         lines += [f"error: {error}" for error in errors]
         lines.append(f"resume with: python -m tenx.run resume --out {out}")
@@ -221,6 +325,16 @@ def summary(state: dict) -> str:
     if "gate" in attempts:
         gate = out / "gate" / f"attempt-{attempts['gate']}" / GATE_REPORT_FILE
         text += "\n" + gate.read_text(encoding="utf-8")
+    review = (state.get("artefacts") or {}).get("review")
+    if review is not None:
+        text += "\n" + Path(review["path"]).read_text(encoding="utf-8")
+        text += f"(advice only; saved as {review['path']})\n"
+    elif request.reviewer:
+        notes = [
+            item["claim"] for item in state.get("findings") or [] if item["agent"] == "reviewer"
+        ]
+        if notes:
+            text += f"\nreview: {notes[-1]}\n"
     sandbox = json.loads((out / USAGE_FILE).read_text(encoding="utf-8")).get("sandbox")
     text += "\n" + render_usage(run_ledger(state, ROLES, sandbox))
     text += f"\nsandbox: {sandbox}\n"
@@ -241,6 +355,34 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="run the cross-source agent before the engineer (on unless --no-cross-source)",
     )
+    run.add_argument(
+        "--architect",
+        action="store_true",
+        help="have the architect agent write a spec (SPEC.md) for the engineer first, "
+        "after the cross-source agent; its rules are counted on the raw files in the sandbox",
+    )
+    run.add_argument(
+        "--review-spec",
+        action="store_true",
+        help="with --architect, wait after the spec is written for you to approve, edit or "
+        "reject it before the engineer starts",
+    )
+    run.add_argument(
+        "--reviewer",
+        action="store_true",
+        help="have the reviewer agent read a project the gate passes and advise on what the "
+        "checks cannot see; its advice changes neither the verdict nor the exit status",
+    )
+    run.add_argument(
+        "--repairs",
+        type=int,
+        choices=range(MAX_REPAIRS + 1),
+        default=0,
+        metavar="N",
+        help="if the gate fails the project, let the engineer repair it up to N times "
+        f"(0 to {MAX_REPAIRS}), told what failed; stops early when a repair fails no fewer "
+        "checks than before (default 0)",
+    )
     run.add_argument("--policy", type=Path, help="JSON spending policy (ceiling and caps)")
     run.add_argument(
         "--unisolated",
@@ -251,7 +393,19 @@ def main(argv: list[str] | None = None) -> int:
     for name, text in (("resume", "carry a stopped run on"), ("status", "say where a run is")):
         command = commands.add_parser(name, help=text)
         command.add_argument("--out", type=Path, required=True, help="the run's folder")
+    approve = commands.add_parser("approve", help="carry a waiting run on with its spec")
+    approve.add_argument("--out", type=Path, required=True, help="the run's folder")
+    approve.add_argument(
+        "--contract",
+        type=Path,
+        help="a contract of your own (JSON) to use instead; it is checked and counted first",
+    )
+    reject = commands.add_parser("reject", help="stop a waiting run before the engineer")
+    reject.add_argument("--out", type=Path, required=True, help="the run's folder")
+    reject.add_argument("--reason", default="", help="why, kept with the run")
     args = parser.parse_args(argv)
+    if args.command == "run" and args.review_spec and not args.architect:
+        parser.error("--review-spec needs --architect, which writes the spec")
     try:
         if args.command == "status":
             print(describe(args.out), end="")
@@ -260,8 +414,25 @@ def main(argv: list[str] | None = None) -> int:
             rules = spending.load(args.policy) if args.policy else None
             sandbox = default_sandbox(unisolated=args.unisolated)
             state = start(
-                args.raw, args.goal, args.checks, args.out, args.cross_source, rules, sandbox
+                args.raw,
+                args.goal,
+                args.checks,
+                args.out,
+                args.cross_source,
+                rules,
+                sandbox,
+                repairs=args.repairs,
+                architect=args.architect,
+                review_spec=args.review_spec,
+                reviewer=args.reviewer,
             )
+        elif args.command == "approve":
+            answer = {"decision": "approve"}
+            if args.contract is not None:
+                answer["contract"] = read_contract(args.contract)
+            state = decide(args.out, answer)
+        elif args.command == "reject":
+            state = decide(args.out, {"decision": "reject", "reason": args.reason})
         else:
             state = resume(args.out)
     except (RunError, PolicyError, SandboxError, GateError) as error:
@@ -271,6 +442,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         print(f"the run is saved; resume with: python -m tenx.run resume --out {args.out}")
         return 2
+    if "__interrupt__" in state:
+        (pause,) = state["__interrupt__"]
+        print(waiting_text(args.out, pause.value), end="")
+        return WAITING
     print(summary(state), end="")
     return EXIT[state["status"]]
 
