@@ -1065,8 +1065,22 @@ error: 64 runs to do, estimated at US$20.48, at most US$86.40 at each agent call
 In a simulation of the rule with 32 runs per arm and the run without the
 Architect passing one run in eight, a rise to one in two is found about nine
 times in ten, a rise to three in eight about six times in ten, and a
-comparison of two equal arms says "helps" about once in a hundred. No live
-Architect comparison has been run yet.
+comparison of two equal arms says "helps" about once in a hundred.
+
+Run live on 2026-11-11 (Claude Code 2.1.322, Sonnet; the report as the tool
+printed it, first lines; costs are Claude Code's estimates, not a bill):
+
+```
+arm        verdict    runs  passes  rate  95% interval  P(> graph)  US$ per run  US$ per pass
+graph      baseline     32       2    6%     2% to 20%           -       0.1674        2.6785
+architect  not shown    32       5   16%     7% to 32%       0.871       0.2459        1.5739
+```
+
+19 of the 32 specs agreed with the declaration on every model; in the other
+13 runs the engineer got no spec, because a rule for leaving rows out read a
+second table (which the counting allows only from the model's own source,
+9 runs) or a money total named its column with the table in front (4 runs).
+So the Architect stays off by default.
 
 ### Equivalence with the earlier runner
 
@@ -1243,7 +1257,26 @@ $ make repairs
 error: 32 runs to do, estimated at US$19.20, at most US$72.00 at each agent call's cap (Claude Code's own estimates); above US$5.00, so it needs approval: run it again with --approve-cost to go ahead
 ```
 
-No live repair comparison has been run yet.
+Run live on 2026-11-11 (Claude Code 2.1.322, Sonnet; costs are Claude
+Code's estimates, not a bill):
+
+```
+runs               count
+passed first time     11
+repaired              21
+failed                 0
+
+pass rate: first round 34%, with repairs 100%
+difference: +65.6 points, 95% interval (Tango) +47.9 to +79.6
+verdict: better
+
+US$ per pass: first round 0.2771, with repairs 0.1516
+with repairs / first round: 95% interval (bootstrap over runs) 0.330 to 0.729
+```
+
+Every first round that failed was repaired by its first repair; none
+needed a second. Repairs stay off by default until the default is changed
+on purpose.
 
 ## Review packet
 
