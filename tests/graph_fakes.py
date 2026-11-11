@@ -36,6 +36,9 @@ CROSS_SOURCE = Role(
 ARCHITECT = Role(
     "architect", "tenx:architect", "Write the spec.", (), 15, json_schema={}, kind="cross-source"
 )
+REVIEWER = Role(
+    "reviewer", "tenx:reviewer", "Review the project.", (), 20, json_schema={}, kind="cross-source"
+)
 # One table, as a profiler describes it.
 PROFILE_JSON = {"table": "shop.orders", "columns": [{"name": "id"}, {"name": "email"}]}
 ANSWER = {
@@ -75,6 +78,24 @@ CONTRACT = {
 }
 
 
+# The reviewer's answer about the stand-in engineer's one model.
+REVIEW = {
+    "verdict": "request changes",
+    "summary": "The orders model holds a constant.",
+    "findings": [
+        {
+            "severity": "blocking",
+            "model": "orders",
+            "column": "",
+            "file": "models/orders.sql",
+            "line": 1,
+            "claim": "The model selects the number 1 instead of the orders.",
+            "evidence": "Line 1: select 1.",
+        }
+    ],
+}
+
+
 def report(cost=0.1, turns=5, answer=None, basis="list") -> dict:
     """A report as ``claude -p --output-format json`` gives one."""
     made = {
@@ -111,6 +132,7 @@ class Fakes:
             "cross-source": report(0.07, 9, ANSWER),
             "architect": report(0.09, 10, CONTRACT),
             "engineer": report(0.11, 18),
+            "reviewer": report(0.06, 15, REVIEW),
         }
         self.verdict = True
         # When set, how many checks fail at each validation in turn (0 passes).
@@ -209,7 +231,7 @@ class Fakes:
 
         plugin = out / "plugin"
         (plugin / "agents").mkdir(parents=True, exist_ok=True)
-        for agent in ("engineer", "cross-source", "architect"):
+        for agent in ("engineer", "cross-source", "architect", "reviewer"):
             (plugin / "agents" / f"{agent}.md").write_text(f"You are the {agent}.\n")
         return Toolkit(
             profiler=port(
@@ -235,7 +257,12 @@ class Fakes:
                 run=fakes.run_agent,
             ),
             sandbox=Unisolated(),
-            roles={"engineer": ENGINEER, "cross-source": CROSS_SOURCE, "architect": ARCHITECT},
+            roles={
+                "engineer": ENGINEER,
+                "cross-source": CROSS_SOURCE,
+                "architect": ARCHITECT,
+                "reviewer": REVIEWER,
+            },
             mounts=lambda workspace, raw: Mounts(workspace=workspace),
             plugin=plugin,
             hidden=(),

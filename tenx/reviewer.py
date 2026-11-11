@@ -21,6 +21,7 @@ __all__ = [
     "APPROVE",
     "BLOCKING",
     "REQUEST_CHANGES",
+    "REVIEW_FILE",
     "SCHEMA",
     "SEVERITIES",
     "VERDICTS",
@@ -31,6 +32,7 @@ __all__ = [
     "review_from_report",
 ]
 
+REVIEW_FILE = "REVIEW.md"
 APPROVE, REQUEST_CHANGES = "approve", "request changes"
 VERDICTS = (APPROVE, REQUEST_CHANGES)
 BLOCKING, ADVISORY = "blocking", "advisory"

@@ -2,6 +2,8 @@
 
 With a spec review, the run waits after the architect for a person to
 approve, edit or reject the spec (``review``) before the engineer starts.
+With the reviewer, a project the gate passed is read by the reviewer agent,
+whose advice is recorded and changes no verdict (``reviewer``).
 
 Each step is a node. The graph is saved after every step (``durability="sync"``),
 so a run that stops part way, by a crash or a closed laptop, resumes at the
@@ -32,7 +34,8 @@ from pathlib import Path
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from tenx import artefacts
+from tenx import artefacts, review
+from tenx import reviewer as advice
 from tenx.contract import ContractError, check_contract, contract_from_report
 from tenx.cross_source import NOTES_FILE, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
@@ -59,6 +62,7 @@ from tenx.ports import (
     STRUCTURED_ANSWER,
     VALIDATE,
     AgentBackend,
+    CheckResult,
     KeptRows,
     Mounts,
     PlatformError,
@@ -67,6 +71,7 @@ from tenx.ports import (
     SourceProfiler,
     TransformEngine,
     UnsupportedCapability,
+    ValidationReport,
     Validator,
     require,
 )
@@ -88,11 +93,13 @@ SPEC_FILE = "SPEC.md"
 CONTRACT_FILE = "contract.json"
 COUNTS_FILE = "counts.json"
 COUNT_DIR = "count"
+CHECKS_FILE = "checks.json"
+PACKET_DIR = "review-packet"
 
 PLAN = "plan"
 PROFILE_STEP, OVERLAP_STEP, CROSS_SOURCE_STEP = "profile", "overlap", "cross-source"
 ARCHITECT_STEP, REVIEW_STEP, ENGINEER_STEP = "architect", "review", "engineer"
-GATE_STEP, REPORT_STEP = "gate", "report"
+GATE_STEP, REVIEWER_STEP, REPORT_STEP = "gate", "reviewer", "report"
 WORK_STEPS = (
     PROFILE_STEP,
     OVERLAP_STEP,
@@ -101,6 +108,7 @@ WORK_STEPS = (
     REVIEW_STEP,
     ENGINEER_STEP,
     GATE_STEP,
+    REVIEWER_STEP,
 )
 
 
@@ -113,7 +121,7 @@ class Toolkit:
     validator: Validator
     backend: AgentBackend
     sandbox: Sandbox
-    # The agents by step: "cross-source", "architect" and "engineer".
+    # The agents by step: "cross-source", "architect", "engineer" and "reviewer".
     roles: Mapping[str, Role]
     # What an agent working in a folder may see; True also shows it the raw files.
     mounts: Callable[[Path, bool], Mounts]
@@ -144,7 +152,8 @@ def steps_for(request: EngineeringRequest) -> tuple[str, ...]:
     middle += (ARCHITECT_STEP,) if request.architect else ()
     middle += (REVIEW_STEP,) if request.review_spec else ()
     overlap = (OVERLAP_STEP,) if middle else ()
-    return (PROFILE_STEP, *overlap, *middle, ENGINEER_STEP, GATE_STEP, REPORT_STEP)
+    after = (REVIEWER_STEP,) if request.reviewer else ()
+    return (PROFILE_STEP, *overlap, *middle, ENGINEER_STEP, GATE_STEP, *after, REPORT_STEP)
 
 
 def needs(toolkit: Toolkit, steps: tuple[str, ...]) -> list[tuple[object, str]]:
@@ -160,6 +169,7 @@ def needs(toolkit: Toolkit, steps: tuple[str, ...]) -> list[tuple[object, str]]:
         ],
         ENGINEER_STEP: [(toolkit.engine, SCAFFOLD), (toolkit.backend, RUN_AGENT)],
         GATE_STEP: [(toolkit.validator, VALIDATE)],
+        REVIEWER_STEP: [(toolkit.backend, RUN_AGENT), (toolkit.backend, STRUCTURED_ANSWER)],
     }
     return [need for step in steps for need in wanted.get(step, [])]
 
@@ -666,7 +676,12 @@ def gate_node(toolkit: Toolkit):
             toolkit.hidden,
         )
         artefacts.write_text(attempt.folder / GATE_REPORT_FILE, report.text)
-        artefacts.finish(attempt, artefacts.COMPLETE, [GATE_REPORT_FILE])
+        kept = [GATE_REPORT_FILE]
+        if request.reviewer:
+            # What each check lets an agent be told, for the reviewer's packet.
+            artefacts.write_text(attempt.folder / CHECKS_FILE, _checks_json(report))
+            kept.append(CHECKS_FILE)
+        artefacts.finish(attempt, artefacts.COMPLETE, kept)
         saved = ArtefactRef.of("gate report", attempt.folder / GATE_REPORT_FILE, attempt.number)
         verdict = ValidationResult.of(toolkit.validator.name, report, saved)
         return plain(
@@ -680,6 +695,128 @@ def gate_node(toolkit: Toolkit):
     return gate
 
 
+def _checks_json(report: ValidationReport) -> str:
+    checks = [
+        {
+            "check": result.check,
+            "subject": result.subject,
+            "status": result.status,
+            "feedback": result.feedback,
+        }
+        for result in report.results
+    ]
+    return json.dumps({"passed": report.passed, "checks": checks}, indent=2) + "\n"
+
+
+def _passed_report(path: Path) -> ValidationReport:
+    """The validation as the packet needs it: each check and what an agent may be told."""
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    results = tuple(
+        CheckResult(item["check"], item["subject"], item["status"], "", {}, item["feedback"])
+        for item in saved["checks"]
+    )
+    return ValidationReport(results, saved["passed"], "")
+
+
+def _no_review(update: dict, problem: str) -> dict:
+    finding = AgentFinding(
+        agent=REVIEWER_STEP, claim=f"no review: {problem}", kind="fact", confidence="high"
+    )
+    return plain({**update, "findings": [finding.dump()]})
+
+
+def _review_findings(answer: dict, written: Path) -> list[dict]:
+    verdict = AgentFinding(
+        agent=REVIEWER_STEP,
+        claim=f"the reviewer's verdict: {answer['verdict']}. {answer['summary']}",
+        kind="recommendation",
+        confidence="medium",
+        evidence=(Evidence(kind="file", ref=str(written)),),
+    )
+    found = [verdict]
+    for item in answer["findings"]:
+        column = item["column"].strip()
+        blocking = item["severity"] == advice.BLOCKING
+        found.append(
+            AgentFinding(
+                agent=REVIEWER_STEP,
+                claim=f"{item['severity']}: {item['claim']}",
+                kind="inference" if blocking else "hypothesis",
+                confidence="medium" if blocking else "low",
+                evidence=(
+                    Evidence(
+                        kind="file", ref=f"{item['file']}:{item['line']}", detail=item["evidence"]
+                    ),
+                ),
+                assets=(f"{item['model']}.{column}" if column else item["model"],),
+            )
+        )
+    return [finding.dump() for finding in found]
+
+
+def reviewer_node(toolkit: Toolkit):
+    """The reviewer agent reads the packet of a project the validator passed, and advises.
+
+    Its advice is recorded as findings and ``REVIEW.md``; the run's status
+    stays the validator's. A packet that cannot be made, an answer that fails
+    its check, a crash or a ceiling that cannot hold the call each leave the
+    run without a review, and say why.
+    """
+
+    def reviewer(state: GraphState) -> dict:
+        request = _request(state)
+        out = Path(request.out)
+        found = state["artefacts"]
+        gate = Path(found["gate report"]["path"]).parent
+        spec = found.get(APPROVED if request.review_spec else "spec")
+        packet_dir = _fresh(out / PACKET_DIR)
+        try:
+            packet = review.build(
+                packet_dir,
+                goal=Path(request.goal),
+                profiles=Path(found["profiles"]["path"]),
+                project=Path(found["project"]["path"]),
+                report=_passed_report(gate / CHECKS_FILE),
+                spec=Path(spec["path"]) if spec is not None else None,
+                secrets=(Path(request.declaration), out / GATE_STEP),
+            )
+        except review.PacketError as problem:
+            return _no_review({}, str(problem))
+
+        def prepare(work: Path) -> None:
+            shutil.copytree(packet.folder, work, dirs_exist_ok=True)
+
+        call = call_agent(toolkit, state, REVIEWER_STEP, {"packet": packet.folder}, prepare)
+        if call.stopped:
+            # The run has its verdict; a review it cannot afford leaves it as it is.
+            return _no_review({"costs": call.update["costs"]}, call.update["reason"])
+        prefix = f"{review.PROJECT_DIR}/"
+        files = {
+            name[len(prefix) :]: (packet.folder / name).read_text(
+                encoding="utf-8", errors="replace"
+            )
+            for name in packet.files
+            if name.startswith(prefix)
+        }
+        try:
+            answer = advice.review_from_report(call.report, files)
+        except advice.ReviewError as problem:
+            return _no_review(call.update, str(problem))
+        written = call.folder / advice.REVIEW_FILE
+        artefacts.write_text(written, advice.render(answer))
+        number = call.update["attempts"][REVIEWER_STEP]
+        ref = ArtefactRef.of("review", written, attempt=number).dump()
+        return plain(
+            {
+                **call.update,
+                "artefacts": {"review": ref},
+                "findings": _review_findings(answer, written),
+            }
+        )
+
+    return reviewer
+
+
 def ledger(state: GraphState, roles: Mapping[str, Role], sandbox: str) -> Ledger:
     """Each agent's usage in the attempt the run used, in the order they ran."""
     out = Path(_request(state).out)
@@ -687,7 +824,7 @@ def ledger(state: GraphState, roles: Mapping[str, Role], sandbox: str) -> Ledger
         (cost["node"], cost["attempt"]): cost["outcome"] for cost in state.get("costs") or []
     }
     used = []
-    for step in (CROSS_SOURCE_STEP, ARCHITECT_STEP, ENGINEER_STEP):
+    for step in (CROSS_SOURCE_STEP, ARCHITECT_STEP, ENGINEER_STEP, REVIEWER_STEP):
         last = (state.get("attempts") or {}).get(step)
         if last is None:
             continue
@@ -746,6 +883,9 @@ def _after_gate(state: GraphState) -> str:
     checked = [ValidationResult.load(item) for item in state.get("validations") or []]
     if checked and decide(checked, _request(state).repairs).repair:
         return ENGINEER_STEP
+    # Only a project the validator passed is reviewed.
+    if checked and checked[-1].passed and _request(state).reviewer:
+        return REVIEWER_STEP
     return REPORT_STEP
 
 
@@ -760,6 +900,7 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
         REVIEW_STEP: review_node(toolkit),
         ENGINEER_STEP: engineer_node(toolkit),
         GATE_STEP: gate_node(toolkit),
+        REVIEWER_STEP: reviewer_node(toolkit),
         REPORT_STEP: report_node(toolkit),
         **(nodes or {}),
     }
