@@ -382,6 +382,7 @@ def request(**changes) -> dict:
         "isolation": "bubblewrap",
         "repairs": 0,
         "review_spec": False,
+        "reviewer": False,
     }
     value.update(changes)
     return value
@@ -410,6 +411,7 @@ class RequestAndPlanTest(unittest.TestCase):
             (request(repairs="2"), "repairs:"),
             (request(review_spec="yes"), "review_spec:"),
             (request(review_spec=True), "review_spec needs the architect"),
+            (request(reviewer="yes"), "reviewer:"),
         ]:
             with self.subTest(expected=expected), self.assertRaises(RecordError) as caught:
                 EngineeringRequest.load(value)
@@ -434,6 +436,17 @@ class RequestAndPlanTest(unittest.TestCase):
         with self.assertRaises(RecordError) as caught:
             ExecutionPlan.load({"workflow": "build", "steps": ["review", "architect"]})
         self.assertIn("got review, architect", str(caught.exception))
+
+    def test_the_reviewer_comes_after_the_gate_and_is_off_unless_asked(self):
+        self.assertFalse(EngineeringRequest.load(request()).reviewer)
+        self.assertTrue(EngineeringRequest.load(request(reviewer=True)).reviewer)
+        steps = ["profile", "engineer", "gate", "reviewer", "report"]
+        self.assertEqual(
+            ExecutionPlan.load({"workflow": "build", "steps": steps}).steps[3], "reviewer"
+        )
+        with self.assertRaises(RecordError) as caught:
+            ExecutionPlan.load({"workflow": "build", "steps": ["reviewer", "gate"]})
+        self.assertIn("got reviewer, gate", str(caught.exception))
 
     def test_a_plan_takes_its_steps_once_in_order(self):
         steps = ["profile", "overlap", "cross-source", "engineer", "gate", "report"]

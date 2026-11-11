@@ -350,6 +350,9 @@ class EngineeringRequest(Record):
     # Whether the run waits for a person to approve, edit or reject the
     # architect's spec before the engineer starts.
     review_spec: bool = False
+    # Whether the reviewer agent reads a project the validator passed and
+    # advises on what the checks cannot see; its advice changes no verdict.
+    reviewer: bool = False
 
     @model_validator(mode="after")
     def _review_needs_a_spec(self):
@@ -368,6 +371,7 @@ STEPS = (
     "review",
     "engineer",
     "gate",
+    "reviewer",
     "report",
 )
 
