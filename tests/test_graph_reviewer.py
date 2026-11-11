@@ -2,12 +2,14 @@
 
 import json
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
-from graph_fakes import Fakes, GraphCase
+from graph_fakes import Fakes, GraphCase, report
 
 from tenx.domain import AgentFinding
 from tenx.graph.build import ledger, steps_for
+from tenx.policy import Policy
 
 # The stand-in reviewer's answer, as REVIEW.md shows it.
 REVIEW_TEXT = """# Review
@@ -140,6 +142,59 @@ class ReviewerStepTest(ReviewerCase, unittest.TestCase):
         self.assertNotIn("reviewer", fakes.calls)
         for name in ("reviewer", "review-packet", "gate/attempt-1/checks.json"):
             self.assertFalse((self.out / name).exists(), name)
+
+
+class NoReviewTest(ReviewerCase, unittest.TestCase):
+    def assertNoReview(self, state, reason: str) -> None:
+        self.assertEqual(state["status"], "passed")
+        self.assertEqual(self.claims(state), [f"no review: {reason}"])
+        self.assertNotIn("review", state["artefacts"])
+
+    def test_an_answer_that_fails_its_check_gives_no_review(self):
+        fakes = Fakes()
+        wrong = json.loads(json.dumps(fakes.reports["reviewer"]))
+        wrong["structured_output"]["findings"][0]["line"] = 2
+        fakes.reports["reviewer"] = wrong
+        state = self.run_graph(fakes)
+        self.assertNoReview(state, "finding 1 cites line 2 of models/orders.sql, which has 1 line")
+
+    def test_a_crashed_reviewer_is_charged_and_gives_no_review(self):
+        fakes = Fakes()
+        fakes.reports["reviewer"] = None
+        state = self.run_graph(fakes)
+        self.assertNoReview(state, "the reviewer gave no report")
+        reviewer = [cost for cost in state["costs"] if cost["node"] == "reviewer"]
+        self.assertEqual([cost["charged_usd"] for cost in reviewer], ["0.40"])
+
+    def test_a_copy_of_a_hidden_file_gives_no_packet_and_no_call(self):
+        fakes = Fakes()
+        hidden = self.declaration.read_bytes()
+        fakes.engineer_also = lambda work: (work / "models" / "copy.sql").write_bytes(hidden)
+        state = self.run_graph(fakes)
+        self.assertNotIn("reviewer", fakes.calls)
+        self.assertNoReview(
+            state, "project/models/copy.sql has the same bytes as a file hidden from agents"
+        )
+
+    def test_a_copy_of_a_gate_file_gives_no_packet(self):
+        fakes = Fakes()
+        fakes.engineer_also = lambda work: (work / "models" / "built.sql").write_text("tables\n")
+        state = self.run_graph(fakes)
+        self.assertNotIn("reviewer", fakes.calls)
+        self.assertEqual(
+            self.claims(state),
+            ["no review: project/models/built.sql has the same bytes as a file hidden from agents"],
+        )
+
+    def test_a_review_the_ceiling_cannot_hold_leaves_the_verdict(self):
+        fakes = Fakes()
+        fakes.reports["engineer"] = report(0.50, 18)
+        toolkit = fakes.toolkit(self.out, policy=Policy(run_usd=Decimal("0.80")))
+        state = self.run_graph(fakes, toolkit=toolkit)
+        self.assertNotIn("reviewer", fakes.calls)
+        self.assertEqual(state["status"], "passed")
+        [claim] = self.claims(state)
+        self.assertTrue(claim.startswith("no review: stopped: budget"), claim)
 
 
 if __name__ == "__main__":

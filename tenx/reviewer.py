@@ -116,7 +116,8 @@ def _check_finding(finding, where: str, files: Mapping[str, str], models: dict) 
         raise ReviewError(f"{where} line is not a whole number")
     count = len(files[file].splitlines())
     if not 1 <= line <= count:
-        raise ReviewError(f"{where} cites line {line} of {file}, which has {count} lines")
+        lines = f"{count} line{'' if count == 1 else 's'}"
+        raise ReviewError(f"{where} cites line {line} of {file}, which has {lines}")
     if column and not _names(files[file], column):
         raise ReviewError(f"{where} names column {column!r}, which {file} does not mention")
 
