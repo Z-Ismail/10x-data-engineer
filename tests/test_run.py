@@ -219,6 +219,21 @@ class CommandLineTest(unittest.TestCase):
             ["cross-source", "engineer", "engineer repair 1"],
         )
 
+    def test_a_failing_run_is_repaired_by_default(self):
+        self.first_models = str(self.whole_address)
+        done = self.start(False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("engineer repair 1  success", done.stdout)
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(len(usage["roles"]), 3)
+
+    def test_no_repairs_when_turned_off(self):
+        self.first_models = str(self.whole_address)
+        done = self.start(False, "--repairs", "0")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: failed\n"), done.stdout)
+        self.assertFalse((self.out / "engineer" / "attempt-2").exists())
+
     def test_a_run_with_the_architect_gives_the_engineer_the_spec(self):
         done = self.start(False, "--architect")
         self.assertEqual(done.returncode, 0, done.stderr)
