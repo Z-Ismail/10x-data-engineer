@@ -41,14 +41,17 @@ open, and say so in `assumptions`. For each model:
   `name` and a `reason` from the goal or the profiles. `rule` is `where`
   with `where` a SQL condition, in DuckDB SQL, that is true for the rows to
   leave out, on the raw table's columns as named in its profile (every
-  column of a CSV file is text, so compare with quoted values); or
+  column of a CSV file is text, so compare with quoted values). A rule
+  is a condition on the columns of that one table alone: it names no
+  table, its own included, and has no subquery or join, so a row it
+  leaves out must be told apart by its own values; or
   `duplicate_rows` with `where` empty, for rows that are exact copies of
   another row. A model built on staging models leaves out what they leave
   out, so list those exclusions again on its own source.
 - `totals`: for a money column that must add up to the raw data, the
   model's `column`, the raw `source_column`, and the currency column on
   each side as `by` and `source_by`; empty text for both when there is
-  none.
+  none. Give raw columns by their name in the profile, without the table.
 
 Keep every source row that the goal and the profiles give no reason to
 leave out: rows that look wrong are tidied, not dropped. For a model that
