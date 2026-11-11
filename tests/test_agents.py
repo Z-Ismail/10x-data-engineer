@@ -210,6 +210,13 @@ class ArchitectAgentTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(f"`{name}`", self.body)
 
+    def test_keeps_rules_to_their_own_table_and_columns_unqualified(self):
+        # The rows a rule leaves out are counted, and checked, on its own table alone.
+        text = " ".join(self.body.split())
+        self.assertIn("A rule is a condition on the columns of that one table alone", text)
+        self.assertIn("has no subquery or join", text)
+        self.assertIn("by their name in the profile, without the table", text)
+
     def test_keeps_the_role_in_step_with_the_contract(self):
         self.assertEqual(ARCHITECT.agent, "tenx:architect")
         self.assertIs(ARCHITECT.json_schema, SCHEMA)

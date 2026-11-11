@@ -8,7 +8,9 @@
 
 ``run`` does what ``python -m tenx.engineer`` does (profile the raw files,
 compare their columns, the cross-source agent, the engineer, then the gate;
-with ``--architect``, the architect agent writes a spec before the engineer)
+with ``--architect``, the architect agent writes a spec before the engineer;
+if the gate fails the project, the engineer repairs it up to twice unless
+``--repairs`` says otherwise)
 as steps of a graph whose state is saved in ``<out>/checkpoints.sqlite``
 after each one. If the run stops part way, because the process was killed
 or a step failed, ``resume`` carries on from the step it was in: finished
@@ -78,6 +80,10 @@ from tenx.ports import PlatformError
 from tenx.sandbox import Sandbox, SandboxError, default_sandbox
 
 EXIT = {"passed": 0, "failed": 1, "stopped": 3}
+# Repairs on the command line unless turned off: measured on 2026-11-11 to
+# raise the engineer's pass rate and lower its cost per pass. The library
+# function keeps none, so comparisons measure what they ask for.
+DEFAULT_REPAIRS = 2
 WAITING = 4
 ROLES = {
     "cross-source": CROSS_SOURCE,
@@ -377,11 +383,11 @@ def main(argv: list[str] | None = None) -> int:
         "--repairs",
         type=int,
         choices=range(MAX_REPAIRS + 1),
-        default=0,
+        default=DEFAULT_REPAIRS,
         metavar="N",
         help="if the gate fails the project, let the engineer repair it up to N times "
         f"(0 to {MAX_REPAIRS}), told what failed; stops early when a repair fails no fewer "
-        "checks than before (default 0)",
+        f"checks than before (default {DEFAULT_REPAIRS}; 0 turns repairs off)",
     )
     run.add_argument("--policy", type=Path, help="JSON spending policy (ceiling and caps)")
     run.add_argument(

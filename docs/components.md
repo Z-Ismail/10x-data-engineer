@@ -795,8 +795,8 @@ stop counts against the ceiling again.
 
 ### Repairs
 
-`run --repairs N` (0 to 3, default 0) lets the engineer repair its project
-when the gate fails it. The repair is a new engineer attempt, in its own
+`run --repairs N` (0 to 3, default 2 since the comparison below; `--repairs 0`
+turns it off) lets the engineer repair its project when the gate fails it. The repair is a new engineer attempt, in its own
 folder, that starts from the project the gate just checked: its models and
 project files, without the database, `target/` and logs of its own builds,
 and with the same goal, profiles and `JOINS.md` as before. A link the
@@ -907,13 +907,15 @@ before the engineer. It works in its own folder with the goal, the source
 profiles, the overlap report and the cross-source agent's `JOINS.md`, with
 read-only tools, and answers with a spec contract: for each model the goal
 names, what one row is, its key, the raw table its rows come from, the rows
-to leave out (each a SQL condition on the raw table, or exact copies of
-another row) with the reason, where each column comes from, and which money
+to leave out (each a SQL condition on the raw table's own columns, with no
+other table, subquery or join, or exact copies of another row) with the reason, where each column comes from, and which money
 column must add up to the raw data; then the assumptions it made and at
 most three questions for the requester.
 
 The run checks the contract against the profiles (every table and column it
-names must exist, a staging model takes columns only from its own table),
+names must exist, a staging model takes columns only from its own table,
+and a rule may name no table; a money column written with its own table in
+front is kept by its name),
 then counts each rule on the raw files, in a separate process in the
 sandbox (see [security](security.md)). A checked and counted contract is
 kept as `architect/attempt-<n>/contract.json`, with what each model keeps
@@ -1080,7 +1082,10 @@ architect  not shown    32       5   16%     7% to 32%       0.871       0.2459 
 13 runs the engineer got no spec, because a rule for leaving rows out read a
 second table (which the counting allows only from the model's own source,
 9 runs) or a money total named its column with the table in front (4 runs).
-So the Architect stays off by default.
+So the Architect stays off by default. Since then, the Architect is told that
+a rule is a condition on its own table's columns, the contract check refuses a
+rule that names a table before anything is counted, and a money column written
+with its own table is accepted; the comparison has not been run again.
 
 ### Equivalence with the earlier runner
 
@@ -1275,8 +1280,8 @@ with repairs / first round: 95% interval (bootstrap over runs) 0.330 to 0.729
 ```
 
 Every first round that failed was repaired by its first repair; none
-needed a second. Repairs stay off by default until the default is changed
-on purpose.
+needed a second. On this result the graph run's command line repairs up to
+twice by default; the comparisons still run with the repairs they ask for.
 
 ## Review packet
 
