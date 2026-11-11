@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from pathlib import PurePosixPath
 
 __all__ = [
+    "ADVISORY",
+    "ANSWER_FIELDS",
     "APPROVE",
     "BLOCKING",
     "REQUEST_CHANGES",
