@@ -175,6 +175,17 @@ Notable changes to this project.
 
 ### Changed
 
+- The graph run repairs a project the gate fails by default:
+  `python -m tenx.run run` lets the engineer try again up to twice, told
+  what failed (`--repairs 0` turns it off). Measured on the demo data, the
+  engineer alone passed 32 of 32 runs with repairs against 11 of 32 first
+  rounds. `tenx.run.start` and the comparisons keep their own setting.
+- The Architect is told that a rule for leaving rows out is a condition on
+  its own table's columns, with no table, subquery or join, and to give raw
+  columns without the table. The contract check refuses a rule that names a
+  table, with the reason, before anything is counted, and keeps a money
+  column written with its own table in front by its name.
+
 - A spec's row counts come from `tenx.counting.count_kept` (through the
   source profiler's "count the rows a spec keeps") instead of
   `tenx.spec.count_rows`, which ran the rules in the caller's own process;
