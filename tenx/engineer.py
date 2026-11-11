@@ -77,6 +77,7 @@ from tenx.overlap import overlap_folder, write_report
 from tenx.policy import Policy
 from tenx.ports import AgentRun, Role
 from tenx.profile import ProfileError, profile_folder
+from tenx.reviewer import SCHEMA as REVIEW_SCHEMA
 from tenx.sample import sample
 from tenx.sandbox import (
     Mounts,
@@ -150,6 +151,19 @@ ARCHITECT = Role(
     allowed_tools=(),
     max_turns=15,
     json_schema=CONTRACT_SCHEMA,
+    kind="cross-source",
+)
+
+
+# Reviews a project the gate passed, in the graph run when asked; read-only,
+# and capped as a cross-source call.
+REVIEWER = Role(
+    name="reviewer",
+    agent="tenx:reviewer",
+    prompt="Review the project in project/.",
+    allowed_tools=(),
+    max_turns=20,
+    json_schema=REVIEW_SCHEMA,
     kind="cross-source",
 )
 

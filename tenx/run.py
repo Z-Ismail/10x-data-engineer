@@ -15,6 +15,10 @@ or a step failed, ``resume`` carries on from the step it was in: finished
 steps are not run again, and an agent call that finished before the stop is
 used rather than made again. ``status`` says where a run is.
 
+With ``--reviewer``, a project the gate passes is read by the reviewer agent,
+which advises on what the checks cannot see; its advice is kept as
+``REVIEW.md`` and changes neither the run's status nor its exit status.
+
 With ``--review-spec`` (and ``--architect``) the run waits after the spec is
 written. ``approve`` carries it on with that spec, or with ``--contract``,
 a contract of your own (the architect's is ``contract.json`` beside its
@@ -51,6 +55,7 @@ from tenx.engineer import (
     ENGINEER,
     PLUGIN_COPY_DIR,
     PLUGIN_DIR,
+    REVIEWER,
     TIMEOUT_MINUTES,
     EngineerError,
     mounts,
@@ -74,7 +79,12 @@ from tenx.sandbox import Sandbox, SandboxError, default_sandbox
 
 EXIT = {"passed": 0, "failed": 1, "stopped": 3}
 WAITING = 4
-ROLES = {"cross-source": CROSS_SOURCE, "architect": ARCHITECT, "engineer": ENGINEER}
+ROLES = {
+    "cross-source": CROSS_SOURCE,
+    "architect": ARCHITECT,
+    "engineer": ENGINEER,
+    "reviewer": REVIEWER,
+}
 
 
 class RunError(Exception):
@@ -143,13 +153,15 @@ def start(
     repairs: int = 0,
     architect: bool = False,
     review_spec: bool = False,
+    reviewer: bool = False,
 ) -> dict:
     """Check the inputs, then run the graph from its first step. Returns the final state.
 
     ``repairs`` is how many times the engineer may repair a project the gate
     fails, given what the gate found; none by default. ``architect`` has the
     architect agent write a spec for the engineer first, and ``review_spec``
-    has the run wait for a person to approve it (see ``approve``).
+    has the run wait for a person to approve it (see ``approve``). ``reviewer``
+    has the reviewer agent advise on a project the gate passes.
     """
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise RunError(f"the agent definitions are not in {PLUGIN_DIR}; run from a clone")
@@ -174,6 +186,7 @@ def start(
         repairs=repairs,
         architect=architect,
         review_spec=review_spec,
+        reviewer=reviewer,
     )
     budget = Budget(rules)
     begin = {
@@ -312,6 +325,16 @@ def summary(state: dict) -> str:
     if "gate" in attempts:
         gate = out / "gate" / f"attempt-{attempts['gate']}" / GATE_REPORT_FILE
         text += "\n" + gate.read_text(encoding="utf-8")
+    review = (state.get("artefacts") or {}).get("review")
+    if review is not None:
+        text += "\n" + Path(review["path"]).read_text(encoding="utf-8")
+        text += f"(advice only; saved as {review['path']})\n"
+    elif request.reviewer:
+        notes = [
+            item["claim"] for item in state.get("findings") or [] if item["agent"] == "reviewer"
+        ]
+        if notes:
+            text += f"\nreview: {notes[-1]}\n"
     sandbox = json.loads((out / USAGE_FILE).read_text(encoding="utf-8")).get("sandbox")
     text += "\n" + render_usage(run_ledger(state, ROLES, sandbox))
     text += f"\nsandbox: {sandbox}\n"
@@ -343,6 +366,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="with --architect, wait after the spec is written for you to approve, edit or "
         "reject it before the engineer starts",
+    )
+    run.add_argument(
+        "--reviewer",
+        action="store_true",
+        help="have the reviewer agent read a project the gate passes and advise on what the "
+        "checks cannot see; its advice changes neither the verdict nor the exit status",
     )
     run.add_argument(
         "--repairs",
@@ -395,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
                 repairs=args.repairs,
                 architect=args.architect,
                 review_spec=args.review_spec,
+                reviewer=args.reviewer,
             )
         elif args.command == "approve":
             answer = {"decision": "approve"}

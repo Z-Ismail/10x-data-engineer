@@ -79,8 +79,14 @@ any of the gate's working files refuses the packet. The tests plant links
 to the declaration, the expected rows and the gate's folder in a project
 the real gate passed, and check that none of them, no reference query and
 no expected row reaches the packet; with links followed and the second
-guard taken out, the declaration and its reference query do. No run makes
-a packet yet.
+guard taken out, the declaration and its reference query do.
+
+The reviewer agent (`--reviewer`) runs in the same sandbox as the
+cross-source agent: read-only tools, its own folder holding only the
+packet, no raw files, and the repository, the run folder and the
+declaration hidden. It has no shell and no access to the built database.
+Its findings are checked against the packet's files before they are kept,
+and they are advice: nothing it says changes the gate's verdict.
 
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and

@@ -20,8 +20,10 @@ from tenx.contract import (
     SCHEMA,
     TOTAL_FIELDS,
 )
-from tenx.engineer import ARCHITECT
+from tenx.engineer import ARCHITECT, REVIEWER
 from tenx.repair import REPORT_FILE
+from tenx.reviewer import ANSWER_FIELDS, FINDING_FIELDS, SEVERITIES, VERDICTS
+from tenx.reviewer import SCHEMA as REVIEW_SCHEMA
 
 AGENTS = Path(__file__).resolve().parent.parent / "agents"
 
@@ -214,6 +216,43 @@ class ArchitectAgentTest(unittest.TestCase):
         self.assertEqual(ARCHITECT.allowed_tools, ())
         self.assertEqual(ARCHITECT.max_turns, 15)
         self.assertEqual(ARCHITECT.budget_kind, "cross-source")
+
+
+class ReviewerAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.fields, self.body = read_agent(AGENTS / "reviewer.md")
+
+    def test_sets_only_fields_a_plugin_agent_may_set(self):
+        self.assertLessEqual(set(self.fields), SUPPORTED)
+        self.assertEqual(self.fields["name"], "reviewer")
+        self.assertTrue(self.fields["description"].strip())
+
+    def test_pins_the_model(self):
+        self.assertEqual(self.fields["model"], "sonnet")
+
+    def test_can_only_read_files_and_give_its_answer(self):
+        tools = {tool.strip() for tool in self.fields["tools"].split(",")}
+        self.assertEqual(tools, {"Read", "Glob", "Grep", "StructuredOutput"})
+
+    def test_starts_without_claude_md_files(self):
+        self.assertIs(self.fields["omitClaudeMd"], True)
+
+    def test_asks_for_every_field_and_value_of_the_answer(self):
+        for word in (*ANSWER_FIELDS, *FINDING_FIELDS, *SEVERITIES, *VERDICTS):
+            with self.subTest(word):
+                self.assertIn(f"`{word}`", self.body)
+
+    def test_reads_the_files_its_folder_holds(self):
+        for name in ("PACKET.md", "GOAL.md", "SPEC.md", "source_profiles/", "project/"):
+            with self.subTest(name):
+                self.assertIn(f"`{name}`", self.body)
+
+    def test_keeps_the_role_in_step_with_the_answer(self):
+        self.assertEqual(REVIEWER.agent, "tenx:reviewer")
+        self.assertIs(REVIEWER.json_schema, REVIEW_SCHEMA)
+        self.assertEqual(REVIEWER.allowed_tools, ())
+        self.assertEqual(REVIEWER.max_turns, 20)
+        self.assertEqual(REVIEWER.budget_kind, "cross-source")
 
 
 if __name__ == "__main__":

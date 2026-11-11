@@ -1,8 +1,8 @@
 """The interfaces, and the pipeline code built on them, reach no platform directly.
 
 ``tenx/ports.py``, the records in ``tenx/domain.py``, the contract check and
-SPEC.md (``tenx/contract.py``, ``tenx/spec.py``), the review packet
-(``tenx/review.py``) and everything under
+SPEC.md (``tenx/contract.py``, ``tenx/spec.py``), the review packet and the
+reviewer's answer (``tenx/review.py``, ``tenx/reviewer.py``) and everything under
 ``tenx/graph/`` may not import DuckDB, dbt, the gate, the profiler, the
 overlap report, the old runner (which imports the gate) or the adapters
 themselves. Two checks: the source is read for every way of writing an
@@ -73,8 +73,9 @@ def guarded_files() -> list[Path]:
         # The contract check and SPEC.md, which the graph uses itself.
         ROOT / "tenx" / "contract.py",
         ROOT / "tenx" / "spec.py",
-        # The review packet, which the graph will make itself.
+        # The review packet and the reviewer's answer, which the graph handles itself.
         ROOT / "tenx" / "review.py",
+        ROOT / "tenx" / "reviewer.py",
         *sorted((ROOT / "tenx" / "graph").rglob("*.py")),
     ]
 
@@ -159,6 +160,7 @@ class GuardedCodeTest(unittest.TestCase):
                 "tenx/contract.py",
                 "tenx/spec.py",
                 "tenx/review.py",
+                "tenx/reviewer.py",
                 "tenx/graph/__init__.py",
                 "tenx/graph/state.py",
                 "tenx/graph/checkpoints.py",

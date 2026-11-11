@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect equivalence compare parity repairs compare-architect clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer equivalence compare parity repairs compare-architect clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -55,6 +55,13 @@ engineer-architect: demo-data
 	rm -rf runs/demo-architect
 	$(PYTHON) -m tenx.run run --raw demo/data --goal demo/brief.md \
 		--checks tests/fixtures/demo_gate.json --out runs/demo-architect --architect
+
+# The graph run with the reviewer agent, which reads a project the gate
+# passes and writes its advice to REVIEW.md. Needs Claude Code, signed in.
+engineer-reviewer: demo-data
+	rm -rf runs/demo-reviewer
+	$(PYTHON) -m tenx.run run --raw demo/data --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/demo-reviewer --reviewer
 
 # The old runner and the graph on the eight comparison datasets, with a
 # stand-in for Claude Code that answers the same way every time: every

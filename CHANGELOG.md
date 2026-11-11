@@ -6,6 +6,16 @@ Notable changes to this project.
 
 ### Added
 
+- The reviewer agent in the graph run, off by default: with `--reviewer`
+  (`make engineer-reviewer`), a project the gate passes is given to
+  `agents/reviewer.md` (read-only, in the sandbox), which reads the review
+  packet and answers whether any column no longer holds what the raw data
+  or its name says. Every finding must cite a project file in the packet, a
+  line that file has, a model it defines and a column it mentions, and the
+  verdict must follow from the findings; an answer that fails is dropped
+  and the run says why. The advice is saved as `REVIEW.md`, shown at the
+  end of the run and given a row in the usage ledger; it never changes the
+  run's status or exit status. A failed project is not reviewed.
 - The review packet (`tenx/review.py`): the folder a reviewer will be
   given after the gate passes a project, holding the goal, the spec when
   there is one, the source profiles, the project's settings and models,
@@ -13,8 +23,7 @@ Notable changes to this project.
   may be told of it and names anything left out of the project and why.
   It never holds the gate's declaration or working files. The copy follows
   no link, opens only regular files and caps file and packet size, and a
-  file with the same bytes as a hidden file refuses the packet. No run
-  uses it yet.
+  file with the same bytes as a hidden file refuses the packet.
 - A test bed for measuring a reviewer: `python tests/review_bed.py --out
   <folder>` writes twelve variants of the reference dbt project under
   neutral names (`project-01` to `project-12`, in an order shuffled by
