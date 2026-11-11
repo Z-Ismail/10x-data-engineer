@@ -17,6 +17,7 @@ make engineer-alone    # the same without the cross-source agent
 make engineer-scouts   # the same as make engineer, with a scout for each raw table first
 make engineer-graph    # the same as make engineer, as a graph that can be resumed
 make engineer-architect  # the graph run on the brief goal, the Architect writing a spec first
+make engineer-reviewer   # the graph run with the reviewer reading the project after a gate pass
 make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
 make parity      # the graph against the earlier runner with real agents, 64 pairs;
                  # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
@@ -1246,9 +1247,8 @@ No live repair comparison has been run yet.
 
 ## Review packet
 
-`tenx/review.py` makes the folder a reviewer will be given after the gate
-passes a project. No run uses it yet: the reviewer agent that reads it is
-the next part of the review work.
+`tenx/review.py` makes the folder the reviewer agent is given after the
+gate passes a project (see [Reviewer](#reviewer)).
 
 | In the packet | From |
 | --- | --- |
@@ -1310,6 +1310,67 @@ On the eight comparison datasets the packet for the reference project is
 about 41 KB, of which about 10 KB is the project and `PACKET.md` and the
 rest the profiles.
 
+## Reviewer
+
+With `--reviewer` (`make engineer-reviewer`), the graph run gives a project
+the gate passed to the reviewer agent (`agents/reviewer.md`). It works in
+the sandbox like the cross-source agent: read-only, in a folder holding
+only the [review packet](#review-packet), without the raw files. It looks
+for what the checks cannot see: a column whose values no longer hold what
+the raw column or the column's name says (information lost, read in the
+wrong format or unit, taken from the wrong raw column, or replaced). It is
+told not to report what the listed checks cover, and that ways of writing a
+project that keep every value correct are not findings.
+
+It answers with a verdict (`approve` or `request changes`), a summary and
+its findings, each `blocking` or `advisory`, naming a model, a column, a
+project file and a line, with the evidence. The answer is checked in code
+before anyone reads it: each finding's file must be a project file in the
+packet, its line one that file has, its model one the project defines and
+its column one the file mentions; and the verdict must be `request changes`
+exactly when a finding is blocking. An answer that fails is dropped, and
+the run records why ("no review: ...").
+
+The advice is saved as `REVIEW.md` beside the reviewer's report and shown
+at the end of the run, and the reviewer has a row in the usage ledger. It
+never changes the run's status, the gate row in `usage.json` or the exit
+status. A failed project is not reviewed; after repairs, the project that
+passed is. A packet that cannot be made, a reviewer that crashes and a
+review the run's ceiling cannot hold each leave the run without a review,
+and the run says why. The reviewer is capped and priced as a cross-source
+call.
+
+The end of a real run with `--reviewer` on seed 42, 200 companies (the run
+folder shortened; Claude Code's estimates, not a bill):
+
+```
+# Review
+
+Advice from the reviewer on a project that passed every check. It does not
+change the checks' verdict.
+
+Verdict: approve
+
+I found no column in any of the five models that is wrong against its raw column or the goal. The conversions are correct: Unix seconds for `created`, day/month/year for the CRM `created_date`, and `amount_minor` kept as integer minor units. CRM `account_id` stays text because the CSVs are read as `all_varchar`, so its leading zeros are kept.
+
+No findings.
+(advice only; saved as <run>/reviewer/attempt-1/REVIEW.md)
+
+usage by role (cost is Claude Code's own estimate, not a bill)
+
+role          outcome    turns  refused    time  cost (US$)
+cross-source  success        9        0  27.6 s      0.0770
+engineer      success       18        2  27.4 s      0.1090
+reviewer      success       17        1  16.4 s      0.0669
+run           gate PASS     44        3  71.3 s      0.2529
+```
+
+How often it catches a planted mistake, and how often it asks for changes
+to correct work, has not been measured yet. Before it was built into the
+run, one review each of four test-bed projects caught both planted
+mistakes tried and approved both correct projects tried; that is not a
+rate.
+
 ## Run records and graph state
 
 The graph run (above) saves its state after every step, so that a
@@ -1356,7 +1417,7 @@ construct objects of any class a checkpoint file names.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, and the review packet |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |
