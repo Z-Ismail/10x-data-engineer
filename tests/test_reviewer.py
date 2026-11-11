@@ -12,6 +12,7 @@ from tenx.reviewer import (
     ReviewError,
     check_answer,
     models_in,
+    render,
     review_from_report,
 )
 
@@ -146,6 +147,52 @@ class ReportTest(unittest.TestCase):
             ReviewError, "^the reviewer ended error_max_turns without an answer$"
         ):
             review_from_report({"subtype": "error_max_turns"}, FILES)
+
+
+class RenderTest(unittest.TestCase):
+    def test_findings_are_listed_by_severity_with_their_evidence(self):
+        given = answer(
+            finding(severity="advisory", column="", line=1, claim="Emails  are\nnot trimmed."),
+            finding(),
+        )
+        expected = (
+            "# Review\n"
+            "\n"
+            "Advice from the reviewer on a project that passed every check. It does not\n"
+            "change the checks' verdict.\n"
+            "\n"
+            "Verdict: request changes\n"
+            "\n"
+            "One column is wrong.\n"
+            "\n"
+            "## Blocking\n"
+            "\n"
+            "- `models/staging/stg_customers.sql:3`, `stg_customers.contact_name`: "
+            "The contact name is the email address.\n"
+            "  Evidence: Line 3 selects email as contact_name; the profile has a name column.\n"
+            "\n"
+            "## Advisory\n"
+            "\n"
+            "- `models/staging/stg_customers.sql:1`, `stg_customers`: Emails are not trimmed.\n"
+            "  Evidence: Line 3 selects email as contact_name; the profile has a name column.\n"
+        )
+        self.assertEqual(render(given), expected)
+
+    def test_an_approval_with_no_findings_says_so(self):
+        given = {**answer(verdict="approve"), "summary": "Nothing is wrong."}
+        expected = (
+            "# Review\n"
+            "\n"
+            "Advice from the reviewer on a project that passed every check. It does not\n"
+            "change the checks' verdict.\n"
+            "\n"
+            "Verdict: approve\n"
+            "\n"
+            "Nothing is wrong.\n"
+            "\n"
+            "No findings.\n"
+        )
+        self.assertEqual(render(given), expected)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ __all__ = [
     "ReviewError",
     "check_answer",
     "models_in",
+    "render",
     "review_from_report",
 ]
 
@@ -151,3 +152,37 @@ def review_from_report(report: dict | None, files: Mapping[str, str]) -> dict:
             f"the reviewer ended {report.get('subtype') or 'unknown'} without an answer"
         )
     return check_answer(report["structured_output"], files)
+
+
+def _line(text: str) -> str:
+    # One list item per field: runs of spaces and line breaks become one space.
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def render(review: dict) -> str:
+    """The checked answer as the Markdown file a person reads after the run."""
+    lines = [
+        "# Review",
+        "",
+        "Advice from the reviewer on a project that passed every check. It does not",
+        "change the checks' verdict.",
+        "",
+        f"Verdict: {review['verdict']}",
+        "",
+        _line(review["summary"]),
+    ]
+    for severity, heading in ((BLOCKING, "Blocking"), (ADVISORY, "Advisory")):
+        chosen = [item for item in review["findings"] if item["severity"] == severity]
+        if not chosen:
+            continue
+        lines += ["", f"## {heading}", ""]
+        for item in chosen:
+            column = item["column"].strip()
+            subject = f"{item['model']}.{column}" if column else item["model"]
+            lines += [
+                f"- `{item['file']}:{item['line']}`, `{subject}`: {_line(item['claim'])}",
+                f"  Evidence: {_line(item['evidence'])}",
+            ]
+    if not review["findings"]:
+        lines += ["", "No findings."]
+    return "\n".join(lines) + "\n"
