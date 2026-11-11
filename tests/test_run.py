@@ -70,6 +70,31 @@ if "tenx:architect" in sys.argv:
 """
 CONTRACT = ROOT / "tests" / "fixtures" / "demo_contract.json"
 
+# Started as the reviewer, the stand-in asks for one change to a reference
+# model, citing a line the model has, and notes the files it was given.
+REVIEWER = """
+if "tenx:reviewer" in sys.argv:
+    import json
+    Path(os.environ["STUB_RECORD"]).with_name("reviewer.json").write_text(json.dumps(
+        sorted(str(path) for path in Path.cwd().rglob("*") if path.is_file())))
+    finding = {
+        "severity": "blocking", "model": "stg_billing__customers", "column": "email",
+        "file": "models/staging/stg_billing__customers.sql", "line": 3,
+        "claim": "Emails are lower-cased.", "evidence": "Line 3: lower(trim(email)).",
+    }
+    print(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 15,
+        "duration_ms": 40000, "total_cost_usd": 0.0612,
+        "modelUsage": {"claude-sonnet-5-5": {
+            "inputTokens": 12, "cacheCreationInputTokens": 15000,
+            "cacheReadInputTokens": 60000, "outputTokens": 3000, "costBasis": "list"}},
+        "permission_denials": [],
+        "structured_output": {
+            "verdict": "request changes", "summary": "One column.", "findings": [finding]},
+    }))
+    sys.exit(0)
+"""
+
 
 class CommandLineTest(unittest.TestCase):
     @classmethod
@@ -82,7 +107,7 @@ class CommandLineTest(unittest.TestCase):
         bin_dir.mkdir()
         claude = bin_dir / "claude"
         claude.write_text(
-            f"#!{sys.executable}\n{KILL_ONCE}\n{ARCHITECT}\n{FIRST_MODELS}\n{STUB}",
+            f"#!{sys.executable}\n{KILL_ONCE}\n{ARCHITECT}\n{REVIEWER}\n{FIRST_MODELS}\n{STUB}",
             encoding="utf-8",
         )
         claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
@@ -219,6 +244,32 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(
             [role["role"] for role in usage["roles"]], ["cross-source", "architect", "engineer"]
         )
+
+    def test_a_run_with_the_reviewer_shows_its_advice_and_keeps_the_verdict(self):
+        done = self.start(False, "--reviewer")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: passed\n"), done.stdout)
+        review = self.out / "reviewer" / "attempt-1" / "REVIEW.md"
+        self.assertIn(review.read_text() + f"(advice only; saved as {review})\n", done.stdout)
+        self.assertIn("Verdict: request changes\n", done.stdout)
+        self.assertIn("reviewer      success", done.stdout)
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(usage["gate"], "PASS")
+        self.assertEqual(
+            [role["role"] for role in usage["roles"]], ["cross-source", "engineer", "reviewer"]
+        )
+        # The packet lists every check the real gate passed, with what may be said of it.
+        work = self.out / "reviewer" / "attempt-1" / "work"
+        packet = (work / "PACKET.md").read_text()
+        report = (self.out / "gate" / "attempt-1" / "report.txt").read_text()
+        passes = sum(line.startswith("PASS") for line in report.splitlines())
+        self.assertIn(f"passed every\ncheck the validator ran ({passes} checks)", packet)
+        seen = json.loads(self.record.with_name("reviewer.json").read_text())
+        names = {Path(path).relative_to(work).as_posix() for path in seen}
+        self.assertIn("project/models/staging/stg_billing__customers.sql", names)
+        self.assertFalse(any("declaration" in name or "JOINS" in name for name in names))
+        declaration = DECLARATION.read_bytes()
+        self.assertFalse(any(Path(path).read_bytes() == declaration for path in seen))
 
     def waiting(self, done) -> str:
         """The spec a waiting run names, checked against the text it printed."""
