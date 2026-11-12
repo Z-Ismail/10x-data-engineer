@@ -9,11 +9,27 @@ never sees.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+import shutil
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
+from tenx import artefacts
+from tenx import review as packets
 from tenx.compare import Tally, interval
-from tenx.reviewer import BLOCKING, REQUEST_CHANGES
+from tenx.ledger import role_usage
+from tenx.ports import (
+    AgentBackend,
+    CheckResult,
+    Mounts,
+    PlatformError,
+    Role,
+    Sandbox,
+    ValidationReport,
+    Validator,
+)
+from tenx.reviewer import BLOCKING, REQUEST_CHANGES, ReviewError, review_from_report
 
 __all__ = [
     "APPROVED",
@@ -25,10 +41,12 @@ __all__ = [
     "NO_REVIEW",
     "OUTCOMES",
     "REJECTED",
+    "Kit",
     "RatesError",
     "Review",
     "Summary",
     "render",
+    "review_project",
     "score",
     "summarise",
     "verdict",
@@ -201,3 +219,105 @@ def render(summary: Summary) -> str:
             f"{review.outcome}{note}"
         )
     return "\n".join(lines) + "\n"
+
+
+REVIEW_RECORD = "review.json"
+GATE_DIR, PACKET_DIR, REVIEWER_DIR = "gate", "packet", "reviewer"
+AGENT_FILE = "agent.json"
+
+
+@dataclass(frozen=True)
+class Kit:
+    """The ports one review works through.
+
+    ``mounts`` gives what the reviewer may see for its folder; ``hidden``
+    is what the validator's builds must never see; ``secrets`` are files
+    whose bytes may never reach a packet (the declaration, the bed's answers).
+    """
+
+    validator: Validator
+    backend: AgentBackend
+    role: Role
+    sandbox: Sandbox | None
+    mounts: Callable[[Path], Mounts]
+    hidden: tuple[Path, ...] = ()
+    secrets: tuple[Path, ...] = ()
+    timeout: float = 30 * 60
+
+
+def _agent_view(report: ValidationReport) -> ValidationReport:
+    # Each check and what an agent may be told of it; nothing else reaches the packet.
+    results = tuple(
+        CheckResult(item.check, item.subject, item.status, "", {}, item.feedback)
+        for item in report.results
+    )
+    return ValidationReport(results, report.passed, "")
+
+
+def _keep(folder: Path, record: dict) -> None:
+    text = json.dumps(record, indent=2, sort_keys=True) + "\n"
+    artefacts.write_text(folder / REVIEW_RECORD, text)
+
+
+def review_project(
+    project: Path, raw: Path, declaration: Path, goal: Path, profiles: Path, folder: Path, kit: Kit
+) -> dict:
+    """Validate one project, and if it passes, have the reviewer review it.
+
+    Everything is kept in ``folder``: the validator's work, the packet, the
+    reviewer's session and ``review.json`` with the checked answer (or the
+    reason there is none) and the call's cost.
+    """
+    folder.mkdir(parents=True)
+    record = {"gate": "FAIL", "answer": None, "cost_usd": None, "problem": ""}
+    try:
+        report = kit.validator.validate(
+            project, raw, declaration, folder / GATE_DIR, kit.sandbox, kit.hidden
+        )
+    except PlatformError as error:
+        report, record["problem"] = None, f"the validator could not run: {error}"
+    if report is not None and not report.passed:
+        failed = sorted({r.check for r in report.results if r.status.lower() != "pass"})
+        record["problem"] = f"the validator failed the project: {', '.join(failed)}"
+    if report is None or not report.passed:
+        _keep(folder, record)
+        return record
+    record["gate"] = "PASS"
+    try:
+        packet = packets.build(
+            folder / PACKET_DIR,
+            goal=goal,
+            profiles=profiles,
+            project=project,
+            report=_agent_view(report),
+            secrets=(declaration, folder / GATE_DIR, *kit.secrets),
+        )
+    except packets.PacketError as error:
+        record["problem"] = f"no packet: {error}"
+        _keep(folder, record)
+        return record
+    work = folder / REVIEWER_DIR / "work"
+    shutil.copytree(packet.folder, work)
+    agent = kit.backend.run(
+        kit.role,
+        work.resolve(),
+        folder / REVIEWER_DIR / AGENT_FILE,
+        kit.timeout,
+        kit.sandbox,
+        kit.mounts(work.resolve()),
+    )
+    missing = "timed out" if agent.timed_out_after is not None else "no report"
+    usage = role_usage(kit.role.name, agent.report, missing)
+    record["cost_usd"] = usage.cost_usd if usage.cost_known else None
+    prefix = f"{packets.PROJECT_DIR}/"
+    files = {
+        name[len(prefix) :]: (packet.folder / name).read_text(encoding="utf-8", errors="replace")
+        for name in packet.files
+        if name.startswith(prefix)
+    }
+    try:
+        record["answer"] = review_from_report(agent.report, files)
+    except ReviewError as error:
+        record["problem"] = str(error)
+    _keep(folder, record)
+    return record
