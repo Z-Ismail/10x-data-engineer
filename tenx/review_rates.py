@@ -9,19 +9,31 @@ never sees.
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import shutil
+import sys
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 
 from tenx import artefacts
 from tenx import review as packets
+from tenx.adapters.duckdb import DuckDBGate, DuckDBProfiler
+from tenx.backends.claude_code import ClaudeCode
 from tenx.compare import CostNotApproved, Tally, interval
+from tenx.engineer import (
+    PLUGIN_COPY_DIR,
+    PLUGIN_DIR,
+    REVIEWER,
+    TIMEOUT_MINUTES,
+    mounts,
+    stage_plugin,
+)
 from tenx.ledger import role_usage
 from tenx.policy import Policy
 from tenx.ports import (
@@ -35,6 +47,7 @@ from tenx.ports import (
     Validator,
 )
 from tenx.reviewer import BLOCKING, REQUEST_CHANGES, ReviewError, review_from_report
+from tenx.sandbox import SandboxError, Unisolated, default_sandbox
 
 __all__ = [
     "APPROVED",
@@ -439,10 +452,12 @@ def measure(
     parallel: int = 3,
     approve_cost: bool = False,
     progress=print,
+    role: Role = REVIEWER,
 ) -> str:
     """Review every bed project on every dataset, then report.
 
-    ``kit(out)`` gives the ports for the reviews. A review with a record is
+    ``kit(out)`` gives the ports for the reviews, once the cost is approved;
+    the reviews are priced as calls of ``role``. A review with a record is
     kept; one cut off part way is started again. The reviews still to do
     are priced first: above the policy's limit nothing is written or run
     unless ``approve_cost`` is true.
@@ -457,8 +472,7 @@ def measure(
             raise RatesError(f"{out} holds a measurement of other projects, data or settings")
     pending = [pair for pair in order if _record(out, *pair) is None]
     rules = Policy()
-    tools = kit(out)
-    typical, ceiling = estimate(len(pending), rules, tools.role)
+    typical, ceiling = estimate(len(pending), rules, role)
     described = (
         f"{len(pending)} reviews to do, estimated at US${typical}, at most US${ceiling} "
         "at each call's cap (Claude Code's own estimates)"
@@ -470,6 +484,7 @@ def measure(
         )
     progress(described)
     out.mkdir(parents=True, exist_ok=True)
+    tools = kit(out)
     plan_text = {"bed": str(bed), "settings": settings, "order": [list(p) for p in order]}
     artefacts.write_text(out / PLAN_FILE, json.dumps(plan_text, indent=2) + "\n")
     for name, raw in datasets.items():
@@ -509,3 +524,97 @@ def measure(
         for future in [pool.submit(one, pair) for pair in pending]:
             future.result()
     return report(out)
+
+
+def claude_kit(out: Path, bed: Path, declaration: Path, claude: str, sandbox: Sandbox) -> Kit:
+    """The DuckDB gate and the reviewer as a Claude Code session, as in a graph run.
+
+    The bed (with its answers) is hidden from the gate's builds and from the
+    reviewer, as well as the measurement's own folder and the declaration.
+    """
+    plugin = out / PLUGIN_COPY_DIR
+    if not plugin.is_dir():
+        stage_plugin(plugin)
+
+    def seen(work: Path) -> Mounts:
+        shown = mounts(work, out, declaration, claude)
+        return replace(shown, hidden=(*shown.hidden, bed))
+
+    return Kit(
+        validator=DuckDBGate(),
+        backend=ClaudeCode(claude, plugin, Policy()),
+        role=REVIEWER,
+        sandbox=sandbox,
+        mounts=seen,
+        hidden=(PLUGIN_DIR, bed, out),
+        secrets=(bed / ANSWERS_FILE,),
+        timeout=TIMEOUT_MINUTES * 60,
+    )
+
+
+def _dataset(text: str) -> tuple[str, Path]:
+    name, sep, folder = text.partition("=")
+    if not sep or not name or not folder:
+        raise argparse.ArgumentTypeError(f"expected NAME=FOLDER, not {text!r}")
+    return name, Path(folder)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    start = commands.add_parser("run", help="review every project on every dataset, then report")
+    start.add_argument(
+        "--bed", type=Path, required=True, help="the bed: projects/ and answers.json"
+    )
+    start.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; one --raw per dataset",
+    )
+    start.add_argument("--goal", type=Path, required=True, help="the goal the reviewer reads")
+    start.add_argument("--checks", type=Path, required=True, help="the gate's declaration")
+    start.add_argument("--out", type=Path, required=True, help="folder for the measurement")
+    start.add_argument("--seed", type=int, default=0, help="seed for the order of the reviews")
+    start.add_argument("--parallel", type=int, default=3, help="reviews at a time (default 3)")
+    start.add_argument("--claude", default="claude", help="the Claude Code program")
+    start.add_argument("--approve-cost", action="store_true", help="go ahead above US$5")
+    start.add_argument(
+        "--unisolated", action="store_true", help="run without the sandbox (not recommended)"
+    )
+    shown = commands.add_parser("report", help="report a measurement from its folder")
+    shown.add_argument("out", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "report":
+            print(report(args.out), end="")
+            return 0
+        sandbox = Unisolated() if args.unisolated else default_sandbox()
+        claude = shutil.which(args.claude)
+        if claude is None:
+            raise RatesError(f"{args.claude} was not found; install Claude Code and sign in first")
+        bed = Path(args.bed).resolve()
+        checks = Path(args.checks).resolve()
+        text = measure(
+            bed,
+            dict(args.raw),
+            args.goal,
+            checks,
+            args.out,
+            lambda out: claude_kit(out, bed, checks, claude, sandbox),
+            DuckDBProfiler(),
+            seed=args.seed,
+            parallel=args.parallel,
+            approve_cost=args.approve_cost,
+        )
+    except (RatesError, CostNotApproved, SandboxError, OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
