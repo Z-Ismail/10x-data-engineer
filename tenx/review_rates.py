@@ -10,15 +10,20 @@ never sees.
 from __future__ import annotations
 
 import json
+import random
 import shutil
+import threading
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from tenx import artefacts
 from tenx import review as packets
-from tenx.compare import Tally, interval
+from tenx.compare import CostNotApproved, Tally, interval
 from tenx.ledger import role_usage
+from tenx.policy import Policy
 from tenx.ports import (
     AgentBackend,
     CheckResult,
@@ -321,3 +326,186 @@ def review_project(
         record["problem"] = str(error)
     _keep(folder, record)
     return record
+
+
+ANSWERS_FILE = "answers.json"
+PLAN_FILE = "plan.json"
+REVIEWS_DIR, PROFILES_DIR = "reviews", "profiles"
+REPORT_TEXT, REPORT_JSON = "report.txt", "report.json"
+
+
+def read_answers(bed: Path) -> dict[str, dict]:
+    """The bed's answers by project, each checked as ``score`` will read it."""
+    try:
+        found = json.loads((Path(bed) / ANSWERS_FILE).read_text(encoding="utf-8"))
+        projects = found["projects"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise RatesError(f"cannot read {Path(bed) / ANSWERS_FILE}: {error}") from error
+    if not isinstance(projects, dict) or not projects:
+        raise RatesError(f"{Path(bed) / ANSWERS_FILE} lists no projects")
+    for name, truth in projects.items():
+        if not isinstance(truth, dict) or not isinstance(truth.get("variant"), str):
+            raise RatesError(f"the answer for {name} has no variant")
+        score(None, truth)
+        if not (Path(bed) / "projects" / name).is_dir():
+            raise RatesError(f"the bed has no project {name}")
+    return projects
+
+
+def plan(datasets: list[str], projects: list[str], seed: int = 0) -> list[tuple[str, str]]:
+    """Every project on every dataset once, in an order shuffled by the seed."""
+    order = [(dataset, project) for dataset in datasets for project in sorted(projects)]
+    random.Random(f"{seed}:review-rates").shuffle(order)
+    return order
+
+
+def _settings(bed: Path, datasets: dict[str, Path], goal: Path, declaration: Path, seed: int):
+    return {
+        "answers": artefacts.file_hash(Path(bed) / ANSWERS_FILE),
+        "datasets": {name: str(Path(folder).resolve()) for name, folder in datasets.items()},
+        "goal": artefacts.file_hash(Path(goal)),
+        "declaration": artefacts.file_hash(Path(declaration)),
+        "seed": seed,
+    }
+
+
+def _record(out: Path, dataset: str, project: str) -> dict | None:
+    try:
+        return json.loads((out / REVIEWS_DIR / dataset / project / REVIEW_RECORD).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def reviews(out: Path, answers: dict[str, dict], order: list[tuple[str, str]]) -> list[Review]:
+    """Every planned review that has finished, scored against the answers."""
+    found = []
+    for dataset, project in order:
+        record = _record(out, dataset, project)
+        if record is None:
+            continue
+        truth = answers[project]
+        found.append(
+            Review(
+                project,
+                dataset,
+                truth["variant"],
+                truth["kind"],
+                score(record["answer"], truth),
+                record["cost_usd"],
+                record["problem"],
+            )
+        )
+    return found
+
+
+def estimate(pending: int, rules: Policy, role: Role) -> tuple[Decimal, Decimal]:
+    """The typical cost and the most the pending reviews can cost, at the role's call figures."""
+    kind = role.budget_kind
+    return rules.typical_usd[kind] * pending, rules.cap(kind) * pending
+
+
+def report(out: Path) -> str:
+    """Score every finished review of the measurement in out, and keep the report there."""
+    out = Path(out)
+    saved = json.loads((out / PLAN_FILE).read_text(encoding="utf-8"))
+    answers = read_answers(Path(saved["bed"]))
+    order = [tuple(pair) for pair in saved["order"]]
+    summary = summarise(reviews(out, answers, order))
+    text = render(summary)
+    if len(summary.reviews) < len(order):
+        text += f"\n{len(order) - len(summary.reviews)} of {len(order)} reviews not done yet\n"
+    data = {
+        "verdict": summary.verdict,
+        "counts": summary.counts,
+        "catch": [summary.catches.passes, summary.catches.runs],
+        "rejected": [summary.rejections.passes, summary.rejections.runs],
+        "cost_usd": summary.cost_usd,
+        "reviews": [vars(review) for review in summary.reviews],
+    }
+    artefacts.write_text(out / REPORT_TEXT, text)
+    artefacts.write_text(out / REPORT_JSON, json.dumps(data, indent=2) + "\n")
+    return text
+
+
+def measure(
+    bed: Path,
+    datasets: dict[str, Path],
+    goal: Path,
+    declaration: Path,
+    out: Path,
+    kit: Callable[[Path], Kit],
+    profiler,
+    seed: int = 0,
+    parallel: int = 3,
+    approve_cost: bool = False,
+    progress=print,
+) -> str:
+    """Review every bed project on every dataset, then report.
+
+    ``kit(out)`` gives the ports for the reviews. A review with a record is
+    kept; one cut off part way is started again. The reviews still to do
+    are priced first: above the policy's limit nothing is written or run
+    unless ``approve_cost`` is true.
+    """
+    bed, out = Path(bed).resolve(), Path(out).resolve()
+    answers = read_answers(bed)
+    settings = _settings(bed, datasets, goal, declaration, seed)
+    order = plan(list(datasets), list(answers), seed)
+    if (out / PLAN_FILE).is_file():
+        saved = json.loads((out / PLAN_FILE).read_text(encoding="utf-8"))
+        if saved["settings"] != settings:
+            raise RatesError(f"{out} holds a measurement of other projects, data or settings")
+    pending = [pair for pair in order if _record(out, *pair) is None]
+    rules = Policy()
+    tools = kit(out)
+    typical, ceiling = estimate(len(pending), rules, tools.role)
+    described = (
+        f"{len(pending)} reviews to do, estimated at US${typical}, at most US${ceiling} "
+        "at each call's cap (Claude Code's own estimates)"
+    )
+    if typical > rules.approve_above_usd and not approve_cost:
+        raise CostNotApproved(
+            f"{described}; above US${rules.approve_above_usd}, so it needs approval: "
+            "run it again with --approve-cost to go ahead"
+        )
+    progress(described)
+    out.mkdir(parents=True, exist_ok=True)
+    plan_text = {"bed": str(bed), "settings": settings, "order": [list(p) for p in order]}
+    artefacts.write_text(out / PLAN_FILE, json.dumps(plan_text, indent=2) + "\n")
+    for name, raw in datasets.items():
+        # Made beside their place and moved in whole, so a cut-off start leaves none.
+        made = out / PROFILES_DIR / name
+        if not made.is_dir():
+            partial = made.with_name(f".{name}.partial")
+            shutil.rmtree(partial, ignore_errors=True)
+            profiler.profile(Path(raw), partial)
+            partial.rename(made)
+    lock, done = threading.Lock(), [len(order) - len(pending)]
+
+    def one(pair: tuple[str, str]) -> None:
+        dataset, project = pair
+        folder = out / REVIEWS_DIR / dataset / project
+        if folder.exists():
+            shutil.rmtree(folder)
+        try:
+            record = review_project(
+                bed / "projects" / project,
+                Path(datasets[dataset]).resolve(),
+                Path(declaration).resolve(),
+                Path(goal).resolve(),
+                out / PROFILES_DIR / dataset,
+                folder,
+                tools,
+            )
+            outcome = score(record["answer"], answers[project])
+        except (PlatformError, OSError) as error:
+            # Left without a record, so a second start reviews it again.
+            outcome = f"error: {error}"
+        with lock:
+            done[0] += 1
+            progress(f"[{done[0]}/{len(order)}] {dataset} {project}: {outcome}")
+
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        for future in [pool.submit(one, pair) for pair in pending]:
+            future.result()
+    return report(out)
