@@ -6,6 +6,17 @@ Notable changes to this project.
 
 ### Added
 
+- A measurement of the reviewer on the test bed: `make review-rates`
+  (`python -m tenx.review_rates run`) gates each bed project in the
+  sandbox, makes its review packet and has the reviewer read it, as a
+  graph run does, on each of four demo datasets, then scores every review
+  against the bed's answers, which the reviewer never sees. It reports
+  the share of planted mistakes caught at the right model and column, the
+  share of correct projects it asked to change, each with a 95% interval,
+  and a verdict by a rule set in advance (useful, harmful or unclear). It
+  is priced first and stops above US$5 unless approved, and resumes where
+  it stopped. On 2026-11-12 it caught 24 of 24 planted mistakes and
+  rejected 0 of 24 correct projects, about US$0.05 a review.
 - The reviewer agent in the graph run, off by default: with `--reviewer`
   (`make engineer-reviewer`), a project the gate passes is given to
   `agents/reviewer.md` (read-only, in the sandbox), which reads the review

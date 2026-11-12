@@ -1403,11 +1403,49 @@ reviewer      success       17        1  16.4 s      0.0669
 run           gate PASS     44        3  71.3 s      0.2529
 ```
 
-How often it catches a planted mistake, and how often it asks for changes
-to correct work, has not been measured yet. Before it was built into the
-run, one review each of four test-bed projects caught both planted
-mistakes tried and approved both correct projects tried; that is not a
-rate.
+### Measuring the reviewer
+
+`make review-rates` (`python -m tenx.review_rates run`) reviews every
+project of the test bed (`tests/review_bed.py`: twelve projects that all
+pass the gate, six with one planted mistake in a column the gate does not
+check and six correct but written differently) once on each of four demo
+datasets (seeds 1, 7, 42 and 2026 at 200 companies), 48 reviews. Each
+review is what a graph run does after a gate pass: the gate builds the
+project in the sandbox, the review packet is made, and the reviewer reads
+it in the sandbox, with the bed's `answers.json` hidden from both. Each
+review is then scored against the answers: a planted mistake is caught
+only when a blocking finding names its model and column; a correct project
+is rejected when the verdict is `request changes`. A review with no checked
+answer is listed and left out of both rates.
+
+Each rate is given with its 95% interval, as the comparisons give pass
+rates. The rule was set before the first run: the reviewer is **useful**
+when the catch rate's lower limit is at least 60% and the false-rejection
+rate's upper limit at most 25%, **harmful** when the false-rejection
+rate's lower limit is above 25%, and otherwise **unclear**. The reviews
+are priced before any starts (US$0.08 each, typical); above US$5 it stops
+unless given `--approve-cost`. A second start carries on where the first
+stopped; `python -m tenx.review_rates report runs/review-rates` prints the
+report again.
+
+The report of the run on 2026-11-12 (Claude Code's estimates, not a bill;
+one line per review follows it):
+
+```
+Reviewer measurement: useful
+
+Caught (blocking, right model and column): 24 of 24 (100%, 95% 86% to 100%)
+Defect projects with any request for changes: 24 of 24
+Good projects rejected: 0 of 24 (0%, 95% 0% to 14%)
+Rule: useful when the catch rate's lower limit is at least 60% and the false-rejection rate's upper limit at most 25%; harmful when the false-rejection rate's lower limit is above 25%.
+Cost: US$2.4431 for 48 reviews, US$0.0509 a review, US$0.1018 a catch (Claude Code's own estimates)
+```
+
+Every planted mistake in the bed is visible in one line of SQL, and the
+mistakes are of only six kinds, so this result says how the reviewer does
+on mistakes like these, not on the subtler ones an engineer agent might
+make. Reviews of the same project on different datasets are not
+independent, so the intervals are narrower than they should be.
 
 ## Run records and graph state
 
