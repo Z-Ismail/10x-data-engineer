@@ -1,7 +1,9 @@
 """The failing bed: projects that fail the gate for one known reason."""
 
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,10 +21,12 @@ from failing_bed import (
     OBSERVED,
     REFERENCE,
     VARIANTS,
+    BedError,
     Edit,
     Variant,
     make,
     repair,
+    write_bed,
 )
 
 from demo.generate import generate
@@ -122,6 +126,100 @@ class VariantsTest(unittest.TestCase):
         crosswalk.write_text(crosswalk.read_text().replace(CROSSWALK_COMMENT, ""))
         with self.assertRaisesRegex(ValueError, "not once"):
             make(VARIANTS[0], self.root / "p", reference)
+
+
+class WriteBedTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_projects_have_neutral_names_and_the_answers_say_which_is_which(self):
+        answers = write_bed(self.root / "bed", seed=3)
+        projects = sorted(path.name for path in (self.root / "bed" / "projects").iterdir())
+        self.assertEqual(projects, [f"project-{n:02d}" for n in range(1, len(VARIANTS) + 1)])
+        self.assertEqual(json.loads((self.root / "bed" / "answers.json").read_text()), answers)
+        self.assertEqual(answers["causes"], CAUSES)
+        by_variant = {
+            entry["variant"]: (name, entry) for name, entry in answers["projects"].items()
+        }
+        self.assertEqual(set(by_variant), {chosen.name for chosen in VARIANTS})
+        for chosen in VARIANTS:
+            with self.subTest(chosen.name):
+                name, entry = by_variant[chosen.name]
+                self.assertEqual(
+                    entry,
+                    {
+                        "variant": chosen.name,
+                        "cause": chosen.cause,
+                        "origin": chosen.origin,
+                        "model": chosen.model,
+                        "file": chosen.path,
+                        "summary": chosen.summary,
+                        "failing": sorted(list(result) for result in chosen.failing),
+                    },
+                )
+                expected = make(chosen, self.root / "single" / chosen.name)
+                self.assertEqual(files(self.root / "bed" / "projects" / name), files(expected))
+
+    def test_nothing_inside_a_project_says_what_it_is(self):
+        write_bed(self.root / "bed")
+        texts = "\n".join(
+            "\n".join(files(folder).values())
+            for folder in (self.root / "bed" / "projects").iterdir()
+        )
+        for chosen in VARIANTS:
+            with self.subTest(chosen.name):
+                self.assertNotIn(chosen.name, texts)
+                self.assertNotIn(chosen.summary, texts)
+        for word in ("answers", "observed", "planted", "cause"):
+            self.assertNotIn(word, texts)
+
+    def test_the_seed_fixes_the_order(self):
+        one = write_bed(self.root / "one", seed=5)
+        again = write_bed(self.root / "again", seed=5)
+        other = write_bed(self.root / "other", seed=6)
+        self.assertEqual(
+            (self.root / "one" / "answers.json").read_bytes(),
+            (self.root / "again" / "answers.json").read_bytes(),
+        )
+        self.assertEqual(one, again)
+        order = [entry["variant"] for entry in one["projects"].values()]
+        self.assertNotEqual(order, [entry["variant"] for entry in other["projects"].values()])
+        self.assertNotEqual(order, [chosen.name for chosen in VARIANTS])
+
+    def test_a_folder_with_files_in_it_is_refused(self):
+        (self.root / "bed").mkdir()
+        (self.root / "bed" / "keep.txt").write_text("mine")
+        with self.assertRaisesRegex(BedError, "is not empty"):
+            write_bed(self.root / "bed")
+        self.assertEqual(sorted(p.name for p in (self.root / "bed").iterdir()), ["keep.txt"])
+
+    def test_the_command_writes_the_bed_and_refuses_a_full_folder(self):
+        script = Path(failing_bed.__file__)
+        done = subprocess.run(
+            [sys.executable, str(script), "--out", str(self.root / "bed"), "--seed", "2"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            done.stdout.splitlines()[0],
+            f"{len(VARIANTS)} failing projects (2 observed in live runs)"
+            f" in {self.root / 'bed' / 'projects'}",
+        )
+        self.assertEqual(json.loads((self.root / "bed" / "answers.json").read_text())["seed"], 2)
+        again = subprocess.run(
+            [sys.executable, str(script), "--out", str(self.root / "bed")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(again.returncode, 2)
+        self.assertIn("is not empty", again.stderr)
 
 
 class GateTest(unittest.TestCase):

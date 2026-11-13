@@ -15,6 +15,9 @@ answers.json beside them says which is which.
 
 from __future__ import annotations
 
+import argparse
+import json
+import random
 import shutil
 import sys
 from dataclasses import dataclass
@@ -342,3 +345,55 @@ def repair(chosen: Variant, project: Path, reference: Path = REFERENCE) -> Path:
             text = text.replace(CROSSWALK_COMMENT, "", 1)
         (project / path).write_text(text, encoding="utf-8")
     return project
+
+
+class BedError(Exception):
+    """The bed cannot be written where asked."""
+
+
+def write_bed(out: Path, seed: int = 0) -> dict:
+    """Write every variant under neutral names in out/projects, and out/answers.json."""
+    out = Path(out)
+    if out.exists() and any(out.iterdir()):
+        raise BedError(f"{out} is not empty")
+    order = list(VARIANTS)
+    random.Random(f"{seed}:failing-bed").shuffle(order)
+    answers = {"seed": seed, "causes": dict(CAUSES), "projects": {}}
+    for number, chosen in enumerate(order, start=1):
+        name = f"project-{number:02d}"
+        make(chosen, out / "projects" / name)
+        answers["projects"][name] = {
+            "variant": chosen.name,
+            "cause": chosen.cause,
+            "origin": chosen.origin,
+            "model": chosen.model,
+            "file": chosen.path,
+            "summary": chosen.summary,
+            "failing": sorted(list(result) for result in chosen.failing),
+        }
+    text = json.dumps(answers, indent=2, sort_keys=True) + "\n"
+    (out / "answers.json").write_text(text, encoding="utf-8")
+    return answers
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Write the failing test bed.")
+    parser.add_argument("--out", type=Path, required=True, help="empty folder to write into")
+    parser.add_argument("--seed", type=int, default=0, help="seed for the projects' order")
+    args = parser.parse_args(argv)
+    try:
+        answers = write_bed(args.out, args.seed)
+    except BedError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    observed = sum(entry["origin"] == OBSERVED for entry in answers["projects"].values())
+    print(
+        f"{len(answers['projects'])} failing projects ({observed} observed in live runs)"
+        f" in {args.out / 'projects'}"
+    )
+    print(f"answers in {args.out / 'answers.json'}; keep them away from any agent")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
