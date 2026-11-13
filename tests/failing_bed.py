@@ -131,6 +131,176 @@ VARIANTS = (
             ("expected", CROSSWALK_MODEL, "fail"),
         ),
     ),
+    Variant(
+        "crosswalk_exact_email",
+        "match rule",
+        PLANTED,
+        "Customers are matched to accounts on the email exactly as each source stores it,"
+        " so addresses that differ only in case or spaces are missed.",
+        CROSSWALK_MODEL,
+        CROSSWALK,
+        (
+            Edit(
+                CROSSWALK,
+                "select\n    customers.customer_id,\n    accounts.account_id\n"
+                "from {{ ref('stg_billing__customers') }} as customers\n"
+                "left join {{ ref('stg_crm__accounts') }} as accounts\n"
+                "    on split_part(customers.email, '@', 2) = split_part(accounts.billing_email, '@', 2)",
+                "select\n    customers.id as customer_id,\n    accounts.account_id\n"
+                "from {{ source('billing', 'customers') }} as customers\n"
+                "left join {{ source('crm', 'accounts') }} as accounts\n"
+                "    on customers.email = accounts.billing_email\n"
+                "where customers.livemode = 'true'",
+            ),
+        ),
+        (("expected", CROSSWALK_MODEL, "fail"),),
+    ),
+    Variant(
+        "crosswalk_inner_join",
+        "join type",
+        PLANTED,
+        "The crosswalk uses an inner join, so customers with no CRM account are dropped.",
+        CROSSWALK_MODEL,
+        CROSSWALK,
+        (Edit(CROSSWALK, "left join", "inner join"),),
+        (("rows", CROSSWALK_MODEL, "fail"), ("expected", CROSSWALK_MODEL, "fail")),
+    ),
+    Variant(
+        "refunds_dropped",
+        "row filter",
+        PLANTED,
+        "Invoices with a negative amount, which are refunds, are left out.",
+        "stg_billing__invoices",
+        INVOICES,
+        (
+            Edit(
+                INVOICES,
+                "where livemode = 'true'",
+                "where livemode = 'true' and cast(amount_minor as bigint) > 0",
+            ),
+        ),
+        (("rows", "stg_billing__invoices", "fail"), ("total", "stg_billing__invoices", "fail")),
+    ),
+    Variant(
+        "test_mode_customers_kept",
+        "row filter",
+        PLANTED,
+        "Billing customers created in test mode are kept.",
+        "stg_billing__customers",
+        CUSTOMERS,
+        (Edit(CUSTOMERS, "\nwhere livemode = 'true'", ""),),
+        (
+            ("rows", "stg_billing__customers", "fail"),
+            ("rows", CROSSWALK_MODEL, "fail"),
+            ("expected", CROSSWALK_MODEL, "fail"),
+        ),
+    ),
+    Variant(
+        "events_not_deduplicated",
+        "deduplication",
+        PLANTED,
+        "Events delivered twice are kept twice.",
+        "stg_events__events",
+        EVENTS,
+        (Edit(EVENTS, "select distinct", "select"),),
+        (
+            ("build", "project", "fail"),
+            ("rows", "stg_events__events", "fail"),
+            ("key", "stg_events__events", "fail"),
+            ("repeat", "project", "fail"),
+        ),
+    ),
+    Variant(
+        "money_as_double",
+        "type",
+        PLANTED,
+        "Invoice amounts are held as floating-point numbers.",
+        "stg_billing__invoices",
+        INVOICES,
+        (
+            Edit(
+                INVOICES,
+                "cast(amount_minor as bigint) as amount_minor",
+                "cast(amount_minor as double) as amount_minor",
+            ),
+        ),
+        (("total", "stg_billing__invoices", "fail"),),
+    ),
+    Variant(
+        "account_id_as_number",
+        "type",
+        PLANTED,
+        "CRM account identifiers are read as numbers, so their leading zeros are lost.",
+        "stg_crm__accounts",
+        ACCOUNTS,
+        (Edit(ACCOUNTS, "    account_id,", "    cast(account_id as bigint) as account_id,"),),
+        (("expected", CROSSWALK_MODEL, "fail"),),
+    ),
+    Variant(
+        "yen_scaled_by_100",
+        "unit or sign",
+        PLANTED,
+        "Yen amounts are multiplied by 100 as if yen had cents.",
+        "stg_billing__invoices",
+        INVOICES,
+        (
+            Edit(
+                INVOICES,
+                "cast(amount_minor as bigint) as amount_minor",
+                "case when currency = 'jpy' then cast(amount_minor as bigint) * 100"
+                " else cast(amount_minor as bigint) end as amount_minor",
+            ),
+        ),
+        (("total", "stg_billing__invoices", "fail"),),
+    ),
+    Variant(
+        "refunds_made_positive",
+        "unit or sign",
+        PLANTED,
+        "Refunds lose their minus sign.",
+        "stg_billing__invoices",
+        INVOICES,
+        (
+            Edit(
+                INVOICES,
+                "cast(amount_minor as bigint) as amount_minor",
+                "abs(cast(amount_minor as bigint)) as amount_minor",
+            ),
+        ),
+        (("total", "stg_billing__invoices", "fail"),),
+    ),
+    Variant(
+        "invoice_load_time",
+        "nondeterminism",
+        PLANTED,
+        "Invoices carry the time they were loaded, which differs on every build.",
+        "stg_billing__invoices",
+        INVOICES,
+        (Edit(INVOICES, "    status,\n", "    status,\n    current_timestamp as loaded_at,\n"),),
+        (("repeat", "stg_billing__invoices", "fail"),),
+    ),
+    Variant(
+        "account_column_misspelt",
+        "missing column",
+        PLANTED,
+        "The accounts model names a segment column the CRM file does not have.",
+        "stg_crm__accounts",
+        ACCOUNTS,
+        (Edit(ACCOUNTS, "    segment,", "    segment_name,"),),
+        (
+            ("build", "project", "fail"),
+            ("build", "stg_crm__accounts", "fail"),
+            ("rows", "stg_crm__accounts", "skip"),
+            ("key", "stg_crm__accounts", "skip"),
+            ("repeat", "project", "fail"),
+            ("repeat", "stg_crm__accounts", "skip"),
+            ("build", CROSSWALK_MODEL, "fail"),
+            ("rows", CROSSWALK_MODEL, "skip"),
+            ("key", CROSSWALK_MODEL, "skip"),
+            ("expected", CROSSWALK_MODEL, "skip"),
+            ("repeat", CROSSWALK_MODEL, "skip"),
+        ),
+    ),
 )
 
 
