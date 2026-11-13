@@ -1,0 +1,120 @@
+"""The failing bed: projects that fail the gate for one known reason."""
+
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import failing_bed
+from failing_bed import (
+    CAUSES,
+    CROSSWALK,
+    CROSSWALK_COMMENT,
+    OBSERVED,
+    REFERENCE,
+    VARIANTS,
+    Edit,
+    Variant,
+    make,
+    repair,
+)
+
+CHECKS = {"build", "rows", "key", "total", "expected", "repeat"}
+MODELS = {
+    "stg_billing__customers",
+    "stg_billing__invoices",
+    "stg_crm__accounts",
+    "stg_events__events",
+    "int_customers_matched_to_accounts",
+}
+
+
+def files(folder: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(folder)): path.read_text(encoding="utf-8")
+        for path in sorted(folder.rglob("*"))
+        if path.is_file()
+    }
+
+
+class VariantsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_names_are_unique_and_every_variant_is_described(self):
+        names = [chosen.name for chosen in VARIANTS]
+        self.assertEqual(len(names), len(set(names)))
+        for chosen in VARIANTS:
+            with self.subTest(chosen.name):
+                self.assertIn(chosen.cause, CAUSES)
+                self.assertIn(chosen.origin, (OBSERVED, failing_bed.PLANTED))
+                self.assertIn(chosen.model, MODELS)
+                self.assertTrue(chosen.summary.endswith("."))
+                self.assertTrue(chosen.edits)
+                self.assertEqual({edit.path for edit in chosen.edits}, {chosen.path})
+                self.assertTrue(chosen.failing)
+                for check, subject, status in chosen.failing:
+                    self.assertIn(check, CHECKS)
+                    self.assertIn(subject, MODELS | {"project"})
+                    self.assertIn(status, ("fail", "skip"))
+
+    def test_the_observed_variants_are_the_mistakes_seen_in_live_runs(self):
+        observed = {chosen.name for chosen in VARIANTS if chosen.origin == OBSERVED}
+        self.assertEqual(observed, {"crosswalk_whole_email", "customers_one_per_email"})
+
+    def test_each_variant_is_the_reference_without_the_comment_plus_its_edits(self):
+        for chosen in VARIANTS:
+            with self.subTest(chosen.name):
+                project = make(chosen, self.root / chosen.name)
+                expected = files(REFERENCE)
+                expected[CROSSWALK] = expected[CROSSWALK].replace(CROSSWALK_COMMENT, "")
+                for edit in chosen.edits:
+                    self.assertEqual(expected[edit.path].count(edit.old), 1)
+                    expected[edit.path] = expected[edit.path].replace(edit.old, edit.new)
+                self.assertEqual(files(project), expected)
+                self.assertNotEqual(expected[chosen.path], files(REFERENCE)[chosen.path])
+
+    def test_no_project_keeps_the_comment_naming_the_match(self):
+        for chosen in VARIANTS:
+            with self.subTest(chosen.name):
+                text = (make(chosen, self.root / chosen.name) / CROSSWALK).read_text()
+                self.assertNotIn("domain", text)
+                self.assertNotIn("--", text)
+
+    def test_repair_writes_the_edited_files_back_as_the_bed_has_them(self):
+        clean = make(Variant("x", "type", OBSERVED, "", "", CROSSWALK, (), ()), self.root / "ok")
+        for chosen in VARIANTS:
+            with self.subTest(chosen.name):
+                project = make(chosen, self.root / chosen.name)
+                repair(chosen, project)
+                self.assertEqual(files(project), files(clean))
+
+    def test_an_edit_that_does_not_apply_once_is_refused_and_leaves_nothing(self):
+        for old in ("no such text", "    "):
+            with self.subTest(old=old):
+                broken = Variant(
+                    "broken", "type", OBSERVED, "", "", CROSSWALK, (Edit(CROSSWALK, old, "x"),), ()
+                )
+                destination = self.root / "broken"
+                with self.assertRaisesRegex(ValueError, "not once"):
+                    make(broken, destination)
+                self.assertFalse(destination.exists())
+
+    def test_the_comment_must_be_in_the_reference(self):
+        reference = self.root / "reference"
+        shutil.copytree(REFERENCE, reference)
+        crosswalk = reference / CROSSWALK
+        crosswalk.write_text(crosswalk.read_text().replace(CROSSWALK_COMMENT, ""))
+        with self.assertRaisesRegex(ValueError, "not once"):
+            make(VARIANTS[0], self.root / "p", reference)
+
+
+if __name__ == "__main__":
+    unittest.main()
