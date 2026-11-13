@@ -1049,9 +1049,22 @@ def _running(pid: int) -> bool:
     """Whether a process is alive (a zombie awaiting its parent is not)."""
     try:
         state = Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[0]
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # Gone before the file was opened, or between opening and reading it.
         return False
     return state != "Z"
+
+
+@unittest.skipUnless(Path("/proc").is_dir(), "needs /proc to see processes")
+class RunningTest(unittest.TestCase):
+    def test_a_process_reaped_while_its_state_is_read_is_not_running(self):
+        for error in (FileNotFoundError, ProcessLookupError):
+            with (
+                self.subTest(error.__name__),
+                mock.patch.object(Path, "read_text", side_effect=error),
+            ):
+                self.assertFalse(_running(os.getpid()))
+        self.assertTrue(_running(os.getpid()))
 
 
 @unittest.skipUnless(Path("/proc").is_dir(), "needs /proc to see processes")
