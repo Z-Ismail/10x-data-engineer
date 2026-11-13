@@ -1497,5 +1497,5 @@ construct objects of any class a checkpoint file names.
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |
-| `tests/` | Tests, the dbt project the gate is tested against, the equivalence check (`tests/equivalence.py`) and the reviewer test bed (`tests/review_bed.py`) |
+| `tests/` | Tests, the dbt project the gate is tested against, the equivalence check (`tests/equivalence.py`), the reviewer test bed (`tests/review_bed.py`) and the failing bed (`tests/failing_bed.py`) |
 
