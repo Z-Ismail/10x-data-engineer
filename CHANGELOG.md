@@ -6,6 +6,18 @@ Notable changes to this project.
 
 ### Added
 
+- A test bed for measuring a diagnosis: `python tests/failing_bed.py --out
+  <folder>` writes thirteen variants of the reference dbt project under
+  neutral names (`project-01` to `project-13`, in an order shuffled by
+  `--seed`) and, beside them, `answers.json` giving each one's cause (from
+  a fixed list of eight: match rule, join type, row filter, deduplication,
+  type, unit or sign, nondeterminism, missing column), the model and file
+  where the cause is, and every check the gate fails or skips on it. Two
+  copy mistakes engineer agents made in live runs (customers matched to
+  accounts on the whole email address; billing customers kept once per
+  email); eleven are planted. The tests check that the gate gives each
+  variant exactly its listed results and passes the project once the
+  edited file is written back as the reference has it.
 - A measurement of the reviewer on the test bed: `make review-rates`
   (`python -m tenx.review_rates run`) gates each bed project in the
   sandbox, makes its review packet and has the reviewer read it, as a
