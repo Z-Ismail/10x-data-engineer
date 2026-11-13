@@ -1,12 +1,15 @@
 """The failing bed: projects that fail the gate for one known reason."""
 
+import os
 import shutil
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import failing_bed
 from failing_bed import (
@@ -21,6 +24,11 @@ from failing_bed import (
     make,
     repair,
 )
+
+from demo.generate import generate
+from tenx.gate import run_gate
+
+DECLARATION = Path(__file__).resolve().parent / "fixtures" / "demo_gate.json"
 
 CHECKS = {"build", "rows", "key", "total", "expected", "repeat"}
 MODELS = {
@@ -114,6 +122,61 @@ class VariantsTest(unittest.TestCase):
         crosswalk.write_text(crosswalk.read_text().replace(CROSSWALK_COMMENT, ""))
         with self.assertRaisesRegex(ValueError, "not once"):
             make(VARIANTS[0], self.root / "p", reference)
+
+
+class GateTest(unittest.TestCase):
+    """Each variant through the real gate on one small dataset."""
+
+    SEED = 11
+    COMPANIES = 60
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        cls.raw = root / "data"
+        generate(cls.SEED, cls.COMPANIES, cls.raw, root / "answers")
+        clean = Variant("clean", "type", OBSERVED, "", "", CROSSWALK, (), ())
+        chosen = [clean, *VARIANTS]
+
+        def gate(variant: Variant) -> tuple[str, list]:
+            project = make(variant, root / variant.name)
+            results = run_gate(project, cls.raw, DECLARATION)
+            return variant.name, results
+
+        with ThreadPoolExecutor(max(2, os.cpu_count() or 1)) as pool:
+            cls.results = dict(pool.map(gate, chosen))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def not_passed(self, name: str) -> set:
+        return {
+            (result.check, result.subject, result.status)
+            for result in self.results[name]
+            if result.status != "pass"
+        }
+
+    def test_the_bed_reference_passes(self):
+        self.assertEqual(self.not_passed("clean"), set())
+        self.assertEqual(len(self.results["clean"]), 24)
+
+    def test_each_variant_fails_exactly_its_listed_checks(self):
+        for chosen in VARIANTS:
+            with self.subTest(chosen.name):
+                self.assertEqual(self.not_passed(chosen.name), set(chosen.failing))
+                self.assertEqual(len(chosen.failing), len(set(chosen.failing)))
+
+    def test_one_cause_shows_only_in_a_model_built_from_its_own(self):
+        # Read as numbers, account identifiers still pass every check on the
+        # accounts model; only the crosswalk built from it fails.
+        hidden = {
+            chosen.name
+            for chosen in VARIANTS
+            if not {subject for _, subject, _ in chosen.failing} & {chosen.model, "project"}
+        }
+        self.assertEqual(hidden, {"account_id_as_number"})
 
 
 if __name__ == "__main__":
