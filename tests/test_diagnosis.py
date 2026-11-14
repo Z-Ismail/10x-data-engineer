@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -149,3 +150,105 @@ class RenderTest(unittest.TestCase):
     def test_refuses_a_passed_validation(self):
         with self.assertRaisesRegex(review.PacketError, "passed has nothing to diagnose"):
             diagnosis.render(_report(passed=True), review.Selection(), [], [], spec=False)
+
+
+class BuildTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.goal = _write(self.root / "run" / "goal.md", "# Goal\n")
+        self.profiles = self.root / "run" / "profiles"
+        _write(self.profiles / "overlap.txt", "overlap\n")
+        self.project = self.root / "engineer"
+        _write(self.project / "dbt_project.yml", "name: demo\n")
+        _write(self.project / "models" / "stg_a.sql")
+        self.raw = self.root / "data"
+        self.gate = self.root / "gate"
+        self.results = _write(
+            self.gate / "target" / "run_results.json",
+            json.dumps({"args": {"project_dir": str(self.project), "raw": str(self.raw)}}),
+        )
+        self.log = _write(self.gate / "logs" / "dbt.log", f"Writing to {self.gate}/target\n")
+        self.declaration = _write(self.root / "checks" / "declaration.json", '{"models": []}\n')
+        self.out = self.root / "out" / "packet"
+
+    def build(self, **changes) -> review.Packet:
+        arguments = {
+            "goal": self.goal,
+            "profiles": self.profiles,
+            "project": self.project,
+            "report": _report(),
+            "raw": self.raw,
+            "build_folder": self.gate,
+            "build_files": {"run_results.json": self.results, "dbt.log": self.log},
+            "secrets": (self.declaration,),
+        }
+        return diagnosis.build(self.out, **{**arguments, **changes})
+
+    def test_holds_the_packet_files_with_folders_renamed(self):
+        packet = self.build()
+        self.assertEqual(
+            sorted(packet.files),
+            [
+                "GOAL.md",
+                "PACKET.md",
+                "build/dbt.log",
+                "build/run_results.json",
+                "project/dbt_project.yml",
+                "project/models/stg_a.sql",
+                "source_profiles/overlap.txt",
+            ],
+        )
+        self.assertEqual(
+            json.loads((self.out / "build" / "run_results.json").read_text()),
+            {"args": {"project_dir": "<project>", "raw": "<raw>"}},
+        )
+        self.assertEqual(
+            (self.out / "build" / "dbt.log").read_text(), "Writing to <build>/target\n"
+        )
+        text = (self.out / "PACKET.md").read_text()
+        self.assertIn("`build/dbt.log`, `build/run_results.json`.", text)
+        self.assertTrue(text.endswith("## Left out or cut\n\nNothing.\n"))
+        for path in self.out.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(str(self.root), path.read_text(), path)
+
+    def test_names_what_was_left_out_of_the_project_and_the_build(self):
+        (self.project / "models" / "leak.sql").symlink_to(self.declaration)
+        self.results.unlink()
+        packet = self.build()
+        self.assertEqual(
+            packet.left_out,
+            (
+                ("project/models/leak.sql", review.LINK),
+                ("build/run_results.json", diagnosis.MISSING),
+            ),
+        )
+        text = (self.out / "PACKET.md").read_text()
+        self.assertIn("what the build wrote about itself: `build/dbt.log`. In", text)
+        self.assertIn("- `build/run_results.json`: not written by the build.\n", text)
+        manifest = json.loads((self.out / "packet.json").read_text())
+        self.assertEqual([tuple(item) for item in manifest["left_out"]], list(packet.left_out))
+
+    def test_refuses_a_build_file_name_that_is_a_path(self):
+        for name in ("../dbt.log", "logs/dbt.log", "..", ""):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(review.PacketError, "not a plain file name"):
+                    self.build(build_files={name: self.log})
+                self.assertFalse(self.out.exists())
+
+    def test_without_build_files(self):
+        packet = self.build(build_files=None)
+        self.assertNotIn("build/", "".join(packet.files))
+        self.assertNotIn("`build/`", (self.out / "PACKET.md").read_text())
+
+    def test_a_copy_of_a_secret_in_the_build_files_refuses_the_packet(self):
+        self.log.write_text(self.declaration.read_text())
+        with self.assertRaisesRegex(review.PacketError, "build/dbt.log has the same bytes"):
+            self.build()
+        self.assertEqual(os.listdir(self.root / "out"), [])
+
+    def test_refuses_a_passed_validation_and_writes_nothing(self):
+        with self.assertRaisesRegex(review.PacketError, "passed has nothing to diagnose"):
+            self.build(report=_report(passed=True))
+        self.assertFalse(self.out.exists())

@@ -28,10 +28,15 @@ from tenx.ports import ValidationReport
 from tenx.review import (
     LINK,
     MAX_FILE_BYTES,
+    PACKET_FILE,
+    PROJECT_DIR,
     SPECIAL,
     TOO_LARGE,
+    Packet,
     PacketError,
     Selection,
+    assemble,
+    select,
 )
 
 __all__ = [
@@ -39,6 +44,7 @@ __all__ = [
     "BUILD_NAME",
     "PROJECT_NAME",
     "RAW_NAME",
+    "build",
     "read_build_file",
     "render",
 ]
@@ -169,3 +175,60 @@ def _checks(results) -> list[str]:
         lines.append(f"- {result.check} on {result.subject}: {first}")
         lines += [f"  {line}" for line in rest]
     return lines
+
+
+def build(
+    folder: Path,
+    *,
+    goal: Path,
+    profiles: Path,
+    project: Path,
+    report: ValidationReport,
+    raw: Path,
+    build_folder: Path,
+    build_files: Mapping[str, Path] | None = None,
+    spec: Path | None = None,
+    secrets: Iterable[Path] = (),
+) -> Packet:
+    """Make the diagnosis packet for a project the validator failed, in ``folder``.
+
+    ``build_files`` maps each name under ``build/`` to the file the build
+    wrote (its results, its log); ``raw`` and ``build_folder`` are the
+    folders the build read from and wrote to, renamed in those files along
+    with the project's. The goal, spec and secrets are as
+    ``tenx.review.assemble`` takes them: a packet file with the same bytes as
+    a secret refuses the whole packet.
+    """
+    folder = Path(folder)
+    if os.path.lexists(folder) and (not folder.is_dir() or any(folder.iterdir())):
+        raise PacketError(f"{folder} already exists and is not an empty folder")
+    if report.passed:
+        raise PacketError("a project the validator passed has nothing to diagnose")
+    chosen = select(project)
+    renames = {}
+    for path, name in ((project, PROJECT_NAME), (raw, RAW_NAME), (build_folder, BUILD_NAME)):
+        for form in {str(Path(path)), str(Path(path).resolve())}:
+            renames[form] = name
+    files = {f"{PROJECT_DIR}/{name}": data for name, data in chosen.files.items()}
+    left_out = [(f"{PROJECT_DIR}/{name}", reason) for name, reason in chosen.left_out]
+    carried = []
+    for name, path in sorted((build_files or {}).items()):
+        if Path(name).name != name or name in ("", ".", ".."):
+            raise PacketError(f"{name!r} is not a plain file name for build/")
+        data, reason = read_build_file(Path(path), renames)
+        if data is not None:
+            files[f"{BUILD_DIR}/{name}"] = data
+            carried.append(name)
+        if reason is not None:
+            left_out.append((f"{BUILD_DIR}/{name}", reason))
+    text = render(report, chosen, carried, left_out, spec is not None)
+    files[PACKET_FILE] = text.encode("utf-8")
+    return assemble(
+        folder,
+        goal=goal,
+        profiles=profiles,
+        files=files,
+        left_out=left_out,
+        spec=spec,
+        secrets=secrets,
+    )
