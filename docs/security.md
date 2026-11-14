@@ -81,6 +81,15 @@ the real gate passed, and check that none of them, no reference query and
 no expected row reaches the packet; with links followed and the second
 guard taken out, the declaration and its reference query do.
 
+The diagnosis packet (`tenx/diagnosis.py`), which a Diagnostics agent
+will be given after a gate failure, is made the same way, and also carries
+dbt's results and log from the gate's first build. That build ran in the
+sandbox with the declaration and expected rows hidden, so its files cannot
+hold them; the same second guard applies. The folders those files name
+(the project, the raw files and the gate's work folder) are replaced by
+neutral names, and a test checks that no folder of a real run is named in
+any packet file.
+
 The reviewer agent (`--reviewer`) runs in the same sandbox as the
 cross-source agent: read-only tools, its own folder holding only the
 packet, no raw files, and the repository, the run folder and the

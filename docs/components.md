@@ -1447,6 +1447,46 @@ on mistakes like these, not on the subtler ones an engineer agent might
 make. Reviews of the same project on different datasets are not
 independent, so the intervals are narrower than they should be.
 
+## Diagnosis packet
+
+The Diagnostics agent is not built yet. `tenx/diagnosis.py` makes the
+folder it will be given when the gate fails a project, and
+`tenx/diagnostics.py` checks its answer.
+
+| In the packet | From |
+| --- | --- |
+| `GOAL.md`, `SPEC.md`, `source_profiles/`, `project/` | As in the [review packet](#review-packet) |
+| `build/run_results.json` | dbt's results of the gate's first build: each node's status, message and rendered SQL |
+| `build/dbt.log` | dbt's log of that build; over 256 KiB, its last 256 KiB from the start of a line |
+| `PACKET.md` | What each part is; every check the gate ran, failed ones first, with what an agent may be told of it; and what was left out or cut, and why |
+| `packet.json` | The SHA-256 of every file in the packet, and what was left out |
+
+The build's files name the folders the build ran in: the project, the raw
+files and the gate's work folder, where the expected rows sit beside the
+database. Each is replaced by `<project>`, `<raw>` or `<build>`, so the
+packet does not say where the run keeps its files. A build file is read
+as the review packet reads project files (no link followed, regular files
+only), and a packet file with the same bytes as the declaration or a gate
+file refuses the packet. Each check is listed with the same text a repair
+is given: an `expected` check gives its counts, never its rows. A project
+the gate passed has nothing to diagnose and is not packed.
+
+For the bed's projects (`tests/failing_bed.py`) on the demo data, the log
+is about 55 KB and the run results about 15 KB.
+
+The answer is JSON in a fixed shape: a summary; confirmed facts, each
+quoting a file of the packet; causes, most likely first, each `probable`
+or a `hypothesis`; and what is missing. Each cause gives its kind from a
+fixed list (match rule, join type, row filter, deduplication, type, unit
+or sign, nondeterminism, missing column, or `other`), the model, a project
+file and line, and the checks it explains. The check refuses an answer
+whose quote is not in the file it cites, whose model, file or line the
+project does not have, which explains a check that passed or does not
+exist, which ranks a probable cause after a hypothesis, or which names no
+cause without saying what is missing. A cause need not sit in a model a
+failing check names: a broken staging model can fail only the crosswalk
+built from it. A checked answer is written as `DIAGNOSIS.md`.
+
 ## Run records and graph state
 
 The graph run (above) saves its state after every step, so that a
@@ -1493,7 +1533,7 @@ construct objects of any class a checkpoint file names.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer, the diagnosis packet and the check of a diagnosis |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |

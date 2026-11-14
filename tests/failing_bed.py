@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tenx.diagnostics import CAUSES
+
 REFERENCE = ROOT / "tests" / "fixtures" / "demo_project"
 
 STAGING = "models/staging/"
@@ -48,18 +50,6 @@ CROSSWALK_COMMENT = (
 OBSERVED = "observed"
 PLANTED = "planted"
 
-# Every cause a variant can have, with what it means. A diagnosis is scored
-# against this list, so that two wordings of one cause count as the same.
-CAUSES = {
-    "match rule": "records of two sources are matched on the wrong value",
-    "join type": "a join drops the rows that have no match",
-    "row filter": "rows are left out or kept against the goal",
-    "deduplication": "rows are merged or repeated against the goal",
-    "type": "a value is read as the wrong type",
-    "unit or sign": "amounts are scaled or their sign is changed",
-    "nondeterminism": "a value changes from one build to the next",
-    "missing column": "a model names a column its source does not have",
-}
 
 CROSSWALK_MODEL = "int_customers_matched_to_accounts"
 
