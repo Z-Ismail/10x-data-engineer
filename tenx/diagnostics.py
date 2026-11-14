@@ -35,6 +35,8 @@ __all__ = [
     "SCHEMA",
     "DiagnosisError",
     "check_answer",
+    "diagnosis_from_report",
+    "render",
 ]
 
 DIAGNOSIS_FILE = "DIAGNOSIS.md"
@@ -227,3 +229,56 @@ def check_answer(answer, files: Mapping[str, str], report: ValidationReport) -> 
     if not causes and not missing:
         raise DiagnosisError("the answer names no cause and says nothing is missing")
     return answer
+
+
+def diagnosis_from_report(
+    report: dict | None, files: Mapping[str, str], validation: ValidationReport
+) -> dict:
+    """The checked answer from Claude Code's JSON report of the diagnosis."""
+    if report is None:
+        raise DiagnosisError("the diagnostician gave no report")
+    if "structured_output" not in report:
+        raise DiagnosisError(
+            f"the diagnostician ended {report.get('subtype') or 'unknown'} without an answer"
+        )
+    return check_answer(report["structured_output"], files, validation)
+
+
+def render(diagnosis: dict) -> str:
+    """The checked answer as the Markdown file a person reads after the run."""
+    lines = [
+        "# Diagnosis",
+        "",
+        "Advice from the diagnostician on why the project failed the checks. It changes",
+        "no file and no verdict.",
+        "",
+        _flat(diagnosis["summary"]),
+    ]
+    for likelihood, heading in ((PROBABLE, "Probable causes"), (HYPOTHESIS, "Hypotheses")):
+        chosen = [item for item in diagnosis["causes"] if item["likelihood"] == likelihood]
+        if not chosen:
+            continue
+        lines += ["", f"## {heading}", ""]
+        for number, item in enumerate(chosen, start=1):
+            checks = ", ".join(f"{c['check']} on {c['subject']}" for c in item["explains"])
+            lines += [
+                (
+                    f"{number}. `{item['file']}:{item['line']}`, `{item['model']}`, "
+                    f"{item['cause']}: {_flat(item['claim'])}"
+                ),
+                f"   Evidence: {_flat(item['evidence'])}",
+                f"   Explains: {checks}.",
+            ]
+    if not diagnosis["causes"]:
+        lines += ["", "No cause was named."]
+    if diagnosis["facts"]:
+        lines += ["", "## Confirmed facts", ""]
+        for item in diagnosis["facts"]:
+            lines += [
+                f"- {_flat(item['claim'])}",
+                f"  Quoted from `{item['file']}`: {_flat(item['quote'])}",
+            ]
+    if diagnosis["missing"]:
+        lines += ["", "## Missing information", ""]
+        lines += [f"- {_flat(item)}" for item in diagnosis["missing"]]
+    return "\n".join(lines) + "\n"

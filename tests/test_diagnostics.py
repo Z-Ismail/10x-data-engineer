@@ -13,6 +13,8 @@ from tenx.diagnostics import (
     SCHEMA,
     DiagnosisError,
     check_answer,
+    diagnosis_from_report,
+    render,
 )
 from tenx.ports import CheckResult, ValidationReport
 
@@ -162,6 +164,80 @@ class CheckAnswerTest(unittest.TestCase):
                 with self.assertRaises(DiagnosisError) as raised:
                     check_answer(bad, FILES, REPORT)
                 self.assertEqual(str(raised.exception), reason)
+
+
+class FromReportTest(unittest.TestCase):
+    def test_reads_the_structured_output(self):
+        good = answer()
+        report = {"subtype": "success", "structured_output": good}
+        self.assertIs(diagnosis_from_report(report, FILES, REPORT), good)
+
+    def test_refuses_no_report_or_no_answer(self):
+        cases = {
+            "the diagnostician gave no report": None,
+            "the diagnostician ended error_max_turns without an answer": {
+                "subtype": "error_max_turns"
+            },
+            "the diagnostician ended unknown without an answer": {},
+        }
+        for reason, report in cases.items():
+            with self.subTest(reason=reason):
+                with self.assertRaises(DiagnosisError) as raised:
+                    diagnosis_from_report(report, FILES, REPORT)
+                self.assertEqual(str(raised.exception), reason)
+
+    def test_checks_the_answer_it_reads(self):
+        report = {"structured_output": answer(causes=[cause(line=9)])}
+        with self.assertRaisesRegex(DiagnosisError, "cites line 9"):
+            diagnosis_from_report(report, FILES, REPORT)
+
+
+class RenderTest(unittest.TestCase):
+    def test_causes_in_rank_then_facts_and_what_is_missing(self):
+        second = cause(
+            likelihood="hypothesis",
+            cause="other",
+            line=1,
+            claim="The raw\nfile may   have changed.",
+            explains=[{"check": "build", "subject": "project"}],
+        )
+        diagnosis = answer(causes=[cause(), second], missing=["The raw accounts file."])
+        self.assertEqual(
+            render(diagnosis),
+            "# Diagnosis\n"
+            "\n"
+            "Advice from the diagnostician on why the project failed the checks. It changes\n"
+            "no file and no verdict.\n"
+            "\n"
+            "The accounts model names a column the source does not have.\n"
+            "\n"
+            "## Probable causes\n"
+            "\n"
+            f"1. `{ACCOUNTS}:3`, `stg_crm__accounts`, missing column: The model reads"
+            " segment_name, which the raw accounts do not have.\n"
+            "   Evidence: The log's binder error; the profile lists segment.\n"
+            "   Explains: build on stg_crm__accounts, rows on stg_crm__accounts.\n"
+            "\n"
+            "## Hypotheses\n"
+            "\n"
+            f"1. `{ACCOUNTS}:1`, `stg_crm__accounts`, other: The raw file may have changed.\n"
+            "   Evidence: The log's binder error; the profile lists segment.\n"
+            "   Explains: build on project.\n"
+            "\n"
+            "## Confirmed facts\n"
+            "\n"
+            "- dbt could not find the column segment_name.\n"
+            '  Quoted from `build/dbt.log`: Referenced column "segment_name" not found\n'
+            "\n"
+            "## Missing information\n"
+            "\n"
+            "- The raw accounts file.\n",
+        )
+
+    def test_without_causes_or_facts(self):
+        text = render(answer(facts=[], causes=[], missing=["The log."]))
+        self.assertIn("\n\nNo cause was named.\n\n## Missing information\n\n- The log.\n", text)
+        self.assertNotIn("## Confirmed facts", text)
 
 
 if __name__ == "__main__":
