@@ -21,14 +21,17 @@ from __future__ import annotations
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+from tenx.ports import ValidationReport
 from tenx.review import (
     LINK,
     MAX_FILE_BYTES,
     SPECIAL,
     TOO_LARGE,
+    PacketError,
+    Selection,
 )
 
 __all__ = [
@@ -37,6 +40,7 @@ __all__ = [
     "PROJECT_NAME",
     "RAW_NAME",
     "read_build_file",
+    "render",
 ]
 
 BUILD_DIR = "build"
@@ -89,3 +93,79 @@ def read_build_file(path: Path, renames: Mapping[str, str]) -> tuple[bytes | Non
         pattern = re.escape(folder.encode("utf-8")) + rb"(?![\w.-])"
         data = re.sub(pattern, renames[folder].encode("utf-8").replace(b"\\", b"\\\\"), data)
     return data, reason
+
+
+def _counted(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def render(
+    report: ValidationReport,
+    selection: Selection,
+    build_files: Iterable[str],
+    left_out: Iterable[tuple[str, str]],
+    spec: bool,
+) -> str:
+    """``PACKET.md``: what is in the packet, every check, and what was left out or cut.
+
+    Each check is shown with what the validator lets an agent be told of it
+    (its feedback), never its full detail, so a check built from something
+    hidden says only what it chose to. ``build_files`` are the names under
+    ``build/``; ``left_out`` pairs each packet path with the reason.
+    """
+    if report.passed:
+        raise PacketError("a project the validator passed has nothing to diagnose")
+    groups = {
+        status: [r for r in report.results if r.status == status] for status in ("fail", "skip")
+    }
+    passed = [r for r in report.results if r.status not in groups]
+    build_files = list(build_files)
+    tally = (
+        f"{_counted(len(report.results), 'check')}, {len(groups['fail'])} failed, "
+        f"{len(groups['skip'])} could not run and {len(passed)} passed"
+    )
+    lines = [
+        "# Diagnosis packet",
+        "",
+        "The project in `project/` was built from an empty database and failed the",
+        f"validator. Of its {tally};",
+        "each is listed below with what may be said of it. The checks ran on every row.",
+        "",
+        "## Files",
+        "",
+        "- `GOAL.md`: the goal the project was built for.",
+    ]
+    if spec:
+        lines.append("- `SPEC.md`: the spec the engineer was given.")
+    lines += [
+        "- `source_profiles/`: a profile of each raw table, and the overlap report.",
+        f"- `project/`: the project's settings and models, {_counted(len(selection.files), 'file')}.",
+    ]
+    if build_files:
+        named = ", ".join(f"`{BUILD_DIR}/{name}`" for name in build_files)
+        lines += [
+            f"- `{BUILD_DIR}/`: what the build wrote about itself: {named}. In these files",
+            f"  `{PROJECT_NAME}` stands for the project's folder, `{RAW_NAME}` for the raw",
+            f"  files' folder and `{BUILD_NAME}` for the folder the build wrote to.",
+        ]
+    for status, heading in (("fail", "Checks that failed"), ("skip", "Checks that could not run")):
+        if groups[status]:
+            lines += ["", f"## {heading}", ""]
+            lines += _checks(groups[status])
+    if passed:
+        lines += ["", "## Checks that passed", ""]
+        lines += _checks(passed)
+    lines += ["", "## Left out or cut", ""]
+    left_out = list(left_out)
+    lines += [f"- `{name}`: {reason}." for name, reason in left_out] or ["Nothing."]
+    return "\n".join(lines) + "\n"
+
+
+def _checks(results) -> list[str]:
+    lines = []
+    for result in results:
+        said = result.feedback or "No more is said about this check."
+        first, *rest = said.splitlines() or [""]
+        lines.append(f"- {result.check} on {result.subject}: {first}")
+        lines += [f"  {line}" for line in rest]
+    return lines
