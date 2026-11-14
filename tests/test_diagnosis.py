@@ -60,6 +60,19 @@ class ReadBuildFileTest(unittest.TestCase):
             b' "d": "/runs/r10/gate", "e": "/runs/r1.old"}\n',
         )
 
+    def test_a_path_cut_short_is_renamed_if_it_starts_a_folder(self):
+        path = _write(
+            self.root / "dbt.log",
+            "LINE 13: from read_csv('/runs/r1/da...\n"
+            "at /runs/r1/raw/x.csv and /usr/lib/py... and /... and /runs/r2...\n",
+        )
+        data, _ = diagnosis.read_build_file(path, {"/runs/r1/data": "<raw>"})
+        self.assertEqual(
+            data,
+            b"LINE 13: from read_csv('<folder>...\n"
+            b"at /runs/r1/raw/x.csv and /usr/lib/py... and /... and /runs/r2...\n",
+        )
+
     def test_a_long_log_keeps_its_end_from_a_line_start(self):
         # 300 lines of 1,000 bytes: the last 256 KiB start part way into a line.
         lines = [f"{n:04d} " + "x" * 994 + "\n" for n in range(300)]

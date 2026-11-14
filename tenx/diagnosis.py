@@ -42,6 +42,7 @@ from tenx.review import (
 __all__ = [
     "BUILD_DIR",
     "BUILD_NAME",
+    "CUT_NAME",
     "PROJECT_NAME",
     "RAW_NAME",
     "build",
@@ -54,6 +55,11 @@ BUILD_DIR = "build"
 PROJECT_NAME = "<project>"
 RAW_NAME = "<raw>"
 BUILD_NAME = "<build>"
+# A path the database printed cut short ("/home/.../ru..."), which could be
+# the start of any of them.
+CUT_NAME = "<folder>"
+# An absolute path ending in the three dots that mark it cut short.
+_CUT_PATH = re.compile(rb"/[^\s'\"`]*?\.\.\.")
 # A file of these kinds keeps its end when it is too long; any other is left out.
 TAILED_SUFFIXES = (".log",)
 MISSING = "not written by the build"
@@ -69,7 +75,8 @@ def read_build_file(path: Path, renames: Mapping[str, str]) -> tuple[bytes | Non
     Returns (bytes, None) for a whole file, (bytes, reason) for a log cut to
     its end, and (None, reason) for a file left out. ``renames`` maps each
     folder's absolute path to its neutral name; longer paths are replaced
-    first, so a folder inside another keeps its own name.
+    first, so a folder inside another keeps its own name. A path cut short
+    with three dots that starts any of the folders becomes CUT_NAME.
     """
     if not os.path.lexists(path):
         return None, MISSING
@@ -98,7 +105,15 @@ def read_build_file(path: Path, renames: Mapping[str, str]) -> tuple[bytes | Non
         # The whole folder name only: /runs/r1 is not the start of /runs/r10.
         pattern = re.escape(folder.encode("utf-8")) + rb"(?![\w.-])"
         data = re.sub(pattern, renames[folder].encode("utf-8").replace(b"\\", b"\\\\"), data)
-    return data, reason
+    folders = [folder.encode("utf-8") for folder in renames]
+
+    def cut(match: re.Match) -> bytes:
+        start = match.group()[:-3]
+        if len(start) > 1 and any(folder.startswith(start) for folder in folders):
+            return CUT_NAME.encode("utf-8") + b"..."
+        return match.group()
+
+    return _CUT_PATH.sub(cut, data), reason
 
 
 def _counted(count: int, noun: str) -> str:

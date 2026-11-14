@@ -40,7 +40,8 @@ class PacketFromFailingProjects(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.root = Path(cls.tmp.name)
+        # A folder name long enough that the database's error cuts it short.
+        cls.root = Path(cls.tmp.name) / ("a-folder-with-a-long-name-" * 4)
         cls.raw = cls.root / "data"
         generate(11, 60, cls.raw, cls.root / "answers")
         cls.profiles = cls.root / "profiles"
@@ -99,12 +100,15 @@ class PacketFromFailingProjects(unittest.TestCase):
         for name, (_, packet, _) in self.runs.items():
             for file, text in packet_files(packet).items():
                 with self.subTest(name=name, file=file):
-                    self.assertNotIn(str(self.root), text)
-                    self.assertNotIn(str(self.root.resolve()), text)
+                    # The temporary folder, which a path cut short still names.
+                    self.assertNotIn(self.tmp.name, text)
+                    self.assertNotIn(str(Path(self.tmp.name).resolve()), text)
             files = packet_files(packet)
             self.assertIn("<build>/target", files["build/dbt.log"])
             self.assertIn("<raw>", files["build/run_results.json"])
             self.assertIn("<project>", files["build/dbt.log"])
+        log = packet_files(self.runs["account_column_misspelt"][1])["build/dbt.log"]
+        self.assertIn("from read_csv('<folder>...", log)
 
     def test_nothing_hidden_reaches_the_packet(self):
         hidden = {artefacts.file_hash(DECLARATION)}
