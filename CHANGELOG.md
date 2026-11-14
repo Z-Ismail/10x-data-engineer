@@ -6,6 +6,20 @@ Notable changes to this project.
 
 ### Added
 
+- What a Diagnostics agent will be given of a project the gate fails, and
+  the check of its answer (the agent itself is not built yet).
+  `tenx/diagnosis.py` makes the packet: the goal, spec, profiles and
+  project as the review packet carries them, every check with what an
+  agent may be told of it (failed ones first), and dbt's
+  `run_results.json` and log from the gate's first build, with the
+  project's, the raw files' and the gate's folders replaced by
+  `<project>`, `<raw>` and `<build>`, and a long log cut to its last
+  256 KiB. `tenx/diagnostics.py` checks the answer: confirmed facts must
+  quote a file of the packet; each cause names one of nine kinds, a model,
+  file and line the project has, and the failed or unrun checks it
+  explains; probable causes come before hypotheses. A checked answer is
+  written as `DIAGNOSIS.md`. The failing bed takes its list of causes from
+  it.
 - A test bed for measuring a diagnosis: `python tests/failing_bed.py --out
   <folder>` writes thirteen variants of the reference dbt project under
   neutral names (`project-01` to `project-13`, in an order shuffled by

@@ -62,7 +62,7 @@ is given, for the same reason.
 | `agents/` | The agents' instructions |
 | `docs/` | The component reference |
 | `demo/` | Generator for the three demo source systems, and their goal |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the spec contract's check and its row counts, the run artefacts, the spending policy, the capability interfaces, and the reviewer's measurement (`tenx/review_rates.py`) |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the spec contract's check and its row counts, the run artefacts, the spending policy, the capability interfaces, the reviewer's measurement (`tenx/review_rates.py`), and the diagnosis packet and the check of a diagnosis (`tenx/diagnosis.py`, `tenx/diagnostics.py`) |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/`, `tenx/run.py` | The graph run: its steps, state and checkpoints, and its command line |
 | `tests/` | Tests, the dbt project the gate is tested against, the equivalence check (`tests/equivalence.py`), the reviewer test bed (`tests/review_bed.py`) and the failing bed (`tests/failing_bed.py`) |
