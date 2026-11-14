@@ -37,6 +37,7 @@ __all__ = [
     "Packet",
     "PacketError",
     "Selection",
+    "assemble",
     "build",
     "render",
     "select",
@@ -197,6 +198,62 @@ def _secret_hashes(secrets: Iterable[Path]) -> set[str]:
     return found
 
 
+def assemble(
+    folder: Path,
+    *,
+    goal: Path,
+    profiles: Path,
+    files: dict[str, bytes],
+    left_out: Iterable[tuple[str, str]],
+    spec: Path | None = None,
+    secrets: Iterable[Path] = (),
+) -> Packet:
+    """Write a packet into ``folder``, all of it or nothing.
+
+    ``files`` maps each further file's path in the packet to its bytes. The
+    goal and spec come from the run's own files, not the copies in the
+    project, which the engineer could have changed. ``secrets`` are the files
+    and folders an agent must never see (the validator's declaration and
+    working files): a packet file with the same bytes as any of them refuses
+    the whole packet, which is then not made.
+    """
+    folder = Path(folder)
+    if os.path.lexists(folder) and (not folder.is_dir() or any(folder.iterdir())):
+        raise PacketError(f"{folder} already exists and is not an empty folder")
+    left_out = tuple(left_out)
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=f".{folder.name}.", dir=folder.parent))
+    try:
+        shutil.copyfile(goal, work / GOAL_FILE)
+        if spec is not None:
+            shutil.copyfile(spec, work / SPEC_FILE)
+        shutil.copytree(profiles, work / PROFILES_DIR)
+        for name, data in files.items():
+            path = work / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        written = {
+            path.relative_to(work).as_posix(): artefacts.file_hash(path)
+            for path in sorted(work.rglob("*"))
+            if path.is_file()
+        }
+        hidden = _secret_hashes(secrets)
+        for name, digest in written.items():
+            if digest in hidden:
+                raise PacketError(f"{name} has the same bytes as a file hidden from agents")
+        manifest = {"files": written, "left_out": [list(item) for item in left_out]}
+        (work / MANIFEST_FILE).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if folder.is_dir():
+            folder.rmdir()
+        os.replace(work, folder)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    return Packet(folder, written, left_out)
+
+
 def build(
     folder: Path,
     *,
@@ -209,46 +266,20 @@ def build(
 ) -> Packet:
     """Make the review packet for a project the validator passed, in ``folder``.
 
-    The goal and spec come from the run's own files, not the copies in the
-    project, which the engineer could have changed. ``secrets`` are the files
-    and folders the reviewer must never see (the validator's declaration and
-    working files): a packet file with the same bytes as any of them refuses
-    the whole packet, which is then not made.
+    The goal, spec and secrets are as ``assemble`` takes them.
     """
     folder = Path(folder)
     if os.path.lexists(folder) and (not folder.is_dir() or any(folder.iterdir())):
         raise PacketError(f"{folder} already exists and is not an empty folder")
     chosen = select(project)
-    text = render(report, chosen, spec is not None)
-    folder.parent.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix=f".{folder.name}.", dir=folder.parent))
-    try:
-        shutil.copyfile(goal, work / GOAL_FILE)
-        if spec is not None:
-            shutil.copyfile(spec, work / SPEC_FILE)
-        shutil.copytree(profiles, work / PROFILES_DIR)
-        for name, data in chosen.files.items():
-            path = work / PROJECT_DIR / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-        (work / PACKET_FILE).write_text(text, encoding="utf-8")
-        files = {
-            path.relative_to(work).as_posix(): artefacts.file_hash(path)
-            for path in sorted(work.rglob("*"))
-            if path.is_file()
-        }
-        hidden = _secret_hashes(secrets)
-        for name, digest in files.items():
-            if digest in hidden:
-                raise PacketError(f"{name} has the same bytes as a file hidden from agents")
-        manifest = {"files": files, "left_out": [list(item) for item in chosen.left_out]}
-        (work / MANIFEST_FILE).write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        if folder.is_dir():
-            folder.rmdir()
-        os.replace(work, folder)
-    except BaseException:
-        shutil.rmtree(work, ignore_errors=True)
-        raise
-    return Packet(folder, files, tuple(chosen.left_out))
+    files = {f"{PROJECT_DIR}/{name}": data for name, data in chosen.files.items()}
+    files[PACKET_FILE] = render(report, chosen, spec is not None).encode("utf-8")
+    return assemble(
+        folder,
+        goal=goal,
+        profiles=profiles,
+        files=files,
+        left_out=chosen.left_out,
+        spec=spec,
+        secrets=secrets,
+    )
