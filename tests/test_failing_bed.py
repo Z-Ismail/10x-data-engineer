@@ -30,6 +30,7 @@ from failing_bed import (
 )
 
 from demo.generate import generate
+from tenx import diagnostics
 from tenx.gate import run_gate
 
 DECLARATION = Path(__file__).resolve().parent / "fixtures" / "demo_gate.json"
@@ -59,6 +60,9 @@ class VariantsTest(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_the_causes_are_the_ones_a_diagnosis_names(self):
+        self.assertIs(CAUSES, diagnostics.CAUSES)
 
     def test_names_are_unique_and_every_variant_is_described(self):
         names = [chosen.name for chosen in VARIANTS]
