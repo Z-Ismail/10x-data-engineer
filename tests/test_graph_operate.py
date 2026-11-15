@@ -1,6 +1,7 @@
 """The operate workflow of the graph: check an existing project, and diagnose a failure."""
 
 import hashlib
+import json
 import os
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 from graph_fakes import Fakes, GraphCase
 
 from tenx.domain import AgentFinding
-from tenx.graph.build import steps_for
+from tenx.graph.build import ledger, steps_for
 from tenx.graph.operate import copy_project
 
 # The stand-in diagnosis, as DIAGNOSIS.md shows it.
@@ -126,6 +127,67 @@ class IntakeTest(OperateCase, unittest.TestCase):
             self.claims(state, "intake"),
             ["the project's copy leaves out what is not a file, folder or link: pipe"],
         )
+
+
+class DiagnosisTest(OperateCase, unittest.TestCase):
+    def test_a_failed_project_is_diagnosed_from_its_packet(self):
+        fakes = Fakes()
+        fakes.verdict = False
+        fakes.records_builds = True
+        state = self.run_graph(fakes)
+        self.assertEqual(fakes.calls, ["profile", "overlap", "gate", "diagnostics"])
+        self.assertEqual(
+            fakes.seen["diagnostics"],
+            [
+                "GOAL.md",
+                "PACKET.md",
+                "build",
+                "build/dbt.log",
+                "packet.json",
+                "project",
+                "project/dbt_project.yml",
+                "project/models",
+                "project/models/orders.sql",
+                "source_profiles",
+                "source_profiles/overlap.json",
+                "source_profiles/overlap.txt",
+                "source_profiles/shop.orders.json",
+                "source_profiles/shop.orders.txt",
+            ],
+        )
+        work = self.out / "diagnostics" / "attempt-1" / "work"
+        self.assertEqual((work / "build" / "dbt.log").read_text(), "Running in <project>\nDone.\n")
+        written = self.out / "diagnostics" / "attempt-1" / "DIAGNOSIS.md"
+        self.assertEqual(written.read_text(), DIAGNOSIS_TEXT)
+        self.assertEqual(state["artefacts"]["diagnosis"]["path"], str(written))
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(
+            self.claims(state),
+            [
+                "the diagnosis: The orders model selects a constant, so its rows are wrong.",
+                "probable cause, other: The model selects the number 1 instead of the orders.",
+            ],
+        )
+        used = ledger(state, fakes.toolkit(self.out).roles, "none")
+        self.assertEqual([role.role for role in used.roles], ["diagnostics"])
+        self.assertEqual(used.gate, "FAIL")
+        packet = json.loads((self.out / "diagnosis-packet" / "packet.json").read_text())
+        self.assertIn("build/dbt.log", packet["files"])
+
+    def test_a_validator_without_a_build_record_gives_a_packet_without_one(self):
+        fakes = Fakes()
+        fakes.verdict = False
+        state = self.run_graph(fakes)
+        self.assertNotIn("build/dbt.log", fakes.seen["diagnostics"])
+        self.assertIn("diagnosis", state["artefacts"])
+
+    def test_a_passed_project_is_not_diagnosed(self):
+        fakes = Fakes()
+        state = self.run_graph(fakes)
+        self.assertEqual(fakes.calls, ["profile", "overlap", "gate"])
+        self.assertEqual(state["status"], "passed")
+        self.assertEqual(self.claims(state), ["no diagnosis: the project passed every check"])
+        self.assertFalse((self.out / "diagnosis-packet").exists())
 
 
 if __name__ == "__main__":

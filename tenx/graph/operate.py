@@ -24,18 +24,29 @@ import shutil
 import stat
 from pathlib import Path
 
-from tenx.domain import AgentFinding, ArtefactRef
+from tenx import artefacts, diagnosis
+from tenx import diagnostics as answers
+from tenx.domain import AgentFinding, ArtefactRef, Evidence, ValidationResult
 from tenx.graph.build import (
+    CHECKS_FILE,
+    DIAGNOSTICS_STEP,
+    GATE_STEP,
     NOT_CARRIED,
     Toolkit,
     _fresh,
     _request,
+    _saved_report,
+    call_agent,
 )
 from tenx.graph.state import GraphState, plain
+from tenx.ports import BUILD_RECORD
 
-__all__ = ["PROJECT_DIR", "copy_project", "intake_node"]
+__all__ = ["DIAGNOSIS_PACKET_DIR", "PROJECT_DIR", "copy_project", "diagnostics_node", "intake_node"]
 
 PROJECT_DIR = "project"
+DIAGNOSIS_PACKET_DIR = "diagnosis-packet"
+# The profiles and the overlap report together, as the packet carries them.
+SOURCES_DIR = "diagnosis-sources"
 
 
 def copy_project(source: Path, destination: Path) -> list[str]:
@@ -83,3 +94,99 @@ def intake_node(toolkit: Toolkit):
         return plain(update)
 
     return intake
+
+
+def _no_diagnosis(update: dict, problem: str) -> dict:
+    finding = AgentFinding(
+        agent=DIAGNOSTICS_STEP, claim=f"no diagnosis: {problem}", kind="fact", confidence="high"
+    )
+    return plain({**update, "findings": [finding.dump()]})
+
+
+def _findings(answer: dict, written: Path) -> list[dict]:
+    found = [
+        AgentFinding(
+            agent=DIAGNOSTICS_STEP,
+            claim=f"the diagnosis: {answer['summary']}",
+            kind="inference",
+            confidence="medium",
+            evidence=(Evidence(kind="file", ref=str(written)),),
+            open_questions=tuple(answer["missing"]),
+        )
+    ]
+    for item in answer["causes"]:
+        probable = item["likelihood"] == answers.PROBABLE
+        found.append(
+            AgentFinding(
+                agent=DIAGNOSTICS_STEP,
+                claim=f"{item['likelihood']} cause, {item['cause']}: {item['claim']}",
+                kind="inference" if probable else "hypothesis",
+                confidence="medium" if probable else "low",
+                evidence=(
+                    Evidence(
+                        kind="file", ref=f"{item['file']}:{item['line']}", detail=item["evidence"]
+                    ),
+                ),
+                assets=(item["model"],),
+            )
+        )
+    return [finding.dump() for finding in found]
+
+
+def diagnostics_node(toolkit: Toolkit):
+    """The diagnostics agent reads the packet of a project the validator failed, and advises."""
+
+    def diagnostics(state: GraphState) -> dict:
+        request = _request(state)
+        out = Path(request.out)
+        found = state["artefacts"]
+        if ValidationResult.load(state["validations"][-1]).passed:
+            return _no_diagnosis({}, "the project passed every check")
+        gate = Path(found["gate report"]["path"]).parent
+        work = gate / artefacts.WORK_DIR
+        record = {}
+        if BUILD_RECORD in toolkit.validator.capabilities():
+            record = toolkit.validator.build_record(work.resolve())
+        report = _saved_report(gate / CHECKS_FILE)
+        sources = _fresh(out / SOURCES_DIR)
+        shutil.copytree(found["profiles"]["path"], sources)
+        shutil.copytree(found["overlap"]["path"], sources, dirs_exist_ok=True)
+        try:
+            packet = diagnosis.build(
+                _fresh(out / DIAGNOSIS_PACKET_DIR),
+                goal=Path(request.goal),
+                profiles=sources,
+                project=Path(found["project"]["path"]).resolve(),
+                report=report,
+                raw=Path(request.raw).resolve(),
+                build_folder=work.resolve(),
+                build_files=record,
+                secrets=(Path(request.declaration), out / GATE_STEP),
+            )
+        except diagnosis.PacketError as problem:
+            return _no_diagnosis({}, str(problem))
+
+        def prepare(work: Path) -> None:
+            shutil.copytree(packet.folder, work, dirs_exist_ok=True)
+
+        call = call_agent(toolkit, state, DIAGNOSTICS_STEP, {"packet": packet.folder}, prepare)
+        if call.stopped:
+            # The run has its verdict; a diagnosis it cannot afford leaves it as it is.
+            return _no_diagnosis({"costs": call.update["costs"]}, call.update["reason"])
+        files = {
+            name: (packet.folder / name).read_text(encoding="utf-8", errors="replace")
+            for name in packet.files
+        }
+        try:
+            answer = answers.diagnosis_from_report(call.report, files, report)
+        except answers.DiagnosisError as problem:
+            return _no_diagnosis(call.update, str(problem))
+        written = call.folder / answers.DIAGNOSIS_FILE
+        artefacts.write_text(written, answers.render(answer))
+        number = call.update["attempts"][DIAGNOSTICS_STEP]
+        ref = ArtefactRef.of("diagnosis", written, attempt=number).dump()
+        return plain(
+            {**call.update, "artefacts": {"diagnosis": ref}, "findings": _findings(answer, written)}
+        )
+
+    return diagnostics

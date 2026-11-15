@@ -893,6 +893,9 @@ def _after_gate(state: GraphState) -> str:
     # Only a project the validator passed is reviewed.
     if checked and checked[-1].passed and _request(state).reviewer:
         return REVIEWER_STEP
+    # The diagnostics step says why it gives no diagnosis of a passed project.
+    if checked and _request(state).workflow == "operate":
+        return DIAGNOSTICS_STEP
     return REPORT_STEP
 
 
@@ -902,7 +905,7 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
     The plan chooses a workflow's steps; the operate workflow's own steps
     live in ``tenx.graph.operate``, which is built on this module.
     """
-    from tenx.graph.operate import intake_node
+    from tenx.graph.operate import diagnostics_node, intake_node
 
     made = {
         INTAKE_STEP: intake_node(toolkit),
@@ -914,6 +917,7 @@ def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -
         REVIEW_STEP: review_node(toolkit),
         ENGINEER_STEP: engineer_node(toolkit),
         GATE_STEP: gate_node(toolkit),
+        DIAGNOSTICS_STEP: diagnostics_node(toolkit),
         REVIEWER_STEP: reviewer_node(toolkit),
         REPORT_STEP: report_node(toolkit),
         **(nodes or {}),
