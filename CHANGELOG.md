@@ -6,6 +6,18 @@ Notable changes to this project.
 
 ### Added
 
+- The Diagnostics agent, in a new operate run: `python -m tenx.run
+  diagnose --project <folder> --raw <folder> --goal <file> --checks <file>
+  --out <folder>` (`make diagnose PROJECT=<folder>`) copies an existing
+  dbt project into the run's folder (the project is never written), has
+  the gate build and check the copy, and if the gate fails it, gives the
+  diagnosis packet to the Diagnostics agent (`agents/diagnostics.md`:
+  Sonnet, read-only tools, in the sandbox without the raw files). Its
+  answer is checked in code and kept as `DIAGNOSIS.md`, a `diagnostics`
+  row is added to `usage.json`, and the run's status and exit status stay
+  the gate's. A passed project is not diagnosed. The DuckDB gate now says
+  where its first build's `run_results.json` and log are, so the run can
+  pack them without knowing dbt's folders.
 - What a Diagnostics agent will be given of a project the gate fails, and
   the check of its answer (the agent itself is not built yet).
   `tenx/diagnosis.py` makes the packet: the goal, spec, profiles and
@@ -212,6 +224,9 @@ Notable changes to this project.
 
 ### Changed
 
+- The diagnosis packet's `PACKET.md` names each check and its subject in
+  backticks, so feedback that starts with a name and a colon is not read
+  as part of the subject.
 - The graph run repairs a project the gate fails by default:
   `python -m tenx.run run` lets the engineer try again up to twice, told
   what failed (`--repairs 0` turns it off). Measured on the demo data, the

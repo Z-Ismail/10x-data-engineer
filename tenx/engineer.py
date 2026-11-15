@@ -70,6 +70,7 @@ from tenx import artefacts
 from tenx.contract import SCHEMA as CONTRACT_SCHEMA
 from tenx.cross_source import NOTES_FILE, SCHEMA, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
+from tenx.diagnostics import SCHEMA as DIAGNOSIS_SCHEMA
 from tenx.gate import GateError, Result, load_declaration, passed, render, run_gate
 from tenx.ledger import Ledger, role_usage
 from tenx.ledger import render as render_usage
@@ -164,6 +165,16 @@ REVIEWER = Role(
     allowed_tools=(),
     max_turns=20,
     json_schema=REVIEW_SCHEMA,
+    kind="cross-source",
+)
+
+DIAGNOSTICS = Role(
+    name="diagnostics",
+    agent="tenx:diagnostics",
+    prompt="Find why the project in project/ fails its checks.",
+    allowed_tools=(),
+    max_turns=20,
+    json_schema=DIAGNOSIS_SCHEMA,
     kind="cross-source",
 )
 

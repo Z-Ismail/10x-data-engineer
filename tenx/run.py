@@ -1,6 +1,8 @@
-"""Run the build workflow as a graph that is saved after every step and can be resumed.
+"""Run the build or operate workflow as a graph that is saved after every step and resumed.
 
     python -m tenx.run run --raw <folder> --goal <file> --checks <file> --out <folder>
+    python -m tenx.run diagnose --project <folder> --raw <folder> --goal <file> \
+        --checks <file> --out <folder>
     python -m tenx.run resume --out <folder>
     python -m tenx.run status --out <folder>
     python -m tenx.run approve --out <folder> [--contract <file>]
@@ -20,6 +22,14 @@ used rather than made again. ``status`` says where a run is.
 With ``--reviewer``, a project the gate passes is read by the reviewer agent,
 which advises on what the checks cannot see; its advice is kept as
 ``REVIEW.md`` and changes neither the run's status nor its exit status.
+
+``diagnose`` checks a project that already exists instead of building one:
+it copies the project into the run's folder (the project itself is never
+written), has the gate build and check the copy, and if the gate fails it,
+the diagnostics agent reads the project, the checks' feedback and the
+build's own records and says why, as ``DIAGNOSIS.md``. The agent can read
+files but not change them; its diagnosis is advice and changes neither the
+run's status nor its exit status.
 
 With ``--review-spec`` (and ``--architect``) the run waits after the spec is
 written. ``approve`` carries it on with that spec, or with ``--contract``,
@@ -54,6 +64,7 @@ from tenx.domain import MAX_REPAIRS, CostRecord, EngineeringRequest, ResourceBud
 from tenx.engineer import (
     ARCHITECT,
     CROSS_SOURCE,
+    DIAGNOSTICS,
     ENGINEER,
     PLUGIN_COPY_DIR,
     PLUGIN_DIR,
@@ -90,6 +101,7 @@ ROLES = {
     "architect": ARCHITECT,
     "engineer": ENGINEER,
     "reviewer": REVIEWER,
+    "diagnostics": DIAGNOSTICS,
 }
 
 
@@ -169,6 +181,39 @@ def start(
     has the run wait for a person to approve it (see ``approve``). ``reviewer``
     has the reviewer agent advise on a project the gate passes.
     """
+    asked = {
+        "cross_source": cross_source,
+        "repairs": repairs,
+        "architect": architect,
+        "review_spec": review_spec,
+        "reviewer": reviewer,
+    }
+    return _begin(raw, goal, checks, out, rules, sandbox, claude, asked)
+
+
+def diagnose(
+    project: Path,
+    raw: Path,
+    goal: Path,
+    checks: Path,
+    out: Path,
+    rules: Policy | None = None,
+    sandbox: Sandbox | None = None,
+    claude: str = "claude",
+) -> dict:
+    """Check an existing project, and diagnose it if it fails. Returns the final state.
+
+    ``project`` is copied into the run's folder and never written; ``goal``
+    says what it was built for, and ``checks`` is the gate's declaration.
+    """
+    project = Path(project)
+    if not (project / "dbt_project.yml").is_file():
+        raise RunError(f"{project} is not a project folder with a dbt_project.yml")
+    asked = {"workflow": "operate", "project": str(project.resolve()), "cross_source": False}
+    return _begin(raw, goal, checks, out, rules, sandbox, claude, asked)
+
+
+def _begin(raw, goal, checks, out, rules, sandbox, claude, asked: dict) -> dict:
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise RunError(f"the agent definitions are not in {PLUGIN_DIR}; run from a clone")
     load_declaration(checks)
@@ -187,12 +232,8 @@ def start(
         goal=str(Path(goal).resolve()),
         declaration=str(Path(checks).resolve()),
         out=str(out.resolve()),
-        cross_source=cross_source,
         isolation="unisolated" if sandbox.name == "none" else "bubblewrap",
-        repairs=repairs,
-        architect=architect,
-        review_spec=review_spec,
-        reviewer=reviewer,
+        **asked,
     )
     budget = Budget(rules)
     begin = {
@@ -327,6 +368,8 @@ def summary(state: dict) -> str:
     if "engineer" in attempts:
         project = out / "engineer" / f"attempt-{attempts['engineer']}" / "work"
         lines.append(f"project: {project}")
+    elif request.workflow == "operate":
+        lines.append(f"project: {request.project} (checked as a copy in {out / 'project'})")
     text = "\n".join(lines) + "\n"
     if "gate" in attempts:
         gate = out / "gate" / f"attempt-{attempts['gate']}" / GATE_REPORT_FILE
@@ -341,6 +384,16 @@ def summary(state: dict) -> str:
         ]
         if notes:
             text += f"\nreview: {notes[-1]}\n"
+    diagnosis = (state.get("artefacts") or {}).get("diagnosis")
+    if diagnosis is not None:
+        text += "\n" + Path(diagnosis["path"]).read_text(encoding="utf-8")
+        text += f"(advice only; saved as {diagnosis['path']})\n"
+    elif request.workflow == "operate":
+        notes = [
+            item["claim"] for item in state.get("findings") or [] if item["agent"] == "diagnostics"
+        ]
+        if notes:
+            text += f"\ndiagnosis: {notes[-1]}\n"
     sandbox = json.loads((out / USAGE_FILE).read_text(encoding="utf-8")).get("sandbox")
     text += "\n" + render_usage(run_ledger(state, ROLES, sandbox))
     text += f"\nsandbox: {sandbox}\n"
@@ -396,6 +449,21 @@ def main(argv: list[str] | None = None) -> int:
         help="run the agents without a sandbox, so that they can read and change any file "
         "you can; only for data and machines where that is acceptable",
     )
+    check = commands.add_parser(
+        "diagnose", help="check an existing project and, if it fails, say why"
+    )
+    check.add_argument("--project", type=Path, required=True, help="the project to check")
+    check.add_argument("--raw", type=Path, required=True, help="folder of raw source files")
+    check.add_argument("--goal", type=Path, required=True, help="what the project is for")
+    check.add_argument("--checks", type=Path, required=True, help="the gate's JSON declaration")
+    check.add_argument("--out", type=Path, required=True, help="empty folder for the run")
+    check.add_argument("--policy", type=Path, help="JSON spending policy (ceiling and caps)")
+    check.add_argument(
+        "--unisolated",
+        action="store_true",
+        help="run the agent and the gate's builds without a sandbox; only for data and "
+        "machines where that is acceptable",
+    )
     for name, text in (("resume", "carry a stopped run on"), ("status", "say where a run is")):
         command = commands.add_parser(name, help=text)
         command.add_argument("--out", type=Path, required=True, help="the run's folder")
@@ -431,6 +499,12 @@ def main(argv: list[str] | None = None) -> int:
                 architect=args.architect,
                 review_spec=args.review_spec,
                 reviewer=args.reviewer,
+            )
+        elif args.command == "diagnose":
+            rules = spending.load(args.policy) if args.policy else None
+            sandbox = default_sandbox(unisolated=args.unisolated)
+            state = diagnose(
+                args.project, args.raw, args.goal, args.checks, args.out, rules, sandbox
             )
         elif args.command == "approve":
             answer = {"decision": "approve"}

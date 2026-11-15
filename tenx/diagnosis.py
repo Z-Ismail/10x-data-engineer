@@ -187,7 +187,9 @@ def _checks(results) -> list[str]:
     for result in results:
         said = result.feedback or "No more is said about this check."
         first, *rest = said.splitlines() or [""]
-        lines.append(f"- {result.check} on {result.subject}: {first}")
+        # The names in backticks, so that feedback with a colon in it cannot
+        # be read as part of the subject.
+        lines.append(f"- `{result.check}` on `{result.subject}`: {first}")
         lines += [f"  {line}" for line in rest]
     return lines
 

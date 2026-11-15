@@ -9,6 +9,7 @@ from pathlib import Path
 from tenx.adapters.duckdb import DbtDuckDB, DuckDBGate, DuckDBProfiler
 from tenx.ports import (
     BUILD,
+    BUILD_RECORD,
     COUNT_KEPT,
     OVERLAP,
     PROFILE,
@@ -26,7 +27,7 @@ class InterfaceTest(unittest.TestCase):
         cases = [
             (DuckDBProfiler(), SourceProfiler, {PROFILE, OVERLAP, COUNT_KEPT}),
             (DbtDuckDB(), TransformEngine, {SCAFFOLD, BUILD}),
-            (DuckDBGate(), Validator, {VALIDATE}),
+            (DuckDBGate(), Validator, {VALIDATE, BUILD_RECORD}),
         ]
         for adapter, interface, capabilities in cases:
             with self.subTest(adapter=adapter.name):

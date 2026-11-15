@@ -383,6 +383,8 @@ def request(**changes) -> dict:
         "repairs": 0,
         "review_spec": False,
         "reviewer": False,
+        "workflow": "build",
+        "project": None,
     }
     value.update(changes)
     return value
@@ -463,7 +465,45 @@ class RequestAndPlanTest(unittest.TestCase):
                 ExecutionPlan.load({"workflow": "build", "steps": steps})
             self.assertIn(expected, str(caught.exception))
         with self.assertRaises(RecordError):
-            ExecutionPlan.load({"workflow": "operate", "steps": ["profile"]})
+            ExecutionPlan.load({"workflow": "deploy", "steps": ["profile"]})
+
+    def test_an_operate_request_checks_a_project_and_builds_nothing(self):
+        operate = {"workflow": "operate", "project": "/work/project", "cross_source": False}
+        record = EngineeringRequest.load(request(**operate))
+        self.assertEqual((record.workflow, record.project), ("operate", "/work/project"))
+        self.assertEqual(EngineeringRequest.load(request()).workflow, "build")
+        refused = "the operate workflow builds nothing, so it takes no"
+        for changes, expected in [
+            ({"cross_source": True}, f"{refused} cross_source"),
+            ({"scouts": True}, f"{refused} scouts"),
+            ({"architect": True}, f"{refused} architect"),
+            ({"architect": True, "review_spec": True}, f"{refused} architect, review_spec"),
+            ({"reviewer": True}, f"{refused} reviewer"),
+            ({"repairs": 1}, f"{refused} repairs"),
+            ({"project": None}, "the operate workflow needs the project to check"),
+            ({"project": ""}, "project:"),
+        ]:
+            with self.subTest(changes=changes), self.assertRaises(RecordError) as caught:
+                EngineeringRequest.load(request(**{**operate, **changes}))
+            self.assertIn(expected, str(caught.exception))
+        with self.assertRaises(RecordError) as caught:
+            EngineeringRequest.load(request(project="/work/project"))
+        self.assertIn("a project is given only to the operate workflow", str(caught.exception))
+
+    def test_each_workflow_takes_only_its_own_steps(self):
+        steps = ["intake", "profile", "overlap", "gate", "diagnostics", "report"]
+        plan = ExecutionPlan.load({"workflow": "operate", "steps": steps})
+        self.assertEqual(plan.steps, tuple(steps))
+        for workflow, steps, expected in [
+            ("operate", ["intake", "engineer", "gate"], "operate workflow does not take engineer"),
+            ("operate", ["gate", "reviewer"], "operate workflow does not take reviewer"),
+            ("build", ["intake", "engineer", "gate"], "build workflow does not take intake"),
+            ("build", ["gate", "diagnostics"], "build workflow does not take diagnostics"),
+            ("operate", ["diagnostics", "gate"], "got diagnostics, gate"),
+        ]:
+            with self.subTest(steps=steps), self.assertRaises(RecordError) as caught:
+                ExecutionPlan.load({"workflow": workflow, "steps": steps})
+            self.assertIn(expected, str(caught.exception))
 
 
 class ApprovalDecisionTest(unittest.TestCase):

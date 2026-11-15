@@ -66,6 +66,7 @@ class CapabilityTest(unittest.TestCase):
             ports.RUN_AGENT,
             ports.STRUCTURED_ANSWER,
             ports.COUNT_KEPT,
+            ports.BUILD_RECORD,
         ]
         self.assertEqual(len(set(names)), len(names))
 

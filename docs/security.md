@@ -81,8 +81,8 @@ the real gate passed, and check that none of them, no reference query and
 no expected row reaches the packet; with links followed and the second
 guard taken out, the declaration and its reference query do.
 
-The diagnosis packet (`tenx/diagnosis.py`), which a Diagnostics agent
-will be given after a gate failure, is made the same way, and also carries
+The diagnosis packet (`tenx/diagnosis.py`), which the Diagnostics agent
+is given after a gate failure, is made the same way, and also carries
 dbt's results and log from the gate's first build. That build ran in the
 sandbox with the declaration and expected rows hidden, so its files cannot
 hold them; the same second guard applies. The folders those files name
@@ -96,6 +96,17 @@ packet, no raw files, and the repository, the run folder and the
 declaration hidden. It has no shell and no access to the built database.
 Its findings are checked against the packet's files before they are kept,
 and they are advice: nothing it says changes the gate's verdict.
+
+The Diagnostics agent (`python -m tenx.run diagnose`) runs in the same
+sandbox as the reviewer: read-only tools, its own folder holding only the
+packet, no raw files, no shell and no access to the built database. Its
+facts and causes are checked against the packet's files and the gate's
+results before they are kept, and they never change the gate's verdict.
+The project it is pointed at is copied into the run's folder before
+anything reads it, outside the sandbox, so the copy follows no link (a
+link is copied as a link) and opens nothing that is not a regular file;
+the gate builds the copy in the sandbox, and the project itself is never
+written.
 
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and

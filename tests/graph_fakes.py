@@ -12,6 +12,7 @@ from tenx.graph.build import CHECKPOINT_FILE, Toolkit, build_graph, config
 from tenx.graph.checkpoints import open_checkpoints
 from tenx.policy import Budget, Policy
 from tenx.ports import (
+    BUILD_RECORD,
     COUNT_KEPT,
     OVERLAP,
     PROFILE,
@@ -38,6 +39,9 @@ ARCHITECT = Role(
 )
 REVIEWER = Role(
     "reviewer", "tenx:reviewer", "Review the project.", (), 20, json_schema={}, kind="cross-source"
+)
+DIAGNOSTICS = Role(
+    "diagnostics", "tenx:diagnostics", "Find why.", (), 20, json_schema={}, kind="cross-source"
 )
 # One table, as a profiler describes it.
 PROFILE_JSON = {"table": "shop.orders", "columns": [{"name": "id"}, {"name": "email"}]}
@@ -96,6 +100,32 @@ REVIEW = {
 }
 
 
+# The diagnostics agent's answer about the stand-in project that fails on rows.
+DIAGNOSIS = {
+    "summary": "The orders model selects a constant, so its rows are wrong.",
+    "facts": [
+        {
+            "claim": "The rows check failed on orders.",
+            "file": "PACKET.md",
+            "quote": "`rows` on `orders`",
+        }
+    ],
+    "causes": [
+        {
+            "likelihood": "probable",
+            "cause": "other",
+            "model": "orders",
+            "file": "project/models/orders.sql",
+            "line": 1,
+            "claim": "The model selects the number 1 instead of the orders.",
+            "evidence": "Line 1: select 1.",
+            "explains": [{"check": "rows", "subject": "orders"}],
+        }
+    ],
+    "missing": [],
+}
+
+
 def report(cost=0.1, turns=5, answer=None, basis="list") -> dict:
     """A report as ``claude -p --output-format json`` gives one."""
     made = {
@@ -133,7 +163,10 @@ class Fakes:
             "architect": report(0.09, 10, CONTRACT),
             "engineer": report(0.11, 18),
             "reviewer": report(0.06, 15, REVIEW),
+            "diagnostics": report(0.05, 9, DIAGNOSIS),
         }
+        # Whether the stand-in gate keeps a record of its build, as dbt's would.
+        self.records_builds = False
         self.verdict = True
         # When set, how many checks fail at each validation in turn (0 passes).
         self.failing: list[int] | None = None
@@ -201,6 +234,9 @@ class Fakes:
     def validate(self, project, raw, declaration, workdir, sandbox=None, hidden=()):
         self.calls.append("gate")
         (workdir / "built.duckdb").write_text("tables\n")
+        if self.records_builds:
+            (workdir / "logs").mkdir()
+            (workdir / "logs" / "dbt.log").write_text(f"Running in {project}\nDone.\n")
         if self.failing is not None:
             failing = self.failing.pop(0)
             results = (
@@ -219,6 +255,9 @@ class Fakes:
         )
         return ValidationReport(results, self.verdict, f"gate {status}\n")
 
+    def build_record(self, workdir: Path) -> dict[str, Path]:
+        return {"dbt.log": workdir / "logs" / "dbt.log"}
+
     def toolkit(self, out: Path, policy: Policy | None = None, budget: Budget | None = None):
         fakes = self
 
@@ -231,7 +270,7 @@ class Fakes:
 
         plugin = out / "plugin"
         (plugin / "agents").mkdir(parents=True, exist_ok=True)
-        for agent in ("engineer", "cross-source", "architect", "reviewer"):
+        for agent in ("engineer", "cross-source", "architect", "reviewer", "diagnostics"):
             (plugin / "agents" / f"{agent}.md").write_text(f"You are the {agent}.\n")
         return Toolkit(
             profiler=port(
@@ -248,8 +287,11 @@ class Fakes:
             ),
             validator=port(
                 "fake gate",
-                lambda: fakes._capable("validator", {VALIDATE}),
+                lambda: fakes._capable(
+                    "validator", {VALIDATE, BUILD_RECORD} if fakes.records_builds else {VALIDATE}
+                ),
                 validate=fakes.validate,
+                build_record=fakes.build_record,
             ),
             backend=port(
                 "fake backend",
@@ -262,6 +304,7 @@ class Fakes:
                 "cross-source": CROSS_SOURCE,
                 "architect": ARCHITECT,
                 "reviewer": REVIEWER,
+                "diagnostics": DIAGNOSTICS,
             },
             mounts=lambda workspace, raw: Mounts(workspace=workspace),
             plugin=plugin,
