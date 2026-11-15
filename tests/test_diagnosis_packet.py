@@ -94,7 +94,7 @@ class PacketFromFailingProjects(unittest.TestCase):
         (node,) = [n for n in results["results"] if n["unique_id"].endswith("stg_crm__accounts")]
         self.assertEqual(node["status"], "error")
         self.assertIn(error, node["message"])
-        self.assertIn("## Checks that failed\n\n- build on project:", files["PACKET.md"])
+        self.assertIn("## Checks that failed\n\n- `build` on `project`:", files["PACKET.md"])
 
     def test_no_folder_of_the_run_is_named_in_any_file(self):
         for name, (_, packet, _) in self.runs.items():
@@ -133,7 +133,7 @@ class PacketFromFailingProjects(unittest.TestCase):
             ),
             "crosswalk_whole_email": (
                 "PACKET.md",
-                "expected on int_customers_matched_to_accounts",
+                "`expected` on `int_customers_matched_to_accounts`",
                 "customers.email = accounts.billing_email",
             ),
         }

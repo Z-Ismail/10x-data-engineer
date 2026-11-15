@@ -107,7 +107,7 @@ if "tenx:diagnostics" in sys.argv:
         sorted(str(path) for path in here.rglob("*") if path.is_file())))
     packet = (here / "PACKET.md").read_text()
     failed = packet.split("## Checks that failed")[1]
-    check, subject = re.search(r"^- (\\w+) on (\\w+):", failed, re.M).groups()
+    check, subject = re.search(r"^- `(\\w+)` on `(\\w+)`:", failed, re.M).groups()
     model = "int_customers_matched_to_accounts"
     file = f"project/models/intermediate/{model}.sql"
     lines = (here / file).read_text().splitlines()
@@ -122,7 +122,7 @@ if "tenx:diagnostics" in sys.argv:
         "structured_output": {
             "summary": "Customers are matched to accounts on the whole email.",
             "facts": [{"claim": "A check failed.", "file": "PACKET.md",
-                       "quote": f"{check} on {subject}"}],
+                       "quote": f"`{check}` on `{subject}`"}],
             "causes": [{
                 "likelihood": "probable", "cause": "match rule", "model": model,
                 "file": file, "line": line, "claim": "Matched on the whole email.",

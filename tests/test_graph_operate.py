@@ -31,7 +31,7 @@ The orders model selects a constant, so its rows are wrong.
 ## Confirmed facts
 
 - The rows check failed on orders.
-  Quoted from `PACKET.md`: rows on orders
+  Quoted from `PACKET.md`: `rows` on `orders`
 """
 
 

@@ -107,7 +107,7 @@ DIAGNOSIS = {
         {
             "claim": "The rows check failed on orders.",
             "file": "PACKET.md",
-            "quote": "rows on orders",
+            "quote": "`rows` on `orders`",
         }
     ],
     "causes": [

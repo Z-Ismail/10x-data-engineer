@@ -61,7 +61,8 @@ Answer in four parts.
   sentences and `evidence` gives the SQL on that line and the facts that
   show it. `explains` lists each failed or unrun check this cause
   accounts for, by its `check` and `subject` exactly as `PACKET.md` names
-  them (for `rows on orders`, check `rows` and subject `orders`).
+  them in backticks: a line that starts ``- `rows` on `orders`:`` names
+  check `rows` and subject `orders`.
 - `missing`: what you would need to know and could not find in the
   folder. Leave it empty if nothing is missing.
 - `summary`: the diagnosis in one or two sentences.
