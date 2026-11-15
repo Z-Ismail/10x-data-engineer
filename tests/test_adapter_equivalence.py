@@ -5,6 +5,7 @@ demo data, and the two results are compared: files byte for byte, gate
 results field by field.
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -152,6 +153,18 @@ class GateEquivalenceTest(Folder):
                     }
                 )
                 self.assertEqual(failed, expected)
+                self.assert_build_record(self.root / f"{name}-adapter")
+
+    def assert_build_record(self, workdir: Path):
+        record = DuckDBGate().build_record(workdir)
+        self.assertEqual(set(record), {"run_results.json", "dbt.log"})
+        # The first build's files, not the repeat build's in its own folder.
+        self.assertEqual(record["run_results.json"], workdir / "target" / "run_results.json")
+        self.assertEqual(record["dbt.log"], workdir / "logs" / "dbt.log")
+        results = json.loads(record["run_results.json"].read_text(encoding="utf-8"))
+        built = {result["unique_id"].rsplit(".", 1)[-1] for result in results["results"]}
+        self.assertIn("stg_billing__invoices", built)
+        self.assertIn("Completed successfully", record["dbt.log"].read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

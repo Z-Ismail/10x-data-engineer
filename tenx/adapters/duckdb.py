@@ -17,6 +17,7 @@ from tenx.engineer import dbt_project_yml, profiles_yml
 from tenx.overlap import overlap_folder, write_report
 from tenx.ports import (
     BUILD,
+    BUILD_RECORD,
     COUNT_KEPT,
     OVERLAP,
     PROFILE,
@@ -114,7 +115,11 @@ class DuckDBGate:
     name = "DuckDB gate"
 
     def capabilities(self) -> frozenset[str]:
-        return frozenset({VALIDATE})
+        return frozenset({VALIDATE, BUILD_RECORD})
+
+    def build_record(self, workdir: Path) -> dict[str, Path]:
+        """The results and log dbt wrote about the first build in ``workdir``."""
+        return gate.build_record(Path(workdir))
 
     def validate(
         self,

@@ -23,6 +23,7 @@ from tenx.sandbox import Mounts, Sandbox
 
 __all__ = [
     "BUILD",
+    "BUILD_RECORD",
     "COUNT_KEPT",
     "OVERLAP",
     "PROFILE",
@@ -56,6 +57,9 @@ VALIDATE = "validate a project"
 RUN_AGENT = "run an agent"
 STRUCTURED_ANSWER = "give a structured answer"
 COUNT_KEPT = "count the rows a spec keeps"
+# A validator that keeps what its first build wrote about itself (results,
+# log) has a method build_record(workdir) -> {name: path}.
+BUILD_RECORD = "keep a record of its build"
 
 
 class UnsupportedCapability(Exception):
@@ -244,6 +248,10 @@ class Validator(Protocol):
     ) -> ValidationReport:
         """Build the project afresh and run every declared check on it."""
         ...
+
+    # A validator with BUILD_RECORD also has:
+    # def build_record(self, workdir: Path) -> dict[str, Path]
+    # naming each file its first build in workdir wrote about itself.
 
 
 @runtime_checkable
