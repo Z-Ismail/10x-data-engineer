@@ -100,7 +100,9 @@ PLAN = "plan"
 PROFILE_STEP, OVERLAP_STEP, CROSS_SOURCE_STEP = "profile", "overlap", "cross-source"
 ARCHITECT_STEP, REVIEW_STEP, ENGINEER_STEP = "architect", "review", "engineer"
 GATE_STEP, REVIEWER_STEP, REPORT_STEP = "gate", "reviewer", "report"
+INTAKE_STEP, DIAGNOSTICS_STEP = "intake", "diagnostics"
 WORK_STEPS = (
+    INTAKE_STEP,
     PROFILE_STEP,
     OVERLAP_STEP,
     CROSS_SOURCE_STEP,
@@ -108,6 +110,7 @@ WORK_STEPS = (
     REVIEW_STEP,
     ENGINEER_STEP,
     GATE_STEP,
+    DIAGNOSTICS_STEP,
     REVIEWER_STEP,
 )
 
@@ -147,7 +150,9 @@ def _stop(reason: str, **update) -> dict:
 
 
 def steps_for(request: EngineeringRequest) -> tuple[str, ...]:
-    """The steps the build workflow takes for a request, in order."""
+    """The steps the request's workflow takes, in order."""
+    if request.workflow == "operate":
+        return (INTAKE_STEP, PROFILE_STEP, OVERLAP_STEP, GATE_STEP, DIAGNOSTICS_STEP, REPORT_STEP)
     middle = (CROSS_SOURCE_STEP,) if request.cross_source else ()
     middle += (ARCHITECT_STEP,) if request.architect else ()
     middle += (REVIEW_STEP,) if request.review_spec else ()
@@ -183,7 +188,7 @@ def plan_node(toolkit: Toolkit):
         if request.scouts:
             return _stop("scouts are not part of the graph run; run without them", budget=budget)
         steps = steps_for(request)
-        chosen = ExecutionPlan(workflow="build", steps=steps).dump()
+        chosen = ExecutionPlan(workflow=request.workflow, steps=steps).dump()
         try:
             for port, capability in needs(toolkit, steps):
                 require(port, capability)
