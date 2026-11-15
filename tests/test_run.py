@@ -22,6 +22,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import duckdb
+from failing_bed import make, variant
 from test_engineer import ANSWER, DECLARATION, DEMO_GOAL, REFERENCE_MODELS, STUB
 
 from demo.generate import generate
@@ -95,6 +96,43 @@ if "tenx:reviewer" in sys.argv:
     sys.exit(0)
 """
 
+# Started as the diagnostics agent, the stand-in blames the crosswalk's join
+# line for the first check PACKET.md lists as failed, quoting that line, and
+# notes every file it was given.
+DIAGNOSTICS = """
+if "tenx:diagnostics" in sys.argv:
+    import json, re
+    here = Path.cwd()
+    Path(os.environ["STUB_RECORD"]).with_name("diagnostics.json").write_text(json.dumps(
+        sorted(str(path) for path in here.rglob("*") if path.is_file())))
+    packet = (here / "PACKET.md").read_text()
+    failed = packet.split("## Checks that failed")[1]
+    check, subject = re.search(r"^- `(\\w+)` on `(\\w+)`:", failed, re.M).groups()
+    model = "int_customers_matched_to_accounts"
+    file = f"project/models/intermediate/{model}.sql"
+    lines = (here / file).read_text().splitlines()
+    line = 1 + next(n for n, text in enumerate(lines) if "billing_email" in text)
+    print(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 9,
+        "duration_ms": 30000, "total_cost_usd": 0.0415,
+        "modelUsage": {"claude-sonnet-5-5": {
+            "inputTokens": 12, "cacheCreationInputTokens": 15000,
+            "cacheReadInputTokens": 50000, "outputTokens": 2500, "costBasis": "list"}},
+        "permission_denials": [],
+        "structured_output": {
+            "summary": "Customers are matched to accounts on the whole email.",
+            "facts": [{"claim": "A check failed.", "file": "PACKET.md",
+                       "quote": f"`{check}` on `{subject}`"}],
+            "causes": [{
+                "likelihood": "probable", "cause": "match rule", "model": model,
+                "file": file, "line": line, "claim": "Matched on the whole email.",
+                "evidence": lines[line - 1].strip(),
+                "explains": [{"check": check, "subject": subject}]}],
+            "missing": []},
+    }))
+    sys.exit(0)
+"""
+
 
 class CommandLineTest(unittest.TestCase):
     @classmethod
@@ -107,7 +145,8 @@ class CommandLineTest(unittest.TestCase):
         bin_dir.mkdir()
         claude = bin_dir / "claude"
         claude.write_text(
-            f"#!{sys.executable}\n{KILL_ONCE}\n{ARCHITECT}\n{REVIEWER}\n{FIRST_MODELS}\n{STUB}",
+            f"#!{sys.executable}\n{KILL_ONCE}\n{ARCHITECT}\n{REVIEWER}\n{DIAGNOSTICS}\n"
+            f"{FIRST_MODELS}\n{STUB}",
             encoding="utf-8",
         )
         claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
@@ -218,6 +257,21 @@ class CommandLineTest(unittest.TestCase):
             [role["role"] for role in usage["roles"]],
             ["cross-source", "engineer", "engineer repair 1"],
         )
+
+    def test_a_failing_run_is_repaired_by_default(self):
+        self.first_models = str(self.whole_address)
+        done = self.start(False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("engineer repair 1  success", done.stdout)
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(len(usage["roles"]), 3)
+
+    def test_no_repairs_when_turned_off(self):
+        self.first_models = str(self.whole_address)
+        done = self.start(False, "--repairs", "0")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertTrue(done.stdout.startswith("status: failed\n"), done.stdout)
+        self.assertFalse((self.out / "engineer" / "attempt-2").exists())
 
     def test_a_run_with_the_architect_gives_the_engineer_the_spec(self):
         done = self.start(False, "--architect")
@@ -351,6 +405,59 @@ class CommandLineTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("--repairs", done.stderr)
                 self.assertFalse(self.out.exists())
+
+    def diagnose(self, project: Path) -> subprocess.CompletedProcess:
+        return self.tenx(
+            "diagnose",
+            "--project",
+            str(project),
+            "--raw",
+            str(self.raw),
+            "--goal",
+            str(DEMO_GOAL),
+            "--checks",
+            str(DECLARATION),
+            "--out",
+            str(self.out),
+            "--unisolated",
+        )
+
+    def test_a_failing_project_is_diagnosed_and_left_as_it_was(self):
+        project = make(variant("crosswalk_whole_email"), self.root / "project")
+        before = {p: p.read_bytes() for p in sorted(project.rglob("*")) if p.is_file()}
+        done = self.diagnose(project)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        copy = self.out / "project"
+        self.assertTrue(
+            done.stdout.startswith(
+                f"status: failed\nproject: {project.resolve()} (checked as a copy in {copy})\n"
+            ),
+            done.stdout,
+        )
+        written = self.out / "diagnostics" / "attempt-1" / "DIAGNOSIS.md"
+        self.assertIn(written.read_text() + f"(advice only; saved as {written})\n", done.stdout)
+        self.assertIn("int_customers_matched_to_accounts`, match rule", done.stdout)
+        self.assertEqual(
+            {p: p.read_bytes() for p in sorted(project.rglob("*")) if p.is_file()}, before
+        )
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual(usage["gate"], "FAIL")
+        self.assertEqual([role["role"] for role in usage["roles"]], ["diagnostics"])
+        work = self.out / "diagnostics" / "attempt-1" / "work"
+        seen = json.loads(self.record.with_name("diagnostics.json").read_text())
+        names = {Path(path).relative_to(work).as_posix() for path in seen}
+        self.assertLessEqual({"build/dbt.log", "build/run_results.json", "PACKET.md"}, names)
+        declaration = DECLARATION.read_bytes()
+        for path in seen:
+            text = Path(path).read_bytes()
+            self.assertNotEqual(text, declaration)
+            self.assertNotIn(str(self.root).encode(), text, path)
+
+    def test_a_folder_that_is_not_a_project_is_refused(self):
+        done = self.diagnose(self.root)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn(f"{self.root} is not a project folder with a dbt_project.yml", done.stderr)
+        self.assertFalse(self.out.exists())
 
     def test_refusals_write_nothing(self):
         self.out.mkdir()

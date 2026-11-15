@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer equivalence compare parity repairs compare-architect clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer diagnose equivalence compare parity repairs compare-architect review-rates clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -62,6 +62,16 @@ engineer-reviewer: demo-data
 	rm -rf runs/demo-reviewer
 	$(PYTHON) -m tenx.run run --raw demo/data --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/demo-reviewer --reviewer
+
+# Check an existing project on the demo data and, if the gate fails it, have
+# the diagnostics agent say why (DIAGNOSIS.md); the project is not changed.
+# Needs Claude Code, signed in. Failing projects to try:
+# python tests/failing_bed.py --out runs/bed (then PROJECT=runs/bed/projects/project-01)
+diagnose: demo-data
+	@test -n "$(PROJECT)" || { echo "usage: make diagnose PROJECT=<folder>" >&2; exit 2; }
+	rm -rf runs/diagnose
+	$(PYTHON) -m tenx.run diagnose --project "$(PROJECT)" --raw demo/data --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/diagnose
 
 # The old runner and the graph on the eight comparison datasets, with a
 # stand-in for Claude Code that answers the same way every time: every
@@ -161,6 +171,28 @@ compare-architect:
 		--checks tests/fixtures/demo_gate.json --out runs/compare-architect \
 		--trials $(ARCHITECT_TRIALS) $(ARCHITECT_FLAGS) \
 		$(foreach name,$(COMPARE_DATASETS),--raw $(name)=$(COMPARE_DATA)/$(name)/data)
+
+# The reviewer on the test bed: twelve projects that all pass the gate, six
+# with one planted mistake the gate cannot see and six correct but written
+# differently, each reviewed once on each of REVIEW_SEEDS at 200 companies
+# (48 reviews by default), scored against the bed's answers, which the
+# reviewer never sees. Needs Claude Code, signed in, and bubblewrap. Run it
+# again to resume. Estimated above US$5, it stops before any review unless
+# approved: make review-rates REVIEW_FLAGS=--approve-cost
+REVIEW_SEEDS ?= 1 7 42 2026
+REVIEW_FLAGS ?=
+REVIEW_BED = runs/review-bed
+
+review-rates:
+	@for seed in $(REVIEW_SEEDS); do \
+		folder=$(COMPARE_DATA)/s$$seed-200; \
+		test -d $$folder/data || $(PYTHON) demo/generate.py --seed $$seed --companies 200 \
+			--out $$folder/data --answers-out $$folder/answers || exit 1; \
+	done
+	test -f $(REVIEW_BED)/answers.json || $(PYTHON) tests/review_bed.py --out $(REVIEW_BED)
+	$(PYTHON) -m tenx.review_rates run --bed $(REVIEW_BED) --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/review-rates $(REVIEW_FLAGS) \
+		$(foreach seed,$(REVIEW_SEEDS),--raw s$(seed)-200=$(COMPARE_DATA)/s$(seed)-200/data)
 
 clean:
 	rm -rf demo/data demo/answers profiles runs

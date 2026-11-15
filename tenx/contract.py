@@ -152,7 +152,15 @@ def _check_columns(model: dict, tables: dict[str, set[str]], where: str) -> set[
     return set(names)
 
 
-def _check_exclusions(model: dict, where: str) -> None:
+def _names_a_table(condition: str, tables) -> str | None:
+    """The first profiled table a rule's condition names, if any."""
+    for table in sorted(tables):
+        if re.search(rf"(?<![\w.]){re.escape(table)}(?![\w])", condition, re.IGNORECASE):
+            return table
+    return None
+
+
+def _check_exclusions(model: dict, where: str, tables=()) -> None:
     listed = _list(model["exclusions"], f"{where} exclusions")
     names = []
     for number, exclusion in enumerate(listed, start=1):
@@ -169,6 +177,14 @@ def _check_exclusions(model: dict, where: str) -> None:
             raise ContractError(f"{place} where is not text")
         if exclusion["rule"] == "where":
             _text(exclusion["where"], f"{place} where")
+            # The rule is counted, and later checked, as a condition on the
+            # source's own rows: a table it reads does not exist there.
+            named = _names_a_table(exclusion["where"], tables)
+            if named is not None:
+                raise ContractError(
+                    f"{place} names the table {named}; a rule is a condition on the columns "
+                    f"of {model['source']} alone, with no table, subquery or join"
+                )
         elif exclusion["where"].strip():
             raise ContractError(
                 f"{place} removes duplicate rows and must not give a where condition"
@@ -182,12 +198,18 @@ def _check_exclusions(model: dict, where: str) -> None:
 def _check_totals(model: dict, columns: set[str], raw: set[str], where: str) -> None:
     listed = _list(model["totals"], f"{where} totals")
     totalled = []
+    own = f"{model['source']}."
     for number, total in enumerate(listed, start=1):
         place = f"{where} total {number}"
         _object(total, TOTAL_FIELDS, place)
         for field in TOTAL_FIELDS:
             if not isinstance(total[field], str):
                 raise ContractError(f"{place} {field} is not text")
+        # A raw column written with its own table in front means the same
+        # column; it is kept by its name alone, as the profile has it.
+        for field in ("source_column", "source_by"):
+            if total[field].startswith(own) and total[field][len(own) :] in raw:
+                total[field] = total[field][len(own) :]
         if total["column"] not in columns:
             raise ContractError(
                 f"{place} adds up {total['column']!r}, which is not a column of the model"
@@ -233,7 +255,7 @@ def _check_model(model, number: int, tables: dict[str, set[str]]) -> None:
         if column not in columns:
             raise ContractError(f"{where} key {column!r} is not one of its columns")
     _unique(key, f"{where}: key column")
-    _check_exclusions(model, where)
+    _check_exclusions(model, where, tables)
     _check_totals(model, columns, tables[model["source"]], where)
 
 

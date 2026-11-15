@@ -124,6 +124,9 @@ DATABASE_FILE = "build.duckdb"
 # so two files with one name could not be opened side by side.
 REPEAT_DIR = "repeat"
 REPEAT_FILE = "repeat.duckdb"
+# Where dbt writes its results and its log under a build's folder.
+TARGET_DIR = "target"
+LOG_DIR = "logs"
 # The rows each model is expected to hold are worked out from the raw files
 # before the build and kept in a database of their own, under this name.
 EXPECTED_FILE = "expected.duckdb"
@@ -1178,7 +1181,7 @@ def build_project(
         "      threads: 1\n",
         encoding="utf-8",
     )
-    target = workdir / "target"
+    target = workdir / TARGET_DIR
     command = [
         sys.executable,
         "-c",
@@ -1195,7 +1198,7 @@ def build_project(
         "--target-path",
         str(target),
         "--log-path",
-        str(workdir / "logs"),
+        str(workdir / LOG_DIR),
         "--vars",
         json.dumps({"raw_dir": str(raw)}),
     ]
@@ -1224,6 +1227,17 @@ def build_project(
         except json.JSONDecodeError:
             run_results = None
     return finished.returncode, run_results, finished.stdout
+
+
+def build_record(workdir: Path) -> dict[str, Path]:
+    """What dbt wrote about the first build in workdir: its results and its log, by name.
+
+    The files may be missing: a build that could not start writes neither.
+    """
+    return {
+        "run_results.json": workdir / TARGET_DIR / "run_results.json",
+        "dbt.log": workdir / LOG_DIR / "dbt.log",
+    }
 
 
 def _run(

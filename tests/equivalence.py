@@ -206,6 +206,8 @@ def run_graph(scenario, claude, raw, out, unisolated) -> list[int]:
         "--out",
         str(out),
     ]
+    # The earlier runner has no repairs, so the graph is run without them.
+    start += ["--repairs", "0"]
     start += [] if scenario.cross_source else ["--no-cross-source"]
     start += ["--unisolated"] if unisolated else []
     settings = {**os.environ, **environment(scenario, claude, raw, out)}

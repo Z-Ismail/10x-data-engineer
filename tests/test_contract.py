@@ -222,6 +222,50 @@ class Check(unittest.TestCase):
         total.update(by="", source_by="")
         check_contract(contract, PROFILES)
 
+    def test_a_total_column_written_with_its_own_table_is_kept_by_its_name(self):
+        contract = copy.deepcopy(CONTRACT)
+        total = model(contract, "stg_billing__invoices")["totals"][0]
+        total.update(
+            source_column="billing.invoices.amount_minor", source_by="billing.invoices.currency"
+        )
+        checked = check_contract(contract, PROFILES)
+        total = model(checked, "stg_billing__invoices")["totals"][0]
+        self.assertEqual((total["source_column"], total["source_by"]), ("amount_minor", "currency"))
+
+    def test_a_total_column_of_another_table_is_refused(self):
+        def change(contract):
+            total = model(contract, "stg_billing__invoices")["totals"][0]
+            total["source_column"] = "billing.customers.amount_minor"
+
+        self.assertRefused(
+            change, r"ties to 'billing.customers.amount_minor', which is not a column"
+        )
+
+    def test_a_rule_that_names_a_table_is_refused_before_counting(self):
+        rules = [
+            "customer_id IN (SELECT id FROM billing.customers WHERE livemode = 'false')",
+            "EXISTS (SELECT 1 FROM billing.invoices o WHERE o.id < billing.invoices.id)",
+            "id IN (SELECT id FROM BILLING.CUSTOMERS)",
+        ]
+        for rule in rules:
+            with self.subTest(rule=rule):
+
+                def change(contract, rule=rule):
+                    model(contract, "stg_billing__invoices")["exclusions"][0]["where"] = rule
+
+                self.assertRefused(
+                    change,
+                    r"^model stg_billing__invoices exclusion \w+ names the table billing\.\w+; "
+                    r"a rule is a condition on the columns of billing\.invoices alone, "
+                    r"with no table, subquery or join$",
+                )
+
+    def test_a_rule_on_its_own_columns_passes_even_with_dotted_words(self):
+        contract = copy.deepcopy(CONTRACT)
+        exclusion = model(contract, "stg_billing__invoices")["exclusions"][0]
+        exclusion["where"] = "livemode = 'false' or status = 'billing.customers_old'"
+        check_contract(contract, PROFILES)
+
 
 class Declaration(unittest.TestCase):
     def test_the_demo_contract_gives_the_demo_declaration_without_expected_rows(self):

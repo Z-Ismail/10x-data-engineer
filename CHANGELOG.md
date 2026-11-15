@@ -6,6 +6,55 @@ Notable changes to this project.
 
 ### Added
 
+- The Diagnostics agent, in a new operate run: `python -m tenx.run
+  diagnose --project <folder> --raw <folder> --goal <file> --checks <file>
+  --out <folder>` (`make diagnose PROJECT=<folder>`) copies an existing
+  dbt project into the run's folder (the project is never written), has
+  the gate build and check the copy, and if the gate fails it, gives the
+  diagnosis packet to the Diagnostics agent (`agents/diagnostics.md`:
+  Sonnet, read-only tools, in the sandbox without the raw files). Its
+  answer is checked in code and kept as `DIAGNOSIS.md`, a `diagnostics`
+  row is added to `usage.json`, and the run's status and exit status stay
+  the gate's. A passed project is not diagnosed. The DuckDB gate now says
+  where its first build's `run_results.json` and log are, so the run can
+  pack them without knowing dbt's folders.
+- What a Diagnostics agent will be given of a project the gate fails, and
+  the check of its answer (the agent itself is not built yet).
+  `tenx/diagnosis.py` makes the packet: the goal, spec, profiles and
+  project as the review packet carries them, every check with what an
+  agent may be told of it (failed ones first), and dbt's
+  `run_results.json` and log from the gate's first build, with the
+  project's, the raw files' and the gate's folders replaced by
+  `<project>`, `<raw>` and `<build>`, and a long log cut to its last
+  256 KiB. `tenx/diagnostics.py` checks the answer: confirmed facts must
+  quote a file of the packet; each cause names one of nine kinds, a model,
+  file and line the project has, and the failed or unrun checks it
+  explains; probable causes come before hypotheses. A checked answer is
+  written as `DIAGNOSIS.md`. The failing bed takes its list of causes from
+  it.
+- A test bed for measuring a diagnosis: `python tests/failing_bed.py --out
+  <folder>` writes thirteen variants of the reference dbt project under
+  neutral names (`project-01` to `project-13`, in an order shuffled by
+  `--seed`) and, beside them, `answers.json` giving each one's cause (from
+  a fixed list of eight: match rule, join type, row filter, deduplication,
+  type, unit or sign, nondeterminism, missing column), the model and file
+  where the cause is, and every check the gate fails or skips on it. Two
+  copy mistakes engineer agents made in live runs (customers matched to
+  accounts on the whole email address; billing customers kept once per
+  email); eleven are planted. The tests check that the gate gives each
+  variant exactly its listed results and passes the project once the
+  edited file is written back as the reference has it.
+- A measurement of the reviewer on the test bed: `make review-rates`
+  (`python -m tenx.review_rates run`) gates each bed project in the
+  sandbox, makes its review packet and has the reviewer read it, as a
+  graph run does, on each of four demo datasets, then scores every review
+  against the bed's answers, which the reviewer never sees. It reports
+  the share of planted mistakes caught at the right model and column, the
+  share of correct projects it asked to change, each with a 95% interval,
+  and a verdict by a rule set in advance (useful, harmful or unclear). It
+  is priced first and stops above US$5 unless approved, and resumes where
+  it stopped. On 2026-11-12 it caught 24 of 24 planted mistakes and
+  rejected 0 of 24 correct projects, about US$0.05 a review.
 - The reviewer agent in the graph run, off by default: with `--reviewer`
   (`make engineer-reviewer`), a project the gate passes is given to
   `agents/reviewer.md` (read-only, in the sandbox), which reads the review
@@ -174,6 +223,20 @@ Notable changes to this project.
   times out or ends.
 
 ### Changed
+
+- The diagnosis packet's `PACKET.md` names each check and its subject in
+  backticks, so feedback that starts with a name and a colon is not read
+  as part of the subject.
+- The graph run repairs a project the gate fails by default:
+  `python -m tenx.run run` lets the engineer try again up to twice, told
+  what failed (`--repairs 0` turns it off). Measured on the demo data, the
+  engineer alone passed 32 of 32 runs with repairs against 11 of 32 first
+  rounds. `tenx.run.start` and the comparisons keep their own setting.
+- The Architect is told that a rule for leaving rows out is a condition on
+  its own table's columns, with no table, subquery or join, and to give raw
+  columns without the table. The contract check refuses a rule that names a
+  table, with the reason, before anything is counted, and keeps a money
+  column written with its own table in front by its name.
 
 - A spec's row counts come from `tenx.counting.count_kept` (through the
   source profiler's "count the rows a spec keeps") instead of

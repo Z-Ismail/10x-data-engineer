@@ -353,6 +353,10 @@ class EngineeringRequest(Record):
     # Whether the reviewer agent reads a project the validator passed and
     # advises on what the checks cannot see; its advice changes no verdict.
     reviewer: bool = False
+    # "build" makes a project from the goal; "operate" checks the existing
+    # project in ``project`` and, if it fails, works out why.
+    workflow: Literal["build", "operate"] = "build"
+    project: Text | None = None
 
     @model_validator(mode="after")
     def _review_needs_a_spec(self):
@@ -360,9 +364,33 @@ class EngineeringRequest(Record):
             raise ValueError("review_spec needs the architect, which writes the spec")
         return self
 
+    @model_validator(mode="after")
+    def _project_for_operate_only(self):
+        if self.workflow == "build":
+            if self.project is not None:
+                raise ValueError("a project is given only to the operate workflow")
+            return self
+        if self.project is None:
+            raise ValueError("the operate workflow needs the project to check")
+        building = {
+            "cross_source": self.cross_source,
+            "scouts": self.scouts,
+            "architect": self.architect,
+            "review_spec": self.review_spec,
+            "reviewer": self.reviewer,
+            "repairs": self.repairs,
+        }
+        asked = [name for name, value in building.items() if value]
+        if asked:
+            raise ValueError(
+                f"the operate workflow builds nothing, so it takes no {', '.join(asked)}"
+            )
+        return self
+
 
 # Every step a workflow can take, in the only order they can be taken.
 STEPS = (
+    "intake",
     "profile",
     "overlap",
     "scouts",
@@ -371,15 +399,21 @@ STEPS = (
     "review",
     "engineer",
     "gate",
+    "diagnostics",
     "reviewer",
     "report",
 )
+# The steps only one workflow takes.
+ONLY = {
+    "build": ("scouts", "cross-source", "architect", "review", "engineer", "reviewer"),
+    "operate": ("intake", "diagnostics"),
+}
 
 
 class ExecutionPlan(Record):
     """The workflow chosen for a request, and its steps in order."""
 
-    workflow: Literal["build"]
+    workflow: Literal["build", "operate"]
     steps: tuple[Literal[STEPS], ...] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -390,6 +424,10 @@ class ExecutionPlan(Record):
                 f"steps must each come once, in the order {', '.join(STEPS)}; "
                 f"got {', '.join(self.steps)}"
             )
+        other = "operate" if self.workflow == "build" else "build"
+        foreign = [step for step in self.steps if step in ONLY[other]]
+        if foreign:
+            raise ValueError(f"the {self.workflow} workflow does not take {', '.join(foreign)}")
         return self
 
 

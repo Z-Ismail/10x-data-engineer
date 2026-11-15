@@ -18,6 +18,7 @@ make engineer-scouts   # the same as make engineer, with a scout for each raw ta
 make engineer-graph    # the same as make engineer, as a graph that can be resumed
 make engineer-architect  # the graph run on the brief goal, the Architect writing a spec first
 make engineer-reviewer   # the graph run with the reviewer reading the project after a gate pass
+make diagnose PROJECT=<folder>  # check an existing project on the demo data; diagnose it if it fails
 make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
 make parity      # the graph against the earlier runner with real agents, 64 pairs;
                  # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
@@ -795,8 +796,8 @@ stop counts against the ceiling again.
 
 ### Repairs
 
-`run --repairs N` (0 to 3, default 0) lets the engineer repair its project
-when the gate fails it. The repair is a new engineer attempt, in its own
+`run --repairs N` (0 to 3, default 2 since the comparison below; `--repairs 0`
+turns it off) lets the engineer repair its project when the gate fails it. The repair is a new engineer attempt, in its own
 folder, that starts from the project the gate just checked: its models and
 project files, without the database, `target/` and logs of its own builds,
 and with the same goal, profiles and `JOINS.md` as before. A link the
@@ -907,13 +908,15 @@ before the engineer. It works in its own folder with the goal, the source
 profiles, the overlap report and the cross-source agent's `JOINS.md`, with
 read-only tools, and answers with a spec contract: for each model the goal
 names, what one row is, its key, the raw table its rows come from, the rows
-to leave out (each a SQL condition on the raw table, or exact copies of
-another row) with the reason, where each column comes from, and which money
+to leave out (each a SQL condition on the raw table's own columns, with no
+other table, subquery or join, or exact copies of another row) with the reason, where each column comes from, and which money
 column must add up to the raw data; then the assumptions it made and at
 most three questions for the requester.
 
 The run checks the contract against the profiles (every table and column it
-names must exist, a staging model takes columns only from its own table),
+names must exist, a staging model takes columns only from its own table,
+and a rule may name no table; a money column written with its own table in
+front is kept by its name),
 then counts each rule on the raw files, in a separate process in the
 sandbox (see [security](security.md)). A checked and counted contract is
 kept as `architect/attempt-<n>/contract.json`, with what each model keeps
@@ -1080,7 +1083,10 @@ architect  not shown    32       5   16%     7% to 32%       0.871       0.2459 
 13 runs the engineer got no spec, because a rule for leaving rows out read a
 second table (which the counting allows only from the model's own source,
 9 runs) or a money total named its column with the table in front (4 runs).
-So the Architect stays off by default.
+So the Architect stays off by default. Since then, the Architect is told that
+a rule is a condition on its own table's columns, the contract check refuses a
+rule that names a table before anything is counted, and a money column written
+with its own table is accepted; the comparison has not been run again.
 
 ### Equivalence with the earlier runner
 
@@ -1275,8 +1281,8 @@ with repairs / first round: 95% interval (bootstrap over runs) 0.330 to 0.729
 ```
 
 Every first round that failed was repaired by its first repair; none
-needed a second. Repairs stay off by default until the default is changed
-on purpose.
+needed a second. On this result the graph run's command line repairs up to
+twice by default; the comparisons still run with the repairs they ask for.
 
 ## Review packet
 
@@ -1398,11 +1404,149 @@ reviewer      success       17        1  16.4 s      0.0669
 run           gate PASS     44        3  71.3 s      0.2529
 ```
 
-How often it catches a planted mistake, and how often it asks for changes
-to correct work, has not been measured yet. Before it was built into the
-run, one review each of four test-bed projects caught both planted
-mistakes tried and approved both correct projects tried; that is not a
-rate.
+### Measuring the reviewer
+
+`make review-rates` (`python -m tenx.review_rates run`) reviews every
+project of the test bed (`tests/review_bed.py`: twelve projects that all
+pass the gate, six with one planted mistake in a column the gate does not
+check and six correct but written differently) once on each of four demo
+datasets (seeds 1, 7, 42 and 2026 at 200 companies), 48 reviews. Each
+review is what a graph run does after a gate pass: the gate builds the
+project in the sandbox, the review packet is made, and the reviewer reads
+it in the sandbox, with the bed's `answers.json` hidden from both. Each
+review is then scored against the answers: a planted mistake is caught
+only when a blocking finding names its model and column; a correct project
+is rejected when the verdict is `request changes`. A review with no checked
+answer is listed and left out of both rates.
+
+Each rate is given with its 95% interval, as the comparisons give pass
+rates. The rule was set before the first run: the reviewer is **useful**
+when the catch rate's lower limit is at least 60% and the false-rejection
+rate's upper limit at most 25%, **harmful** when the false-rejection
+rate's lower limit is above 25%, and otherwise **unclear**. The reviews
+are priced before any starts (US$0.08 each, typical); above US$5 it stops
+unless given `--approve-cost`. A second start carries on where the first
+stopped; `python -m tenx.review_rates report runs/review-rates` prints the
+report again.
+
+The report of the run on 2026-11-12 (Claude Code's estimates, not a bill;
+one line per review follows it):
+
+```
+Reviewer measurement: useful
+
+Caught (blocking, right model and column): 24 of 24 (100%, 95% 86% to 100%)
+Defect projects with any request for changes: 24 of 24
+Good projects rejected: 0 of 24 (0%, 95% 0% to 14%)
+Rule: useful when the catch rate's lower limit is at least 60% and the false-rejection rate's upper limit at most 25%; harmful when the false-rejection rate's lower limit is above 25%.
+Cost: US$2.4431 for 48 reviews, US$0.0509 a review, US$0.1018 a catch (Claude Code's own estimates)
+```
+
+Every planted mistake in the bed is visible in one line of SQL, and the
+mistakes are of only six kinds, so this result says how the reviewer does
+on mistakes like these, not on the subtler ones an engineer agent might
+make. Reviews of the same project on different datasets are not
+independent, so the intervals are narrower than they should be.
+
+## Diagnosis packet
+
+`tenx/diagnosis.py` makes the folder the [Diagnostics agent](#diagnostics-agent)
+is given when the gate fails a project, and `tenx/diagnostics.py` checks
+its answer.
+
+| In the packet | From |
+| --- | --- |
+| `GOAL.md`, `SPEC.md`, `source_profiles/`, `project/` | As in the [review packet](#review-packet) |
+| `build/run_results.json` | dbt's results of the gate's first build: each node's status, message and rendered SQL |
+| `build/dbt.log` | dbt's log of that build; over 256 KiB, its last 256 KiB from the start of a line |
+| `PACKET.md` | What each part is; every check the gate ran, failed ones first, with what an agent may be told of it; and what was left out or cut, and why |
+| `packet.json` | The SHA-256 of every file in the packet, and what was left out |
+
+The build's files name the folders the build ran in: the project, the raw
+files and the gate's work folder, where the expected rows sit beside the
+database. Each is replaced by `<project>`, `<raw>` or `<build>`, so the
+packet does not say where the run keeps its files. A build file is read
+as the review packet reads project files (no link followed, regular files
+only), and a packet file with the same bytes as the declaration or a gate
+file refuses the packet. Each check is listed with the same text a repair
+is given: an `expected` check gives its counts, never its rows. A project
+the gate passed has nothing to diagnose and is not packed.
+
+For the bed's projects (`tests/failing_bed.py`) on the demo data, the log
+is about 55 KB and the run results about 15 KB.
+
+The answer is JSON in a fixed shape: a summary; confirmed facts, each
+quoting a file of the packet; causes, most likely first, each `probable`
+or a `hypothesis`; and what is missing. Each cause gives its kind from a
+fixed list (match rule, join type, row filter, deduplication, type, unit
+or sign, nondeterminism, missing column, or `other`), the model, a project
+file and line, and the checks it explains. The check refuses an answer
+whose quote is not in the file it cites, whose model, file or line the
+project does not have, which explains a check that passed or does not
+exist, which ranks a probable cause after a hypothesis, or which names no
+cause without saying what is missing. A cause need not sit in a model a
+failing check names: a broken staging model can fail only the crosswalk
+built from it. A checked answer is written as `DIAGNOSIS.md`.
+
+In `PACKET.md` each check's name and subject are in backticks
+(`` - `total` on `stg_billing__invoices`: amount_minor by currency: ... ``),
+because a check's feedback can itself start with a name and a colon.
+
+## Diagnostics agent
+
+```
+python -m tenx.run diagnose --project <folder> --raw demo/data --goal demo/goal.md \
+    --checks tests/fixtures/demo_gate.json --out runs/diagnose
+```
+
+`diagnose` runs the operate workflow of the [graph run](#graph-run) on a
+dbt project that already exists: copy the project into `<out>/project`,
+profile the raw files and compare their columns, have the gate build and
+check the copy, then diagnose. The copy leaves out what dbt writes when it
+builds (`target/`, `logs/`, `dbt_packages/`, database files), copies a
+link as a link without following it, and leaves out anything that is not
+a file, folder or link, saying so in a finding. Every later step works on
+the copy, so the project you name is read once and never written.
+
+If the gate passes the project, there is nothing to diagnose and no agent
+is called. If it fails, the run makes the [diagnosis packet](#diagnosis-packet)
+and gives a copy to the Diagnostics agent (`agents/diagnostics.md`, Sonnet,
+20 turns, capped as a cross-source call at US$0.40). It works in the
+sandbox like the reviewer: Read, Glob and Grep only, in a folder holding
+only the packet, without the raw files. It follows each failed check back
+to the first model whose SQL does what the goal or the profiled raw data
+says it should not, and answers in the shape the packet section describes.
+The answer is checked in code; an answer that fails the check, a crash, a
+packet that would hold a hidden file and a ceiling that cannot hold the
+call each leave the run without a diagnosis and a finding that says why.
+A checked diagnosis is printed after the gate's report and kept as
+`<out>/diagnostics/attempt-1/DIAGNOSIS.md`, with a `diagnostics` row in
+`usage.json`. It is advice: the run's status and exit status are the
+gate's (1 when the project fails). `resume` and `status` work as for a
+build run.
+
+On the reference-sized demo data (seed 42, 200 companies), for the bed
+variant that keeps one billing customer per email:
+
+```
+# Diagnosis
+
+Advice from the diagnostician on why the project failed the checks. It changes
+no file and no verdict.
+
+...
+
+## Probable causes
+
+1. `project/models/staging/stg_billing__customers.sql:9`, `stg_billing__customers`, deduplication: The qualify clause keeps only one customer per email. ...
+```
+
+In the first live runs (Claude Code 2.1.325, bubblewrap), on eight of the
+bed's thirteen variants one run each, every answer that passed the check
+named the bed's cause and model, at US$0.025 to 0.048 a call; one answer
+was refused because it read part of a check's feedback as the check's
+subject, which the backticks above now prevent. That is a handful of runs,
+not a rate; the bed is there to measure one.
 
 ## Run records and graph state
 
@@ -1450,9 +1594,9 @@ construct objects of any class a checkpoint file names.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer, the diagnosis packet and the check of a diagnosis |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |
-| `tests/` | Tests, the dbt project the gate is tested against, the equivalence check (`tests/equivalence.py`) and the reviewer test bed (`tests/review_bed.py`) |
+| `tests/` | Tests, the dbt project the gate is tested against, the equivalence check (`tests/equivalence.py`), the reviewer test bed (`tests/review_bed.py`) and the failing bed (`tests/failing_bed.py`) |
 

@@ -20,7 +20,10 @@ from tenx.contract import (
     SCHEMA,
     TOTAL_FIELDS,
 )
-from tenx.engineer import ARCHITECT, REVIEWER
+from tenx.diagnostics import ANSWER_FIELDS as DIAGNOSIS_FIELDS
+from tenx.diagnostics import CAUSE_FIELDS, CHECK_FIELDS, FACT_FIELDS, KINDS, LIKELIHOODS
+from tenx.diagnostics import SCHEMA as DIAGNOSIS_SCHEMA
+from tenx.engineer import ARCHITECT, DIAGNOSTICS, REVIEWER
 from tenx.repair import REPORT_FILE
 from tenx.reviewer import ANSWER_FIELDS, FINDING_FIELDS, SEVERITIES, VERDICTS
 from tenx.reviewer import SCHEMA as REVIEW_SCHEMA
@@ -210,6 +213,13 @@ class ArchitectAgentTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(f"`{name}`", self.body)
 
+    def test_keeps_rules_to_their_own_table_and_columns_unqualified(self):
+        # The rows a rule leaves out are counted, and checked, on its own table alone.
+        text = " ".join(self.body.split())
+        self.assertIn("A rule is a condition on the columns of that one table alone", text)
+        self.assertIn("has no subquery or join", text)
+        self.assertIn("by their name in the profile, without the table", text)
+
     def test_keeps_the_role_in_step_with_the_contract(self):
         self.assertEqual(ARCHITECT.agent, "tenx:architect")
         self.assertIs(ARCHITECT.json_schema, SCHEMA)
@@ -253,6 +263,45 @@ class ReviewerAgentTest(unittest.TestCase):
         self.assertEqual(REVIEWER.allowed_tools, ())
         self.assertEqual(REVIEWER.max_turns, 20)
         self.assertEqual(REVIEWER.budget_kind, "cross-source")
+
+
+class DiagnosticsAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.fields, self.body = read_agent(AGENTS / "diagnostics.md")
+
+    def test_sets_only_fields_a_plugin_agent_may_set(self):
+        self.assertLessEqual(set(self.fields), SUPPORTED)
+        self.assertEqual(self.fields["name"], "diagnostics")
+        self.assertTrue(self.fields["description"].strip())
+
+    def test_pins_the_model(self):
+        self.assertEqual(self.fields["model"], "sonnet")
+
+    def test_can_only_read_files_and_give_its_answer(self):
+        tools = {tool.strip() for tool in self.fields["tools"].split(",")}
+        self.assertEqual(tools, {"Read", "Glob", "Grep", "StructuredOutput"})
+
+    def test_starts_without_claude_md_files(self):
+        self.assertIs(self.fields["omitClaudeMd"], True)
+
+    def test_asks_for_every_field_and_value_of_the_answer(self):
+        words = (*DIAGNOSIS_FIELDS, *FACT_FIELDS, *CAUSE_FIELDS, *CHECK_FIELDS)
+        for word in (*words, *LIKELIHOODS, *KINDS):
+            with self.subTest(word):
+                self.assertIn(f"`{word}`", self.body)
+
+    def test_reads_the_files_its_folder_holds(self):
+        names = ("PACKET.md", "GOAL.md", "SPEC.md", "source_profiles/", "project/", "build/")
+        for name in (*names, "build/run_results.json", "build/dbt.log"):
+            with self.subTest(name):
+                self.assertIn(f"`{name}`", self.body)
+
+    def test_keeps_the_role_in_step_with_the_answer(self):
+        self.assertEqual(DIAGNOSTICS.agent, "tenx:diagnostics")
+        self.assertIs(DIAGNOSTICS.json_schema, DIAGNOSIS_SCHEMA)
+        self.assertEqual(DIAGNOSTICS.allowed_tools, ())
+        self.assertEqual(DIAGNOSTICS.max_turns, 20)
+        self.assertEqual(DIAGNOSTICS.budget_kind, "cross-source")
 
 
 if __name__ == "__main__":

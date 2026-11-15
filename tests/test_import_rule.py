@@ -2,7 +2,9 @@
 
 ``tenx/ports.py``, the records in ``tenx/domain.py``, the contract check and
 SPEC.md (``tenx/contract.py``, ``tenx/spec.py``), the review packet and the
-reviewer's answer (``tenx/review.py``, ``tenx/reviewer.py``) and everything under
+reviewer's answer (``tenx/review.py``, ``tenx/reviewer.py``), the diagnosis
+packet and the check of a diagnosis (``tenx/diagnosis.py``,
+``tenx/diagnostics.py``) and everything under
 ``tenx/graph/`` may not import DuckDB, dbt, the gate, the profiler, the
 overlap report, the old runner (which imports the gate) or the adapters
 themselves. Two checks: the source is read for every way of writing an
@@ -76,6 +78,9 @@ def guarded_files() -> list[Path]:
         # The review packet and the reviewer's answer, which the graph handles itself.
         ROOT / "tenx" / "review.py",
         ROOT / "tenx" / "reviewer.py",
+        # The diagnosis packet and the check of a diagnosis, likewise.
+        ROOT / "tenx" / "diagnosis.py",
+        ROOT / "tenx" / "diagnostics.py",
         *sorted((ROOT / "tenx" / "graph").rglob("*.py")),
     ]
 
