@@ -18,6 +18,7 @@ make engineer-scouts   # the same as make engineer, with a scout for each raw ta
 make engineer-graph    # the same as make engineer, as a graph that can be resumed
 make engineer-architect  # the graph run on the brief goal, the Architect writing a spec first
 make engineer-reviewer   # the graph run with the reviewer reading the project after a gate pass
+make diagnose PROJECT=<folder>  # check an existing project on the demo data; diagnose it if it fails
 make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
 make parity      # the graph against the earlier runner with real agents, 64 pairs;
                  # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
@@ -1449,9 +1450,9 @@ independent, so the intervals are narrower than they should be.
 
 ## Diagnosis packet
 
-The Diagnostics agent is not built yet. `tenx/diagnosis.py` makes the
-folder it will be given when the gate fails a project, and
-`tenx/diagnostics.py` checks its answer.
+`tenx/diagnosis.py` makes the folder the [Diagnostics agent](#diagnostics-agent)
+is given when the gate fails a project, and `tenx/diagnostics.py` checks
+its answer.
 
 | In the packet | From |
 | --- | --- |
@@ -1486,6 +1487,66 @@ exist, which ranks a probable cause after a hypothesis, or which names no
 cause without saying what is missing. A cause need not sit in a model a
 failing check names: a broken staging model can fail only the crosswalk
 built from it. A checked answer is written as `DIAGNOSIS.md`.
+
+In `PACKET.md` each check's name and subject are in backticks
+(`` - `total` on `stg_billing__invoices`: amount_minor by currency: ... ``),
+because a check's feedback can itself start with a name and a colon.
+
+## Diagnostics agent
+
+```
+python -m tenx.run diagnose --project <folder> --raw demo/data --goal demo/goal.md \
+    --checks tests/fixtures/demo_gate.json --out runs/diagnose
+```
+
+`diagnose` runs the operate workflow of the [graph run](#graph-run) on a
+dbt project that already exists: copy the project into `<out>/project`,
+profile the raw files and compare their columns, have the gate build and
+check the copy, then diagnose. The copy leaves out what dbt writes when it
+builds (`target/`, `logs/`, `dbt_packages/`, database files), copies a
+link as a link without following it, and leaves out anything that is not
+a file, folder or link, saying so in a finding. Every later step works on
+the copy, so the project you name is read once and never written.
+
+If the gate passes the project, there is nothing to diagnose and no agent
+is called. If it fails, the run makes the [diagnosis packet](#diagnosis-packet)
+and gives a copy to the Diagnostics agent (`agents/diagnostics.md`, Sonnet,
+20 turns, capped as a cross-source call at US$0.40). It works in the
+sandbox like the reviewer: Read, Glob and Grep only, in a folder holding
+only the packet, without the raw files. It follows each failed check back
+to the first model whose SQL does what the goal or the profiled raw data
+says it should not, and answers in the shape the packet section describes.
+The answer is checked in code; an answer that fails the check, a crash, a
+packet that would hold a hidden file and a ceiling that cannot hold the
+call each leave the run without a diagnosis and a finding that says why.
+A checked diagnosis is printed after the gate's report and kept as
+`<out>/diagnostics/attempt-1/DIAGNOSIS.md`, with a `diagnostics` row in
+`usage.json`. It is advice: the run's status and exit status are the
+gate's (1 when the project fails). `resume` and `status` work as for a
+build run.
+
+On the reference-sized demo data (seed 42, 200 companies), for the bed
+variant that keeps one billing customer per email:
+
+```
+# Diagnosis
+
+Advice from the diagnostician on why the project failed the checks. It changes
+no file and no verdict.
+
+...
+
+## Probable causes
+
+1. `project/models/staging/stg_billing__customers.sql:9`, `stg_billing__customers`, deduplication: The qualify clause keeps only one customer per email. ...
+```
+
+In the first live runs (Claude Code 2.1.325, bubblewrap), on eight of the
+bed's thirteen variants one run each, every answer that passed the check
+named the bed's cause and model, at US$0.025 to 0.048 a call; one answer
+was refused because it read part of a check's feedback as the check's
+subject, which the backticks above now prevent. That is a handful of runs,
+not a rate; the bed is there to measure one.
 
 ## Run records and graph state
 

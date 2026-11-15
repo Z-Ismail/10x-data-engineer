@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer equivalence compare parity repairs compare-architect review-rates clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer diagnose equivalence compare parity repairs compare-architect review-rates clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -62,6 +62,16 @@ engineer-reviewer: demo-data
 	rm -rf runs/demo-reviewer
 	$(PYTHON) -m tenx.run run --raw demo/data --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/demo-reviewer --reviewer
+
+# Check an existing project on the demo data and, if the gate fails it, have
+# the diagnostics agent say why (DIAGNOSIS.md); the project is not changed.
+# Needs Claude Code, signed in. Failing projects to try:
+# python tests/failing_bed.py --out runs/bed (then PROJECT=runs/bed/projects/project-01)
+diagnose: demo-data
+	@test -n "$(PROJECT)" || { echo "usage: make diagnose PROJECT=<folder>" >&2; exit 2; }
+	rm -rf runs/diagnose
+	$(PYTHON) -m tenx.run diagnose --project "$(PROJECT)" --raw demo/data --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/diagnose
 
 # The old runner and the graph on the eight comparison datasets, with a
 # stand-in for Claude Code that answers the same way every time: every
