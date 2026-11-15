@@ -4,13 +4,15 @@ import hashlib
 import json
 import os
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from graph_fakes import Fakes, GraphCase
 
 from tenx.domain import AgentFinding
-from tenx.graph.build import ledger, steps_for
+from tenx.graph.build import ledger, report_node, steps_for
 from tenx.graph.operate import copy_project
+from tenx.policy import Budget, Policy
 
 # The stand-in diagnosis, as DIAGNOSIS.md shows it.
 DIAGNOSIS_TEXT = """# Diagnosis
@@ -188,6 +190,87 @@ class DiagnosisTest(OperateCase, unittest.TestCase):
         self.assertEqual(state["status"], "passed")
         self.assertEqual(self.claims(state), ["no diagnosis: the project passed every check"])
         self.assertFalse((self.out / "diagnosis-packet").exists())
+
+
+class NoDiagnosisTest(OperateCase, unittest.TestCase):
+    def failing(self) -> Fakes:
+        fakes = Fakes()
+        fakes.verdict = False
+        return fakes
+
+    def assertNoDiagnosis(self, state, reason):
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(self.claims(state), [f"no diagnosis: {reason}"])
+        self.assertNotIn("diagnosis", state["artefacts"])
+
+    def test_an_answer_that_fails_its_check_gives_no_diagnosis(self):
+        fakes = self.failing()
+        wrong = json.loads(json.dumps(fakes.reports["diagnostics"]))
+        wrong["structured_output"]["causes"][0]["explains"] = [
+            {"check": "build", "subject": "project"}
+        ]
+        fakes.reports["diagnostics"] = wrong
+        state = self.run_graph(fakes)
+        self.assertNoDiagnosis(
+            state, "cause 1 explains build on project, which did not fail or go unrun"
+        )
+        self.assertEqual([c["node"] for c in state["costs"]], ["diagnostics"])
+
+    def test_a_crashed_diagnostician_is_charged_and_gives_no_diagnosis(self):
+        fakes = self.failing()
+        fakes.reports["diagnostics"] = None
+        state = self.run_graph(fakes)
+        self.assertNoDiagnosis(state, "the diagnostician gave no report")
+        self.assertEqual([c["charged_usd"] for c in state["costs"]], ["0.40"])
+
+    def test_a_copy_of_a_hidden_file_gives_no_packet_and_no_call(self):
+        (self.project / "models" / "copy.sql").write_bytes(self.declaration.read_bytes())
+        fakes = self.failing()
+        state = self.run_graph(fakes)
+        self.assertNotIn("diagnostics", fakes.calls)
+        self.assertNoDiagnosis(
+            state, "project/models/copy.sql has the same bytes as a file hidden from agents"
+        )
+
+    def test_a_copy_of_a_gate_file_gives_no_packet(self):
+        # The stand-in gate writes built.duckdb holding these bytes.
+        (self.project / "models" / "built.sql").write_text("tables\n")
+        fakes = self.failing()
+        state = self.run_graph(fakes)
+        self.assertNotIn("diagnostics", fakes.calls)
+        self.assertNoDiagnosis(
+            state, "project/models/built.sql has the same bytes as a file hidden from agents"
+        )
+
+    def test_a_diagnosis_the_ceiling_cannot_hold_leaves_the_verdict(self):
+        fakes = self.failing()
+        # A run whose earlier spending leaves less than the diagnostician's cap.
+        budget = Budget(Policy(run_usd=Decimal("0.75")))
+        budget.reserve("engineer", "engineer")
+        toolkit = fakes.toolkit(self.out, budget=budget)
+        state = self.run_graph(fakes, toolkit=toolkit)
+        self.assertNotIn("diagnostics", fakes.calls)
+        self.assertEqual(state["status"], "failed")
+        [claim] = self.claims(state)
+        self.assertTrue(claim.startswith("no diagnosis: stopped: budget"), claim)
+
+    def test_a_resumed_run_does_not_ask_again(self):
+        fakes = self.failing()
+        toolkit = fakes.toolkit(self.out)
+        finish = report_node(toolkit)
+        stop = {"report": True}
+
+        def dies(state):
+            if stop.pop("report", False):
+                raise SystemExit("killed")
+            return finish(state)
+
+        with self.assertRaises(SystemExit):
+            self.invoke(toolkit, self.operate(), nodes={"report": dies})
+        state = self.invoke(toolkit, nodes={"report": dies}, resume=True)
+        self.assertEqual(fakes.calls.count("diagnostics"), 1)
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("diagnosis", state["artefacts"])
 
 
 if __name__ == "__main__":
