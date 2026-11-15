@@ -175,6 +175,7 @@ def needs(toolkit: Toolkit, steps: tuple[str, ...]) -> list[tuple[object, str]]:
         ENGINEER_STEP: [(toolkit.engine, SCAFFOLD), (toolkit.backend, RUN_AGENT)],
         GATE_STEP: [(toolkit.validator, VALIDATE)],
         REVIEWER_STEP: [(toolkit.backend, RUN_AGENT), (toolkit.backend, STRUCTURED_ANSWER)],
+        DIAGNOSTICS_STEP: [(toolkit.backend, RUN_AGENT), (toolkit.backend, STRUCTURED_ANSWER)],
     }
     return [need for step in steps for need in wanted.get(step, [])]
 
@@ -682,8 +683,9 @@ def gate_node(toolkit: Toolkit):
         )
         artefacts.write_text(attempt.folder / GATE_REPORT_FILE, report.text)
         kept = [GATE_REPORT_FILE]
-        if request.reviewer:
-            # What each check lets an agent be told, for the reviewer's packet.
+        if request.reviewer or request.workflow == "operate":
+            # What each check lets an agent be told, for the reviewer's or
+            # the diagnostics agent's packet.
             artefacts.write_text(attempt.folder / CHECKS_FILE, _checks_json(report))
             kept.append(CHECKS_FILE)
         artefacts.finish(attempt, artefacts.COMPLETE, kept)
@@ -713,8 +715,8 @@ def _checks_json(report: ValidationReport) -> str:
     return json.dumps({"passed": report.passed, "checks": checks}, indent=2) + "\n"
 
 
-def _passed_report(path: Path) -> ValidationReport:
-    """The validation as the packet needs it: each check and what an agent may be told."""
+def _saved_report(path: Path) -> ValidationReport:
+    """The validation as a packet needs it: each check and what an agent may be told."""
     saved = json.loads(path.read_text(encoding="utf-8"))
     results = tuple(
         CheckResult(item["check"], item["subject"], item["status"], "", {}, item["feedback"])
@@ -781,7 +783,7 @@ def reviewer_node(toolkit: Toolkit):
                 goal=Path(request.goal),
                 profiles=Path(found["profiles"]["path"]),
                 project=Path(found["project"]["path"]),
-                report=_passed_report(gate / CHECKS_FILE),
+                report=_saved_report(gate / CHECKS_FILE),
                 spec=Path(spec["path"]) if spec is not None else None,
                 secrets=(Path(request.declaration), out / GATE_STEP),
             )
@@ -829,7 +831,7 @@ def ledger(state: GraphState, roles: Mapping[str, Role], sandbox: str) -> Ledger
         (cost["node"], cost["attempt"]): cost["outcome"] for cost in state.get("costs") or []
     }
     used = []
-    for step in (CROSS_SOURCE_STEP, ARCHITECT_STEP, ENGINEER_STEP, REVIEWER_STEP):
+    for step in (CROSS_SOURCE_STEP, ARCHITECT_STEP, ENGINEER_STEP, DIAGNOSTICS_STEP, REVIEWER_STEP):
         last = (state.get("attempts") or {}).get(step)
         if last is None:
             continue
@@ -895,8 +897,15 @@ def _after_gate(state: GraphState) -> str:
 
 
 def build_graph(toolkit: Toolkit, nodes: Mapping[str, Callable] | None = None) -> StateGraph:
-    """The build workflow's graph, not yet compiled. ``nodes`` replaces steps by name."""
+    """The graph of both workflows, not yet compiled. ``nodes`` replaces steps by name.
+
+    The plan chooses a workflow's steps; the operate workflow's own steps
+    live in ``tenx.graph.operate``, which is built on this module.
+    """
+    from tenx.graph.operate import intake_node
+
     made = {
+        INTAKE_STEP: intake_node(toolkit),
         PLAN: plan_node(toolkit),
         PROFILE_STEP: profile_node(toolkit),
         OVERLAP_STEP: overlap_node(toolkit),
