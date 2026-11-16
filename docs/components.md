@@ -1520,7 +1520,8 @@ The answer is checked in code; an answer that fails the check, a crash, a
 packet that would hold a hidden file and a ceiling that cannot hold the
 call each leave the run without a diagnosis and a finding that says why.
 A checked diagnosis is printed after the gate's report and kept as
-`<out>/diagnostics/attempt-1/DIAGNOSIS.md`, with a `diagnostics` row in
+`<out>/diagnostics/attempt-1/DIAGNOSIS.md` (and, as data, `diagnosis.json`
+beside it), with a `diagnostics` row in
 `usage.json`. It is advice: the run's status and exit status are the
 gate's (1 when the project fails). `resume` and `status` work as for a
 build run.
@@ -1545,8 +1546,60 @@ In the first live runs (Claude Code 2.1.325, bubblewrap), on eight of the
 bed's thirteen variants one run each, every answer that passed the check
 named the bed's cause and model, at US$0.025 to 0.048 a call; one answer
 was refused because it read part of a check's feedback as the check's
-subject, which the backticks above now prevent. That is a handful of runs,
-not a rate; the bed is there to measure one.
+subject, which the backticks above now prevent. The measurement below
+gives the rate.
+
+### Measuring the diagnosis
+
+`make diagnosis-rates` (`python -m tenx.diagnosis_rates run`) diagnoses
+every project of the failing bed (`tests/failing_bed.py`: thirteen
+projects that each fail the gate for one known cause, two copied from
+mistakes engineer agents made in live runs and eleven planted) once on
+each of four demo datasets (seeds 1, 7, 42 and 2026 at 200 companies), 52
+runs. Each run is `python -m tenx.run diagnose` on that project, in its own
+folder, with the bed (and its `answers.json`) and the measurement's folder
+hidden from the gate's builds and from the agent. Each diagnosis is then
+scored against the answers: it is **right** only when its first cause
+names both the bed's kind of cause and the bed's model. A run that ends
+without a checked diagnosis counts against the agent, as it gives a person
+nothing. Observed and planted variants are reported apart, and each
+variant on its own line.
+
+The accuracy is given with its 95% interval. The rule was set before the
+first run: the diagnosis is **useful** when the accuracy's lower limit is
+at least 60%, **weak** when its upper limit is below 60%, and otherwise
+**unclear**. The runs are priced before any starts (US$0.08 each, typical);
+above US$5 it stops unless given `--approve-cost`. A second start carries
+on where the first stopped; `python -m tenx.diagnosis_rates report
+runs/diagnosis-rates` prints the report again.
+
+The report of the run on 2026-11-16 (Claude Code 2.1.325, Claude Code's
+estimates, not a bill; the per-variant lines are shortened here):
+
+```
+Diagnosis measurement: useful
+
+Right (first cause names the cause and the model): 50 of 52 (96%, 95% 87% to 99%)
+  observed in live runs: 8 of 8 (100%, 95% 66% to 100%)
+  planted: 42 of 44 (95%, 95% 85% to 99%)
+Otherwise: model only 0, cause only 0, wrong 0, no cause 0, no diagnosis 2
+The known cause anywhere in the diagnosis: 50 of 52
+Variants right on every dataset: 12 of 13
+Cost: US$2.0890 for 52 runs, US$0.0402 a run, US$0.0418 a right diagnosis (Claude Code's own estimates)
+
+  crosswalk_inner_join          planted   2 of 4
+  (each of the other twelve variants 4 of 4)
+```
+
+Both runs without a diagnosis were of one variant, and in both the first
+cause the agent gave was the right one, but a fact quoted a check's line
+with a figure changed, so the code check refused the whole answer. The
+bed's causes are each a few lines of SQL in one model and the gate's
+report points at the model in twelve of the thirteen variants, so this
+says how the agent does on mistakes like these, not on larger projects
+with packages or macros. Runs of one variant are not independent, so the
+interval is narrower than it should be; by variant, twelve of thirteen
+were right on all four datasets.
 
 ## Run records and graph state
 
@@ -1594,7 +1647,7 @@ construct objects of any class a checkpoint file names.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer, the diagnosis packet and the check of a diagnosis |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer, the diagnosis packet and the check of a diagnosis, and the measurements of the reviewer and of the diagnosis |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |
