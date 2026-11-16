@@ -106,7 +106,10 @@ The project it is pointed at is copied into the run's folder before
 anything reads it, outside the sandbox, so the copy follows no link (a
 link is copied as a link) and opens nothing that is not a regular file;
 the gate builds the copy in the sandbox, and the project itself is never
-written.
+written. When the diagnosis is measured on the failing bed (`make
+diagnosis-rates`), the bed with its answers and the measurement's folder,
+which holds the other runs' diagnoses, are hidden from the gate's builds
+and from the agent as well.
 
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and

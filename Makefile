@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer diagnose equivalence compare parity repairs compare-architect review-rates clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer diagnose equivalence compare parity repairs compare-architect review-rates diagnosis-rates clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -193,6 +193,28 @@ review-rates:
 	$(PYTHON) -m tenx.review_rates run --bed $(REVIEW_BED) --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/review-rates $(REVIEW_FLAGS) \
 		$(foreach seed,$(REVIEW_SEEDS),--raw s$(seed)-200=$(COMPARE_DATA)/s$(seed)-200/data)
+
+# The Diagnostics agent on the failing bed: thirteen projects that each fail
+# the gate for one known reason, each diagnosed once on each of
+# DIAGNOSIS_SEEDS at 200 companies (52 diagnoses by default) by the same run
+# as make diagnose, scored against the bed's answers, which the agent never
+# sees. Needs Claude Code, signed in, and bubblewrap. Run it again to resume.
+# Estimated above US$5, it stops before any diagnosis unless approved:
+# make diagnosis-rates DIAGNOSIS_FLAGS=--approve-cost
+DIAGNOSIS_SEEDS ?= 1 7 42 2026
+DIAGNOSIS_FLAGS ?=
+FAILING_BED = runs/failing-bed
+
+diagnosis-rates:
+	@for seed in $(DIAGNOSIS_SEEDS); do \
+		folder=$(COMPARE_DATA)/s$$seed-200; \
+		test -d $$folder/data || $(PYTHON) demo/generate.py --seed $$seed --companies 200 \
+			--out $$folder/data --answers-out $$folder/answers || exit 1; \
+	done
+	test -f $(FAILING_BED)/answers.json || $(PYTHON) tests/failing_bed.py --out $(FAILING_BED)
+	$(PYTHON) -m tenx.diagnosis_rates run --bed $(FAILING_BED) --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/diagnosis-rates $(DIAGNOSIS_FLAGS) \
+		$(foreach seed,$(DIAGNOSIS_SEEDS),--raw s$(seed)-200=$(COMPARE_DATA)/s$(seed)-200/data)
 
 clean:
 	rm -rf demo/data demo/answers profiles runs

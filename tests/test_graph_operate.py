@@ -7,7 +7,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from graph_fakes import Fakes, GraphCase
+from graph_fakes import DIAGNOSIS, Fakes, GraphCase
 
 from tenx.domain import AgentFinding
 from tenx.graph.build import ledger, report_node, steps_for
@@ -161,6 +161,8 @@ class DiagnosisTest(OperateCase, unittest.TestCase):
         self.assertEqual((work / "build" / "dbt.log").read_text(), "Running in <project>\nDone.\n")
         written = self.out / "diagnostics" / "attempt-1" / "DIAGNOSIS.md"
         self.assertEqual(written.read_text(), DIAGNOSIS_TEXT)
+        data = json.loads(written.with_name("diagnosis.json").read_text())
+        self.assertEqual(data, DIAGNOSIS)
         self.assertEqual(state["artefacts"]["diagnosis"]["path"], str(written))
         self.assertEqual(state["status"], "failed")
         self.assertEqual(

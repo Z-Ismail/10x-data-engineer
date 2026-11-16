@@ -6,6 +6,19 @@ Notable changes to this project.
 
 ### Added
 
+- A measurement of the Diagnostics agent on the failing bed: `make
+  diagnosis-rates` (`python -m tenx.diagnosis_rates run | report`)
+  diagnoses each of the bed's thirteen projects on four demo datasets with
+  the same run as `python -m tenx.run diagnose`, with the bed and the
+  measurement's folder hidden from the gate and the agent, and scores each
+  diagnosis against the bed's answers: right only when the first cause
+  names the known kind of cause and model. It reports the accuracy with
+  its 95% interval, observed and planted variants apart and each variant
+  on its own line, against a rule set before the first run; it is priced
+  before it starts and resumes where it stopped. The first run gave 50 of
+  52 right (95% 87% to 99%), useful by that rule.
+- A diagnose run keeps the checked diagnosis as data in `diagnosis.json`
+  beside `DIAGNOSIS.md`.
 - The Diagnostics agent, in a new operate run: `python -m tenx.run
   diagnose --project <folder> --raw <folder> --goal <file> --checks <file>
   --out <folder>` (`make diagnose PROJECT=<folder>`) copies an existing

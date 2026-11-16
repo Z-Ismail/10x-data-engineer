@@ -53,6 +53,7 @@ import argparse
 import json
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from langgraph.types import Command
@@ -109,8 +110,18 @@ class RunError(Exception):
     """The run cannot start or resume, for the reason given."""
 
 
-def toolkit(request: EngineeringRequest, claude: str, sandbox: Sandbox, budget: Budget) -> Toolkit:
-    """The DuckDB, dbt and Claude Code ports a run works through."""
+def toolkit(
+    request: EngineeringRequest,
+    claude: str,
+    sandbox: Sandbox,
+    budget: Budget,
+    hide: tuple[Path, ...] = (),
+) -> Toolkit:
+    """The DuckDB, dbt and Claude Code ports a run works through.
+
+    ``hide`` names more paths that no agent and no build of the validator
+    may see, beside the run's folder, the add-on and the declaration.
+    """
     out = Path(request.out)
     plugin = out / PLUGIN_COPY_DIR
     if not plugin.is_dir():
@@ -118,7 +129,8 @@ def toolkit(request: EngineeringRequest, claude: str, sandbox: Sandbox, budget: 
     checks = Path(request.declaration)
 
     def seen(workspace: Path, raw: bool):
-        return mounts(workspace, out, checks, claude, raw=Path(request.raw) if raw else None)
+        shown = mounts(workspace, out, checks, claude, raw=Path(request.raw) if raw else None)
+        return replace(shown, hidden=(*shown.hidden, *hide))
 
     return Toolkit(
         profiler=DuckDBProfiler(),
@@ -129,7 +141,7 @@ def toolkit(request: EngineeringRequest, claude: str, sandbox: Sandbox, budget: 
         roles=ROLES,
         mounts=seen,
         plugin=plugin,
-        hidden=(PLUGIN_DIR, out),
+        hidden=(PLUGIN_DIR, out, *hide),
         budget=budget,
         timeout=TIMEOUT_MINUTES * 60,
     )
@@ -200,20 +212,23 @@ def diagnose(
     rules: Policy | None = None,
     sandbox: Sandbox | None = None,
     claude: str = "claude",
+    hide: tuple[Path, ...] = (),
 ) -> dict:
     """Check an existing project, and diagnose it if it fails. Returns the final state.
 
     ``project`` is copied into the run's folder and never written; ``goal``
     says what it was built for, and ``checks`` is the gate's declaration.
+    ``hide`` names more paths the agent and the gate's builds must not see,
+    such as the folder the project came from; a resume does not keep them.
     """
     project = Path(project)
     if not (project / "dbt_project.yml").is_file():
         raise RunError(f"{project} is not a project folder with a dbt_project.yml")
     asked = {"workflow": "operate", "project": str(project.resolve()), "cross_source": False}
-    return _begin(raw, goal, checks, out, rules, sandbox, claude, asked)
+    return _begin(raw, goal, checks, out, rules, sandbox, claude, asked, hide)
 
 
-def _begin(raw, goal, checks, out, rules, sandbox, claude, asked: dict) -> dict:
+def _begin(raw, goal, checks, out, rules, sandbox, claude, asked: dict, hide=()) -> dict:
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise RunError(f"the agent definitions are not in {PLUGIN_DIR}; run from a clone")
     load_declaration(checks)
@@ -241,7 +256,9 @@ def _begin(raw, goal, checks, out, rules, sandbox, claude, asked: dict) -> dict:
         "request": request.dump(),
         "budget": ResourceBudget.of(budget.policy).dump(),
     }
-    return _invoke(request, begin, toolkit(request, claude, sandbox, budget))
+    # A path that does not exist holds nothing to hide, and cannot be masked.
+    hidden = tuple(Path(path).resolve() for path in hide if Path(path).exists())
+    return _invoke(request, begin, toolkit(request, claude, sandbox, budget, hidden))
 
 
 def saved(out: Path) -> tuple[dict, tuple[str, ...], list[str]]:
