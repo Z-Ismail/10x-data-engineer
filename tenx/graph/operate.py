@@ -10,15 +10,16 @@ the diagnosis packet (``tenx.diagnosis``) from the run's files and what
 the validator's build wrote about itself, gives a copy to the diagnostics
 agent, which can read but not change files, and checks its answer in code
 (``tenx.diagnostics``). The diagnosis is advice: it is kept as
-``DIAGNOSIS.md`` and the run's findings, and the run's status stays the
-validator's. A packet that cannot be made, an answer that fails its check,
-a crash or a ceiling that cannot hold the call each leave the run without
-a diagnosis, and say why.
+``DIAGNOSIS.md`` (and as data in ``diagnosis.json``) and the run's
+findings, and the run's status stays the validator's. A packet that cannot
+be made, an answer that fails its check, a crash or a ceiling that cannot
+hold the call each leave the run without a diagnosis, and say why.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import shutil
 import stat
@@ -183,6 +184,8 @@ def diagnostics_node(toolkit: Toolkit):
             return _no_diagnosis(call.update, str(problem))
         written = call.folder / answers.DIAGNOSIS_FILE
         artefacts.write_text(written, answers.render(answer))
+        data = json.dumps(answer, indent=2, sort_keys=True) + "\n"
+        artefacts.write_text(call.folder / answers.ANSWER_FILE, data)
         number = call.update["attempts"][DIAGNOSTICS_STEP]
         ref = ArtefactRef.of("diagnosis", written, attempt=number).dump()
         return plain(

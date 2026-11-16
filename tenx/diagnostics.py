@@ -23,6 +23,7 @@ from tenx.reviewer import models_in
 
 __all__ = [
     "ANSWER_FIELDS",
+    "ANSWER_FILE",
     "CAUSES",
     "DIAGNOSIS_FILE",
     "HYPOTHESIS",
@@ -40,6 +41,8 @@ __all__ = [
 ]
 
 DIAGNOSIS_FILE = "DIAGNOSIS.md"
+# The same checked answer as data, for tools that read a diagnosis.
+ANSWER_FILE = "diagnosis.json"
 PROJECT_PREFIX = "project/"
 
 # Every kind of cause a diagnosis may name, with what it means. A fixed list,
