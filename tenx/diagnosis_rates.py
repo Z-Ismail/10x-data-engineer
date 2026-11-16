@@ -14,9 +14,11 @@ it names both the bed's kind of cause and the bed's model.
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import shutil
+import sys
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +32,8 @@ from tenx.diagnostics import ANSWER_FILE, CAUSES
 from tenx.domain import AgentFinding, CostRecord, ValidationResult
 from tenx.engineer import DIAGNOSTICS
 from tenx.policy import Policy
+from tenx.ports import Sandbox
+from tenx.sandbox import SandboxError, Unisolated, default_sandbox
 
 DIAGNOSTICS_STEP = "diagnostics"
 
@@ -44,6 +48,7 @@ __all__ = [
     "Diagnosis",
     "RatesError",
     "Summary",
+    "claude_runner",
     "diagnose_project",
     "listed",
     "measure",
@@ -490,3 +495,88 @@ def measure(
         for future in [pool.submit(one, pair) for pair in pending]:
             future.result()
     return report(out)
+
+
+def claude_runner(out: Path, bed: Path, claude: str, sandbox: Sandbox) -> Runner:
+    """Each diagnosis as ``python -m tenx.run diagnose`` runs it, with Claude Code.
+
+    The bed (with its answers) and the measurement's own folder (with the
+    other runs' diagnoses) are hidden from the gate's builds and the agent,
+    beside what every run hides.
+    """
+    from tenx import run  # the graph, only when diagnoses are run
+
+    def one(project: Path, raw: Path, goal: Path, declaration: Path, folder: Path) -> dict:
+        return run.diagnose(
+            project, raw, goal, declaration, folder, sandbox=sandbox, claude=claude, hide=(bed, out)
+        )
+
+    return one
+
+
+def _dataset(text: str) -> tuple[str, Path]:
+    name, sep, folder = text.partition("=")
+    if not sep or not name or not folder:
+        raise argparse.ArgumentTypeError(f"expected NAME=FOLDER, not {text!r}")
+    return name, Path(folder)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    start = commands.add_parser("run", help="diagnose every project on every dataset, then report")
+    start.add_argument(
+        "--bed", type=Path, required=True, help="the bed: projects/ and answers.json"
+    )
+    start.add_argument(
+        "--raw",
+        type=_dataset,
+        action="append",
+        required=True,
+        metavar="NAME=FOLDER",
+        help="a dataset: its name and its folder of raw files; one --raw per dataset",
+    )
+    start.add_argument(
+        "--goal", type=Path, required=True, help="the goal the projects were built for"
+    )
+    start.add_argument("--checks", type=Path, required=True, help="the gate's declaration")
+    start.add_argument("--out", type=Path, required=True, help="folder for the measurement")
+    start.add_argument("--seed", type=int, default=0, help="seed for the order of the runs")
+    start.add_argument("--parallel", type=int, default=3, help="runs at a time (default 3)")
+    start.add_argument("--claude", default="claude", help="the Claude Code program")
+    start.add_argument("--approve-cost", action="store_true", help="go ahead above US$5")
+    start.add_argument(
+        "--unisolated", action="store_true", help="run without the sandbox (not recommended)"
+    )
+    shown = commands.add_parser("report", help="report a measurement from its folder")
+    shown.add_argument("out", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "report":
+            print(report(args.out), end="")
+            return 0
+        sandbox = Unisolated() if args.unisolated else default_sandbox()
+        claude = shutil.which(args.claude)
+        if claude is None:
+            raise RatesError(f"{args.claude} was not found; install Claude Code and sign in first")
+        bed = Path(args.bed).resolve()
+        text = measure(
+            bed,
+            dict(args.raw),
+            args.goal,
+            args.checks,
+            args.out,
+            lambda out: claude_runner(out, bed, claude, sandbox),
+            seed=args.seed,
+            parallel=args.parallel,
+            approve_cost=args.approve_cost,
+        )
+    except (RatesError, CostNotApproved, SandboxError, OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

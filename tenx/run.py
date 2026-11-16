@@ -256,7 +256,8 @@ def _begin(raw, goal, checks, out, rules, sandbox, claude, asked: dict, hide=())
         "request": request.dump(),
         "budget": ResourceBudget.of(budget.policy).dump(),
     }
-    hidden = tuple(Path(path).resolve() for path in hide)
+    # A path that does not exist holds nothing to hide, and cannot be masked.
+    hidden = tuple(Path(path).resolve() for path in hide if Path(path).exists())
     return _invoke(request, begin, toolkit(request, claude, sandbox, budget, hidden))
 
 
