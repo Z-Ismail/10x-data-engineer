@@ -32,6 +32,7 @@ from tenx.graph.build import (
     CHECKS_FILE,
     DIAGNOSTICS_STEP,
     GATE_STEP,
+    HANDED_OVER,
     NOT_CARRIED,
     Toolkit,
     _fresh,
@@ -42,12 +43,22 @@ from tenx.graph.build import (
 from tenx.graph.state import GraphState, plain
 from tenx.ports import BUILD_RECORD
 
-__all__ = ["DIAGNOSIS_PACKET_DIR", "PROJECT_DIR", "copy_project", "diagnostics_node", "intake_node"]
+__all__ = [
+    "DIAGNOSIS_PACKET_DIR",
+    "FIX_BASE_DIR",
+    "PROJECT_DIR",
+    "copy_project",
+    "diagnostics_node",
+    "fix_base",
+    "intake_node",
+]
 
 PROJECT_DIR = "project"
 DIAGNOSIS_PACKET_DIR = "diagnosis-packet"
 # The profiles and the overlap report together, as the packet carries them.
 SOURCES_DIR = "diagnosis-sources"
+# The project handed over, prepared as a fix is, for FIX.diff to start from.
+FIX_BASE_DIR = "fix-base"
 
 
 def copy_project(source: Path, destination: Path) -> list[str]:
@@ -85,7 +96,8 @@ def intake_node(toolkit: Toolkit):
         request = _request(state)
         folder = _fresh(Path(request.out) / PROJECT_DIR)
         left_out = copy_project(Path(request.project), folder)
-        update = {"artefacts": {"project": ArtefactRef.of("project", folder).dump()}}
+        ref = ArtefactRef.of("project", folder).dump()
+        update = {"artefacts": {"project": ref, HANDED_OVER: {**ref, "name": HANDED_OVER}}}
         if left_out:
             claim = "the project's copy leaves out what is not a file, folder or link: "
             finding = AgentFinding(
@@ -95,6 +107,19 @@ def intake_node(toolkit: Toolkit):
         return plain(update)
 
     return intake
+
+
+def fix_base(toolkit: Toolkit, request, handed_over: Path) -> Path:
+    """The project handed over, prepared as every fix is, so a diff shows only the fix.
+
+    The transform engine may add what the engineer needs to build the
+    project in its folder; made here first, so a project it cannot prepare
+    is refused before any call (``PlatformError``).
+    """
+    base = _fresh(Path(request.out) / FIX_BASE_DIR)
+    copy_project(handed_over, base)
+    toolkit.engine.prepare(base, Path(request.raw))
+    return base
 
 
 def _no_diagnosis(update: dict, problem: str) -> dict:
