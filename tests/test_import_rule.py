@@ -4,7 +4,8 @@
 SPEC.md (``tenx/contract.py``, ``tenx/spec.py``), the review packet and the
 reviewer's answer (``tenx/review.py``, ``tenx/reviewer.py``), the diagnosis
 packet and the check of a diagnosis (``tenx/diagnosis.py``,
-``tenx/diagnostics.py``) and everything under
+``tenx/diagnostics.py``), the proposed fix's diff (``tenx/fix.py``) and
+everything under
 ``tenx/graph/`` may not import DuckDB, dbt, the gate, the profiler, the
 overlap report, the old runner (which imports the gate) or the adapters
 themselves. Two checks: the source is read for every way of writing an
@@ -81,6 +82,8 @@ def guarded_files() -> list[Path]:
         # The diagnosis packet and the check of a diagnosis, likewise.
         ROOT / "tenx" / "diagnosis.py",
         ROOT / "tenx" / "diagnostics.py",
+        # The proposed fix's diff, read from an agent's files.
+        ROOT / "tenx" / "fix.py",
         *sorted((ROOT / "tenx" / "graph").rglob("*.py")),
     ]
 
@@ -166,6 +169,7 @@ class GuardedCodeTest(unittest.TestCase):
                 "tenx/spec.py",
                 "tenx/review.py",
                 "tenx/reviewer.py",
+                "tenx/fix.py",
                 "tenx/graph/__init__.py",
                 "tenx/graph/state.py",
                 "tenx/graph/checkpoints.py",
