@@ -111,6 +111,15 @@ diagnosis-rates`), the bed with its answers and the measurement's folder,
 which holds the other runs' diagnoses, are hidden from the gate's builds
 and from the agent as well.
 
+With `--fixes`, the engineer that fixes a diagnosed project runs in the
+same sandbox as in a build run, on the run's copy, and the project itself
+is still never written. The run's own `profiles.yml` replaces any the
+project carries, so the agent's builds go to a DuckDB file in its folder,
+never to a connection the project names. The proposed change, `FIX.diff`,
+is written outside the sandbox from the agent's files, so it follows no
+link and opens nothing that is not a regular file; applying it is left to
+you.
+
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and
 later, AppArmor allows bubblewrap to set up a sandbox only with a profile

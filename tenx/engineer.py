@@ -207,9 +207,9 @@ def dbt_project_yml(raw: Path) -> str:
     )
 
 
-def profiles_yml() -> str:
+def profiles_yml(profile: str = PROJECT_NAME) -> str:
     return (
-        f"{PROJECT_NAME}:\n"
+        f"{profile}:\n"
         "  target: dev\n"
         "  outputs:\n"
         "    dev:\n"

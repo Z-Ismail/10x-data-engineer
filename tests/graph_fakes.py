@@ -15,6 +15,7 @@ from tenx.ports import (
     BUILD_RECORD,
     COUNT_KEPT,
     OVERLAP,
+    PREPARE,
     PROFILE,
     RUN_AGENT,
     SCAFFOLD,
@@ -214,6 +215,14 @@ class Fakes:
         (project / "dbt_project.yml").write_text(f"raw_dir: {raw}\n")
         (project / "models").mkdir()
 
+    def prepare(self, project: Path, raw: Path) -> list[str]:
+        """Write the stand-in's connection; a project named ``unpreparable`` is refused."""
+        self.calls.append("prepare")
+        if "unpreparable" in (project / "dbt_project.yml").read_text():
+            raise PlatformError(f"{project / 'dbt_project.yml'} has a vars block without raw_dir")
+        (project / "profiles.yml").write_text(f"fake profile for {raw.name}\n")
+        return ["profiles.yml"]
+
     # AgentBackend
     def run_agent(self, role, workspace, report_file, timeout, sandbox=None, mounts=None):
         self.calls.append(role.name)
@@ -282,8 +291,9 @@ class Fakes:
             ),
             engine=port(
                 "fake engine",
-                lambda: fakes._capable("engine", {SCAFFOLD}),
+                lambda: fakes._capable("engine", {SCAFFOLD, PREPARE}),
                 scaffold=fakes.scaffold,
+                prepare=fakes.prepare,
             ),
             validator=port(
                 "fake gate",

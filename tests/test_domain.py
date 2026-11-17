@@ -467,19 +467,21 @@ class RequestAndPlanTest(unittest.TestCase):
         with self.assertRaises(RecordError):
             ExecutionPlan.load({"workflow": "deploy", "steps": ["profile"]})
 
-    def test_an_operate_request_checks_a_project_and_builds_nothing(self):
+    def test_an_operate_request_checks_a_project_and_may_fix_it(self):
         operate = {"workflow": "operate", "project": "/work/project", "cross_source": False}
         record = EngineeringRequest.load(request(**operate))
         self.assertEqual((record.workflow, record.project), ("operate", "/work/project"))
         self.assertEqual(EngineeringRequest.load(request()).workflow, "build")
-        refused = "the operate workflow builds nothing, so it takes no"
+        # Repairs are the fixes the engineer may make to a copy of the project.
+        self.assertEqual(EngineeringRequest.load(request(**operate, repairs=3)).repairs, 3)
+        refused = "the operate workflow works on the project it is given, so it takes no"
         for changes, expected in [
             ({"cross_source": True}, f"{refused} cross_source"),
             ({"scouts": True}, f"{refused} scouts"),
             ({"architect": True}, f"{refused} architect"),
             ({"architect": True, "review_spec": True}, f"{refused} architect, review_spec"),
             ({"reviewer": True}, f"{refused} reviewer"),
-            ({"repairs": 1}, f"{refused} repairs"),
+            ({"repairs": 4}, "repairs:"),
             ({"project": None}, "the operate workflow needs the project to check"),
             ({"project": ""}, "project:"),
         ]:
@@ -494,8 +496,12 @@ class RequestAndPlanTest(unittest.TestCase):
         steps = ["intake", "profile", "overlap", "gate", "diagnostics", "report"]
         plan = ExecutionPlan.load({"workflow": "operate", "steps": steps})
         self.assertEqual(plan.steps, tuple(steps))
+        # The engineer is in both: it builds, or it fixes the project handed over.
+        fixing = ["intake", "profile", "overlap", "engineer", "gate", "diagnostics", "report"]
+        plan = ExecutionPlan.load({"workflow": "operate", "steps": fixing})
+        self.assertEqual(plan.steps, tuple(fixing))
         for workflow, steps, expected in [
-            ("operate", ["intake", "engineer", "gate"], "operate workflow does not take engineer"),
+            ("operate", ["intake", "architect"], "operate workflow does not take architect"),
             ("operate", ["gate", "reviewer"], "operate workflow does not take reviewer"),
             ("build", ["intake", "engineer", "gate"], "build workflow does not take intake"),
             ("build", ["gate", "diagnostics"], "build workflow does not take diagnostics"),

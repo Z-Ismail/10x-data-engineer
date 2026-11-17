@@ -8,6 +8,8 @@ of an interface in ``tenx.ports`` and turns the module's own errors into
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 from tenx import gate
@@ -20,6 +22,7 @@ from tenx.ports import (
     BUILD_RECORD,
     COUNT_KEPT,
     OVERLAP,
+    PREPARE,
     PROFILE,
     SCAFFOLD,
     VALIDATE,
@@ -75,7 +78,7 @@ class DbtDuckDB:
     name = "dbt on DuckDB"
 
     def capabilities(self) -> frozenset[str]:
-        return frozenset({SCAFFOLD, BUILD})
+        return frozenset({SCAFFOLD, BUILD, PREPARE})
 
     def scaffold(self, project: Path, raw: Path) -> None:
         project = Path(project)
@@ -87,6 +90,52 @@ class DbtDuckDB:
         )
         (project / "profiles.yml").write_text(profiles_yml(), encoding="utf-8")
         (project / "models").mkdir()
+
+    def prepare(self, project: Path, raw: Path) -> list[str]:
+        """Let an agent's own ``dbt build`` in ``project`` run; return the files changed.
+
+        A project a person made carries no connection the run can use and
+        often no default for ``raw_dir``, which the gate gives on its own
+        command line. This writes the run's ``profiles.yml`` (a DuckDB file
+        inside the folder, under the project's profile name) and adds
+        ``raw_dir`` to ``dbt_project.yml`` when it has no ``vars`` block. A
+        ``raw_dir`` already set is kept; a ``vars`` block without one is
+        refused rather than rewritten, which would lose the file's comments.
+        """
+        import yaml
+
+        project = Path(project)
+        config = project / "dbt_project.yml"
+        if config.is_symlink() or not config.is_file():
+            raise PlatformError(f"{config} is not a file")
+        text = config.read_text(encoding="utf-8")
+        try:
+            settings = yaml.safe_load(text)
+        except yaml.YAMLError as error:
+            raise PlatformError(f"{config} cannot be read: {error}") from error
+        if not isinstance(settings, dict):
+            raise PlatformError(f"{config} does not hold a project's settings")
+        profile = settings.get("profile", settings.get("name"))
+        if not isinstance(profile, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", profile):
+            raise PlatformError(f"{config} names no profile the run can write: {profile!r}")
+        changed = []
+        if "vars" not in settings:
+            line = f"vars:\n  raw_dir: {json.dumps(str(Path(raw).resolve()))}\n"
+            config.write_text(text + ("\n" if text.endswith("\n") else "\n\n") + line, "utf-8")
+            changed.append("dbt_project.yml")
+        elif not (isinstance(settings["vars"], dict) and "raw_dir" in settings["vars"]):
+            raise PlatformError(
+                f"{config} has a vars block without raw_dir; add raw_dir, the folder of "
+                "raw files, to it"
+            )
+        profiles = project / "profiles.yml"
+        wanted = profiles_yml(profile)
+        if profiles.is_symlink() or profiles.is_dir():
+            raise PlatformError(f"{profiles} is not a file the run can replace")
+        if not profiles.is_file() or profiles.read_text(encoding="utf-8") != wanted:
+            profiles.write_text(wanted, encoding="utf-8")
+            changed.append("profiles.yml")
+        return changed
 
     def build(
         self,

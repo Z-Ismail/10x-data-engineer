@@ -73,6 +73,41 @@ class RenderTest(unittest.TestCase):
             "- repeat: project\n",
         )
 
+    def test_a_project_handed_over_with_and_without_its_diagnosis(self):
+        opening = (
+            "# What the checks found\n"
+            "\n"
+            "The project in this folder was handed over failing its checks. It was built\n"
+            "from an empty database and checked. 1 check failed, 22 passed and 1 could not run.\n"
+            "It is not your previous attempt, but treat it as one: find the cause of each\n"
+            "failure and fix it in the models, for every row it affects, not only for the\n"
+            "rows or values named here, change nothing the failures do not need, and run\n"
+            "`dbt build` again before you stop.\n"
+        )
+        rest = (
+            "\n"
+            "## key: stg_crm__accounts\n"
+            "\n"
+            "Failed. No more is said about this check.\n"
+            "\n"
+            "## Could not run\n"
+            "\n"
+            "- repeat: project\n"
+        )
+        handed = verdict(24, QUIET, SKIPPED)
+        self.assertEqual(render(handed, handed_over=True), opening + rest)
+        self.assertEqual(
+            render(handed, handed_over=True, diagnosis=True),
+            opening + "\n"
+            "`DIAGNOSIS.md` in this folder is a diagnosis of these failures, written by\n"
+            "another agent from the project, the checks' feedback and the build's log.\n"
+            "Its file and line numbers are this project's. Check each cause it names\n"
+            "against the project before you act on it; it can be wrong.\n" + rest,
+        )
+        # The engineer's own attempt never comes with a diagnosis.
+        with self.assertRaisesRegex(ValueError, "only with a project handed over"):
+            render(handed, diagnosis=True)
+
     def test_one_failure_and_nothing_skipped(self):
         text = render(verdict(1, QUIET))
         self.assertIn("finished. 1 check failed, 0 passed.\n", text)

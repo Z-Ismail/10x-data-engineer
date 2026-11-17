@@ -12,6 +12,7 @@ from tenx.ports import (
     BUILD_RECORD,
     COUNT_KEPT,
     OVERLAP,
+    PREPARE,
     PROFILE,
     SCAFFOLD,
     VALIDATE,
@@ -26,7 +27,7 @@ class InterfaceTest(unittest.TestCase):
     def test_each_adapter_satisfies_its_interface_and_declares_its_capabilities(self):
         cases = [
             (DuckDBProfiler(), SourceProfiler, {PROFILE, OVERLAP, COUNT_KEPT}),
-            (DbtDuckDB(), TransformEngine, {SCAFFOLD, BUILD}),
+            (DbtDuckDB(), TransformEngine, {SCAFFOLD, BUILD, PREPARE}),
             (DuckDBGate(), Validator, {VALIDATE, BUILD_RECORD}),
         ]
         for adapter, interface, capabilities in cases:

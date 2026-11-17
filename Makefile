@@ -65,13 +65,15 @@ engineer-reviewer: demo-data
 
 # Check an existing project on the demo data and, if the gate fails it, have
 # the diagnostics agent say why (DIAGNOSIS.md); the project is not changed.
-# Needs Claude Code, signed in. Failing projects to try:
+# With FIXES=N the engineer then fixes a copy, checked again by the gate and
+# proposed as FIX.diff. Needs Claude Code, signed in. Failing projects to try:
 # python tests/failing_bed.py --out runs/bed (then PROJECT=runs/bed/projects/project-01)
+FIXES ?= 0
 diagnose: demo-data
-	@test -n "$(PROJECT)" || { echo "usage: make diagnose PROJECT=<folder>" >&2; exit 2; }
+	@test -n "$(PROJECT)" || { echo "usage: make diagnose PROJECT=<folder> [FIXES=N]" >&2; exit 2; }
 	rm -rf runs/diagnose
 	$(PYTHON) -m tenx.run diagnose --project "$(PROJECT)" --raw demo/data --goal demo/goal.md \
-		--checks tests/fixtures/demo_gate.json --out runs/diagnose
+		--checks tests/fixtures/demo_gate.json --out runs/diagnose --fixes $(FIXES)
 
 # The old runner and the graph on the eight comparison datasets, with a
 # stand-in for Claude Code that answers the same way every time: every
