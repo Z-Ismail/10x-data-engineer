@@ -6,6 +6,17 @@ Notable changes to this project.
 
 ### Added
 
+- A fix step in the diagnose run: `python -m tenx.run diagnose ...
+  --fixes N` (`make diagnose PROJECT=<folder> FIXES=N`, off by default).
+  After the diagnosis, the engineer fixes the run's copy of a project the
+  gate failed, given `GATE_REPORT.md` and, on the first fix, `DIAGNOSIS.md`;
+  the gate checks each fix, up to N, while each fails fewer checks than the
+  one before. The project is never written: the change is proposed as
+  `FIX.diff`, which follows no link. The run's status and exit status are
+  the last fix's. The dbt adapter gains a capability to prepare a project
+  it did not make for the agent's own builds (its `profiles.yml`, and
+  `raw_dir` when the project sets no `vars`).
+
 - A measurement of the Diagnostics agent on the failing bed: `make
   diagnosis-rates` (`python -m tenx.diagnosis_rates run | report`)
   diagnoses each of the bed's thirteen projects on four demo datasets with
