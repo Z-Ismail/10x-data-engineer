@@ -607,8 +607,16 @@ def _after_review(state: GraphState) -> str:
 
 
 # What a repair does not carry over from the attempt it repairs: what the
-# build left, and the inputs, which every attempt is given afresh.
-NOT_CARRIED = ("target", "logs", "dbt_packages", "*.duckdb", "*.duckdb.wal", "*.duckdb.tmp")
+# build left (dbt keeps an anonymous ID in .user.yml beside profiles.yml).
+NOT_CARRIED = (
+    "target",
+    "logs",
+    "dbt_packages",
+    ".user.yml",
+    "*.duckdb",
+    "*.duckdb.wal",
+    "*.duckdb.tmp",
+)
 
 
 # What an attempt is given afresh, so neither carried over nor part of a fix.

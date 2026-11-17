@@ -42,6 +42,11 @@ FIX_DIFF = (
 
 def fixes(workspace):
     (workspace / "models" / "orders.sql").write_text("select * from orders\n")
+    # What the engineer's own dbt build leaves, which is no part of the fix.
+    (workspace / ".user.yml").write_text("id: 7652be3b\n")
+    (workspace / "target").mkdir()
+    (workspace / "target" / "run_results.json").write_text("{}\n")
+    (workspace / "dev.duckdb").write_text("tables\n")
 
 
 class FixCase(OperateCase):
