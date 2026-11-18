@@ -1594,7 +1594,8 @@ first fix: yen amounts scaled by 100, refunds dropped, a misspelt column
 (eleven checks failed or not run) and a crosswalk on whole email
 addresses; US$0.08 to US$0.13 a run for the diagnosis and the fix
 together. Whether the diagnosis raises the fix rate over the gate's
-report alone is not measured yet.
+report alone is not measured yet; see "Measuring what the diagnosis adds
+to a fix" below.
 
 ### Measuring the diagnosis
 
@@ -1637,6 +1638,33 @@ Cost: US$2.0890 for 52 runs, US$0.0402 a run, US$0.0418 a right diagnosis (Claud
   crosswalk_inner_join          planted   2 of 4
   (each of the other twelve variants 4 of 4)
 ```
+
+### Measuring what the diagnosis adds to a fix
+
+`make fix-rates` (`python -m tenx.fix_rates run`) fixes every project of
+the failing bed once on each of the same four demo datasets in two ways:
+with `python -m tenx.run diagnose --fixes 1` as it is, where the engineer
+is given `DIAGNOSIS.md` beside what the gate found, and with the
+diagnostics step left out, where it is given what the gate found alone.
+Everything else is the same, so the two runs of a project on a dataset
+are a pair (52 pairs, 104 runs). A run is **fixed** when the gate passes
+the engineer's one fix. The bed and the measurement's folder are hidden
+from the gate's builds and from the agents, as in `make diagnosis-rates`.
+
+The report counts the pairs fixed both ways, only with the diagnosis,
+only without it and neither, and gives the difference in fix rates (with
+minus without) with Tango's 95% interval for paired proportions. The rule
+was set before the first run: the diagnosis **helps** when the interval
+lies above 0, **hurts** when it lies below 0, brings **no gain** when its
+upper limit is below 10 points, and is otherwise **unclear**. Beside it
+are the cost per passing fix in each way (the diagnosis counted in the
+runs that have it) and the ratio with its bootstrap interval, each
+variant on its own line, and each pair with how its diagnosis scored.
+The runs are priced before any starts (US$0.48 a pair at the typical
+figures, about US$25 for the whole bed), so it stops unless given
+`--approve-cost`; a second start carries on where the first stopped, and
+`python -m tenx.fix_rates report runs/fix-rates` prints the report again.
+It has not been run on the whole bed yet.
 
 Both runs without a diagnosis were of one variant, and in both the first
 cause the agent gave was the right one, but a fact quoted a check's line

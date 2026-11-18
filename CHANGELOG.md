@@ -6,6 +6,17 @@ Notable changes to this project.
 
 ### Added
 
+- A measurement of what the diagnosis adds to a fix: `make fix-rates`
+  (`python -m tenx.fix_rates run | report`) fixes each failing-bed project
+  on four demo datasets twice with `python -m tenx.run diagnose --fixes 1`,
+  once with the Diagnostics agent's diagnosis and once with the
+  diagnostics step left out, and pairs the two. It reports the difference
+  in fix rates with Tango's 95% interval against a rule set before the
+  first run, the cost per passing fix of each, and each variant on its own
+  line; the bed and the measurement's folder are hidden from the gate and
+  the agents; it is priced before it starts and resumes where it stopped.
+  `tenx.run.diagnose` gains `skip_diagnosis` for it.
+
 - A fix step in the diagnose run: `python -m tenx.run diagnose ...
   --fixes N` (`make diagnose PROJECT=<folder> FIXES=N`, off by default).
   After the diagnosis, the engineer fixes the run's copy of a project the
