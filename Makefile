@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer diagnose equivalence compare parity repairs compare-architect review-rates diagnosis-rates clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer diagnose equivalence compare parity repairs compare-architect review-rates diagnosis-rates fix-rates clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -216,6 +216,26 @@ diagnosis-rates:
 	test -f $(FAILING_BED)/answers.json || $(PYTHON) tests/failing_bed.py --out $(FAILING_BED)
 	$(PYTHON) -m tenx.diagnosis_rates run --bed $(FAILING_BED) --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/diagnosis-rates $(DIAGNOSIS_FLAGS) \
+		$(foreach seed,$(DIAGNOSIS_SEEDS),--raw s$(seed)-200=$(COMPARE_DATA)/s$(seed)-200/data)
+
+# What the diagnosis adds to a fix: each failing-bed project fixed once on
+# each of DIAGNOSIS_SEEDS at 200 companies by the same run as
+# make diagnose FIXES=1, once with the Diagnostics agent's diagnosis and
+# once without it (52 pairs, 104 runs by default), paired and compared.
+# Needs Claude Code, signed in, and bubblewrap. Run it again to resume.
+# Estimated above US$5, it stops before any run unless approved:
+# make fix-rates FIX_FLAGS=--approve-cost
+FIX_FLAGS ?=
+
+fix-rates:
+	@for seed in $(DIAGNOSIS_SEEDS); do \
+		folder=$(COMPARE_DATA)/s$$seed-200; \
+		test -d $$folder/data || $(PYTHON) demo/generate.py --seed $$seed --companies 200 \
+			--out $$folder/data --answers-out $$folder/answers || exit 1; \
+	done
+	test -f $(FAILING_BED)/answers.json || $(PYTHON) tests/failing_bed.py --out $(FAILING_BED)
+	$(PYTHON) -m tenx.fix_rates run --bed $(FAILING_BED) --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/fix-rates $(FIX_FLAGS) \
 		$(foreach seed,$(DIAGNOSIS_SEEDS),--raw s$(seed)-200=$(COMPARE_DATA)/s$(seed)-200/data)
 
 clean:
