@@ -10,6 +10,7 @@ The command runs unisolated; the sandboxed runner has its own test below.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,13 +44,25 @@ if "tenx:engineer" in sys.argv:
 """
 
 
+def one_project(bed: Path) -> Path:
+    """The small bed cut to its refunds variant: each project here costs two
+    full gate runs, and the paths are the same for every variant."""
+    found = json.loads((bed / "answers.json").read_text())
+    kept = {n: a for n, a in found["projects"].items() if a["variant"] == "refunds_dropped"}
+    for name in set(found["projects"]) - set(kept):
+        shutil.rmtree(bed / "projects" / name)
+    found["projects"] = kept
+    (bed / "answers.json").write_text(json.dumps(found, indent=2))
+    return bed
+
+
 class CommandTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         root = Path(cls.tmp.name).resolve()
         generate(11, 60, root / "data", root / "generated")
-        small_bed(root / "bed")
+        one_project(small_bed(root / "bed"))
         cls.root, cls.claude = root, program(root / "bin", ENGINEER + STAND_IN)
         os.environ["STUB_MODELS"] = str(REFERENCE_MODELS)
         cls.first = cls.tenx("run", *cls.arguments())
@@ -84,12 +97,12 @@ class CommandTest(unittest.TestCase):
     def test_every_project_is_fixed_in_both_arms_and_paired(self):
         self.assertEqual(self.first.returncode, 0, self.first.stderr)
         text = self.first.stdout
-        self.assertTrue(text.startswith("6 fixing runs to do, estimated at US$1.44"), text)
+        self.assertTrue(text.startswith("2 fixing runs to do, estimated at US$0.48"), text)
         self.assertIn("\nFix measurement: unclear\n", text)
         self.assertIn(
-            "  both fixed 0, only with the diagnosis 3, only without 0, neither 0\n", text
+            "  both fixed 0, only with the diagnosis 1, only without 0, neither 0\n", text
         )
-        self.assertIn("Fixed: with the diagnosis 3 of 3 (100%), without 0 of 3 (0%)\n", text)
+        self.assertIn("Fixed: with the diagnosis 1 of 1 (100%), without 0 of 1 (0%)\n", text)
         # Each run with the diagnosis: US$0.03 for it and US$0.05 for the fix.
         self.assertIn("with US$0.0800, without -\n", text)
         self.assertNotIn("found the project differently", text)
@@ -106,7 +119,7 @@ class CommandTest(unittest.TestCase):
 
     def test_only_the_runs_with_the_diagnosis_had_one_and_the_bed_is_unchanged(self):
         projects = sorted((self.root / "out" / "runs" / "s11-60").iterdir())
-        self.assertEqual(len(projects), 3)
+        self.assertEqual(len(projects), 1)
         for folder in projects:
             work = {
                 arm: folder / arm / "run" / "engineer" / "attempt-1" / "work" for arm in rates.ARMS
