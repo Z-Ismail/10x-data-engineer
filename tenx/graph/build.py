@@ -160,15 +160,8 @@ def steps_for(request: EngineeringRequest) -> tuple[str, ...]:
         # With repairs the engineer fixes the project after its diagnosis; the
         # plan lists steps in their fixed order, and the routes run them.
         fix = (ENGINEER_STEP,) if request.repairs else ()
-        return (
-            INTAKE_STEP,
-            PROFILE_STEP,
-            OVERLAP_STEP,
-            *fix,
-            GATE_STEP,
-            DIAGNOSTICS_STEP,
-            REPORT_STEP,
-        )
+        diagnose = () if request.skip_diagnosis else (DIAGNOSTICS_STEP,)
+        return (INTAKE_STEP, PROFILE_STEP, OVERLAP_STEP, *fix, GATE_STEP, *diagnose, REPORT_STEP)
     middle = (CROSS_SOURCE_STEP,) if request.cross_source else ()
     middle += (ARCHITECT_STEP,) if request.architect else ()
     middle += (REVIEW_STEP,) if request.review_spec else ()
@@ -952,7 +945,7 @@ def _operate_next(step: str, state: GraphState) -> str:
     if step == ENGINEER_STEP:
         return GATE_STEP
     checked = [ValidationResult.load(item) for item in state.get("validations") or []]
-    if step == GATE_STEP and len(checked) == 1:
+    if step == GATE_STEP and len(checked) == 1 and not _request(state).skip_diagnosis:
         # The diagnostics step says why it gives no diagnosis of a passed project.
         return DIAGNOSTICS_STEP
     if step in (GATE_STEP, DIAGNOSTICS_STEP):

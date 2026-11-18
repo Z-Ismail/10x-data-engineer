@@ -385,6 +385,7 @@ def request(**changes) -> dict:
         "reviewer": False,
         "workflow": "build",
         "project": None,
+        "skip_diagnosis": False,
     }
     value.update(changes)
     return value
@@ -491,6 +492,15 @@ class RequestAndPlanTest(unittest.TestCase):
         with self.assertRaises(RecordError) as caught:
             EngineeringRequest.load(request(project="/work/project"))
         self.assertIn("a project is given only to the operate workflow", str(caught.exception))
+
+    def test_only_an_operate_request_may_leave_the_diagnosis_out(self):
+        operate = {"workflow": "operate", "project": "/work/project", "cross_source": False}
+        self.assertFalse(EngineeringRequest.load(request(**operate)).skip_diagnosis)
+        record = EngineeringRequest.load(request(**operate, skip_diagnosis=True))
+        self.assertTrue(record.skip_diagnosis)
+        with self.assertRaises(RecordError) as caught:
+            EngineeringRequest.load(request(skip_diagnosis=True))
+        self.assertIn("skip_diagnosis is only for the operate workflow", str(caught.exception))
 
     def test_each_workflow_takes_only_its_own_steps(self):
         steps = ["intake", "profile", "overlap", "gate", "diagnostics", "report"]

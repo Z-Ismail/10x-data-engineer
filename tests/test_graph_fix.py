@@ -6,7 +6,7 @@ from decimal import Decimal
 from graph_fakes import Fakes
 from test_graph_operate import OperateCase, tree
 
-from tenx.graph.build import ledger, report_node, steps_for
+from tenx.graph.build import gate_node, ledger, report_node, steps_for
 from tenx.policy import Budget, Policy
 from tenx.ports import PREPARE
 
@@ -65,6 +65,16 @@ class FixPlanTest(FixCase, unittest.TestCase):
         self.assertEqual(
             steps_for(self.operate(repairs=1)),
             ("intake", "profile", "overlap", "engineer", "gate", "diagnostics", "report"),
+        )
+
+    def test_leaving_the_diagnosis_out_drops_the_diagnostics_step(self):
+        self.assertEqual(
+            steps_for(self.operate(repairs=1, skip_diagnosis=True)),
+            ("intake", "profile", "overlap", "engineer", "gate", "report"),
+        )
+        self.assertEqual(
+            steps_for(self.operate(skip_diagnosis=True)),
+            ("intake", "profile", "overlap", "gate", "report"),
         )
 
     def test_an_engine_that_cannot_prepare_a_project_stops_a_fixing_run_only(self):
@@ -159,6 +169,54 @@ class FixTest(FixCase, unittest.TestCase):
         self.assertEqual(fakes.calls, ["profile", "overlap", "gate"])
         self.assertEqual(state["status"], "passed")
         self.assertNotIn("fix", state["artefacts"])
+
+
+class SkippedDiagnosisTest(FixCase, unittest.TestCase):
+    def test_a_fix_without_the_diagnostics_step_gets_the_checks_alone(self):
+        before = tree(self.project)
+        fakes = self.fakes(1, 0)
+        state = self.run_graph(fakes, repairs=1, skip_diagnosis=True)
+        self.assertEqual(
+            fakes.calls, ["profile", "overlap", "gate", "prepare", "prepare", "engineer", "gate"]
+        )
+        self.assertNotIn("DIAGNOSIS.md", fakes.seen["engineer"])
+        self.assertIn("GATE_REPORT.md", fakes.seen["engineer"])
+        self.assertEqual((self.work(1) / "GATE_REPORT.md").read_text(), OPENING + ROWS)
+        self.assertFalse((self.out / "diagnostics").exists())
+        self.assertNotIn("diagnosis", state["artefacts"])
+        self.assertEqual(self.claims(state), [])
+        self.assertEqual((self.out / "engineer" / "attempt-1" / "FIX.diff").read_text(), FIX_DIFF)
+        self.assertEqual(tree(self.project), before)
+        self.assertEqual(state["status"], "passed")
+        used = ledger(state, fakes.toolkit(self.out).roles, "none")
+        self.assertEqual([role.role for role in used.roles], ["engineer"])
+
+    def test_without_fixes_a_skipped_diagnosis_leaves_the_gate_verdict(self):
+        fakes = self.fakes(1)
+        state = self.run_graph(fakes, skip_diagnosis=True)
+        self.assertEqual(fakes.calls, ["profile", "overlap", "gate"])
+        self.assertEqual(state["status"], "failed")
+
+    def test_a_run_resumed_after_its_first_check_keeps_the_diagnosis_out(self):
+        # The killed check is made again on resume, so the stand-in fails twice.
+        fakes = self.fakes(1, 1, 0)
+        toolkit = fakes.toolkit(self.out)
+        check = gate_node(toolkit)
+        stop = {"gate": True}
+
+        def dies(state):
+            # Killed once the first check is made and before its route is taken.
+            update = check(state)
+            if stop.pop("gate", False):
+                raise SystemExit("killed")
+            return update
+
+        with self.assertRaises(SystemExit):
+            self.invoke(toolkit, self.operate(repairs=2, skip_diagnosis=True), nodes={"gate": dies})
+        state = self.invoke(toolkit, nodes={"gate": dies}, resume=True)
+        self.assertNotIn("diagnostics", fakes.calls)
+        self.assertEqual(fakes.calls.count("engineer"), 1)
+        self.assertEqual(state["status"], "passed")
 
 
 class NoFixTest(FixCase, unittest.TestCase):

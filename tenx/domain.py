@@ -359,6 +359,10 @@ class EngineeringRequest(Record):
     # repairs, proposes a fix.
     workflow: Literal["build", "operate"] = "build"
     project: Text | None = None
+    # Whether an operate run leaves the diagnostics agent out, so that a fix
+    # is made from the checks' findings alone (to measure what the diagnosis
+    # adds); the build workflow has no diagnostics step to leave out.
+    skip_diagnosis: bool = False
 
     @model_validator(mode="after")
     def _review_needs_a_spec(self):
@@ -371,6 +375,8 @@ class EngineeringRequest(Record):
         if self.workflow == "build":
             if self.project is not None:
                 raise ValueError("a project is given only to the operate workflow")
+            if self.skip_diagnosis:
+                raise ValueError("skip_diagnosis is only for the operate workflow")
             return self
         if self.project is None:
             raise ValueError("the operate workflow needs the project to check")
