@@ -221,6 +221,7 @@ def diagnose(
     claude: str = "claude",
     hide: tuple[Path, ...] = (),
     fixes: int = 0,
+    skip_diagnosis: bool = False,
 ) -> dict:
     """Check an existing project, and diagnose it if it fails. Returns the final state.
 
@@ -229,7 +230,9 @@ def diagnose(
     ``hide`` names more paths the agent and the gate's builds must not see,
     such as the folder the project came from; a resume does not keep them.
     ``fixes`` is how many times the engineer may fix the run's copy of a
-    failed project; none by default.
+    failed project; none by default. ``skip_diagnosis`` leaves the
+    diagnostics agent out, so a fix is made from the checks' findings alone;
+    it is for measuring what the diagnosis adds, and a resume keeps it.
     """
     project = Path(project)
     if not (project / "dbt_project.yml").is_file():
@@ -239,6 +242,7 @@ def diagnose(
         "project": str(project.resolve()),
         "cross_source": False,
         "repairs": fixes,
+        "skip_diagnosis": skip_diagnosis,
     }
     return _begin(raw, goal, checks, out, rules, sandbox, claude, asked, hide)
 

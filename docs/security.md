@@ -107,9 +107,10 @@ anything reads it, outside the sandbox, so the copy follows no link (a
 link is copied as a link) and opens nothing that is not a regular file;
 the gate builds the copy in the sandbox, and the project itself is never
 written. When the diagnosis is measured on the failing bed (`make
-diagnosis-rates`), the bed with its answers and the measurement's folder,
-which holds the other runs' diagnoses, are hidden from the gate's builds
-and from the agent as well.
+diagnosis-rates`), or fixes with and without it (`make fix-rates`), the
+bed with its answers and the measurement's folder, which holds the other
+runs' diagnoses and fixes, are hidden from the gate's builds and from the
+agents as well.
 
 With `--fixes`, the engineer that fixes a diagnosed project runs in the
 same sandbox as in a build run, on the run's copy, and the project itself
