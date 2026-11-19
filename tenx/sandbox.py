@@ -23,6 +23,7 @@ import site
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
@@ -35,6 +36,40 @@ BWRAP_INSTALL = (
 # the user's own sockets, such as an ssh agent's.
 SCRATCH_FOLDERS = (Path("/tmp"), Path("/var/tmp"), Path("/run/user"))
 CHECK_SECONDS = 30
+
+# What a sandboxed process is given of the caller's environment. Anything
+# else stays outside: a token, a cloud key or a database address in the
+# environment would otherwise be readable by the agent and by any model it
+# writes (dbt's env_var, a Python model, a shell command).
+#
+# Every sandboxed process: where programs are, who and where it is, and how
+# to print text. The temporary-folder variables are left out, so programs use
+# the sandbox's own empty /tmp.
+PROCESS_NAMES = frozenset({"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ"})
+PROCESS_PREFIXES = ("LC_",)
+# An agent as well: what Claude Code needs to sign in and reach its service,
+# through a proxy and with extra certificates if the user has them.
+AGENT_NAMES = frozenset(
+    {
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "DISABLE_TELEMETRY",
+        "DISABLE_ERROR_REPORTING",
+        "DISABLE_AUTOUPDATER",
+        "DO_NOT_TRACK",
+        "API_TIMEOUT_MS",
+    }
+)
+AGENT_PREFIXES = ("ANTHROPIC_", "CLAUDE_")
+# Names a user asks for on purpose, separated by commas.
+PASS_VARIABLE = "TENX_SANDBOX_ENV"
 
 
 class SandboxError(Exception):
@@ -84,6 +119,30 @@ class Unisolated:
 
     def describe(self) -> str:
         return "none (--unisolated): the agents could read and change any file you can"
+
+
+def environment(
+    sandbox: Sandbox, source: Mapping[str, str] | None = None, agent: bool = False
+) -> dict[str, str]:
+    """The environment a process started in ``sandbox`` is given.
+
+    Without isolation, the whole of ``source`` (the caller's environment by
+    default), as the user chose. In a sandbox, only the names every process
+    needs, those an agent needs when ``agent`` is set, and any the user
+    names in TENX_SANDBOX_ENV.
+    """
+    source = os.environ if source is None else source
+    # Anything not marked unisolated is treated as a sandbox.
+    if not getattr(sandbox, "isolated", True):
+        return dict(source)
+    names, prefixes = set(PROCESS_NAMES), PROCESS_PREFIXES
+    if agent:
+        names |= AGENT_NAMES
+        prefixes += AGENT_PREFIXES
+    names |= {name.strip() for name in source.get(PASS_VARIABLE, "").split(",") if name.strip()}
+    return {
+        name: value for name, value in source.items() if name in names or name.startswith(prefixes)
+    }
 
 
 def python_folders() -> tuple[Path, ...]:

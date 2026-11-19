@@ -461,7 +461,8 @@ class CommandLineSandboxTest(unittest.TestCase):
 
 
 # The hostile stand-in, started as the engineer inside the sandbox. It tries
-# to read everything in PROBE_SECRETS, to read the raw data, to write outside
+# to read everything in PROBE_SECRETS and the PROBE_TOKEN variable (itself and
+# through dbt's env_var), to read the raw data, to write outside
 # its project, and to read the declaration through dbt, then copies the
 # reference models (kept beside it) into the project. What it saw goes into
 # probes.json in the project, the one place a write is kept.
@@ -500,6 +501,10 @@ declaration = os.environ["PROBE_DECLARATION"]
 query = f"select contains(content, 'exclusions') as leaked from read_text('{declaration}')"
 code, output = dbt("show", "--inline", query, "--output", "json")
 found["dbt show"] = {"exit": code, "leaked": '"leaked": true' in output, "tail": output[-600:]}
+found["environment token"] = os.environ.get("PROBE_TOKEN")
+query = "select '{{ env_var(\"PROBE_TOKEN\", \"unset\") }}' as token"
+code, output = dbt("show", "--inline", query, "--output", "json")
+found["dbt env_var"] = {"exit": code, "leaked": "token-1234" in output, "tail": output[-600:]}
 model = here / "models" / "leak.py"
 model.parent.mkdir(exist_ok=True)
 model.write_text(
@@ -563,6 +568,8 @@ def probe_run(root: Path, writes: dict, *flags: str, sandbox=None) -> tuple[int,
         "PROBE_RAW": str(raw / "billing" / "customers.csv"),
         "PROBE_DECLARATION": str(checks),
         "PROBE_WRITES": json.dumps(writes),
+        "TENX_SANDBOX_ENV": "PROBE_SECRETS,PROBE_RAW,PROBE_DECLARATION,PROBE_WRITES",
+        "PROBE_TOKEN": "token-1234",
     }
     arguments = ["--raw", str(raw), "--goal", str(DEMO_GOAL), "--checks", str(checks)]
     arguments += ["--out", str(out), "--no-cross-source", *flags]
@@ -599,6 +606,8 @@ class UnisolatedProbeTest(unittest.TestCase):
             self.assertIn("id_test", probes["list"][str(root / "home" / ".ssh")])
             self.assertIn("agent.json.partial", probes["out_listing"])
             self.assertTrue(probes["dbt show"]["leaked"])
+            self.assertEqual(probes["environment token"], "token-1234")
+            self.assertTrue(probes["dbt env_var"]["leaked"], probes["dbt env_var"]["tail"])
             self.assertEqual(
                 probes["dbt python model"]["read"], (root / "checks" / "gate.json").read_text()
             )
@@ -644,6 +653,13 @@ class SandboxedRunTest(unittest.TestCase):
             for secret, seen in self.probes[way].items():
                 with self.subTest(way=way, secret=secret):
                     self.assertFalse(seen)
+
+    def test_a_secret_in_the_environment_cannot_be_read_by_python_or_dbt(self):
+        self.assertIsNone(self.probes["environment token"])
+        shown = self.probes["dbt env_var"]
+        self.assertEqual(shown["exit"], 0, shown["tail"])
+        self.assertFalse(shown["leaked"], shown["tail"])
+        self.assertIn("unset", shown["tail"])
 
     def test_the_run_folder_shows_only_the_project_and_the_add_on(self):
         self.assertEqual(self.probes["out_listing"], ["plugin", "project"])
