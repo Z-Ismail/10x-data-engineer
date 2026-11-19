@@ -10,6 +10,7 @@ Skipped where bubblewrap cannot run, unless TENX_REQUIRE_SANDBOX is set.
 """
 
 import copy
+import os
 import sys
 import tempfile
 import unittest
@@ -81,6 +82,14 @@ class UnguardedWithoutSandboxTest(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         self.probes = Probes(Path(folder.name))
 
+    def test_the_whole_environment_is_passed(self):
+        with (
+            mock.patch.dict(os.environ, {"TENX_PROBE_TOKEN": "count-token"}),
+            mock.patch.object(counting, "_run", wraps=counting._run) as run,
+        ):
+            count_kept(CONTRACT, self.probes.raw, self.probes.work, Unisolated())
+        self.assertEqual(run.call_args.args[4]["TENX_PROBE_TOKEN"], "count-token")
+
     def test_the_secret_is_read_and_the_raw_folder_written(self):
         probes = self.probes
         with mock.patch.object(counting, "SCRIPT", unguarded()):
@@ -132,6 +141,17 @@ class UnguardedInSandboxTest(unittest.TestCase):
         given = hidden.name + "/.." * depth + sys.executable
         with mock.patch.object(counting.sys, "executable", given):
             counts = count_kept(CONTRACT, self.probes.raw, self.probes.work, self.box, self.hidden)
+        self.assertEqual(counts["stg_shop__orders"].kept, 3)
+
+    def test_the_counting_process_gets_none_of_the_callers_secrets(self):
+        with (
+            mock.patch.dict(os.environ, {"TENX_PROBE_TOKEN": "count-token"}),
+            mock.patch.object(counting, "_run", wraps=counting._run) as run,
+        ):
+            counts = count_kept(CONTRACT, self.probes.raw, self.probes.work, self.box, self.hidden)
+        given = run.call_args.args[4]
+        self.assertNotIn("TENX_PROBE_TOKEN", given)
+        self.assertEqual(given["PATH"], os.environ["PATH"])
         self.assertEqual(counts["stg_shop__orders"].kept, 3)
 
     def test_the_counts_are_the_same_in_the_sandbox_with_the_guards(self):

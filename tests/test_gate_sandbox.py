@@ -3,8 +3,8 @@
 The gate builds the project an agent wrote, and a dbt Python model in it
 runs any Python while it is built. Here a hostile project, the reference
 project plus one Python model, tries during both of the gate's builds to
-read the declaration, the expected rows, the first build's database and a
-key in the home folder, and to change the declaration, the gate's databases,
+read the declaration, the expected rows, the first build's database, a
+key in the home folder and a variable in the caller's environment, and to change the declaration, the gate's databases,
 the project, the raw data and the home folder. In the sandbox every attempt
 must fail and the reference models must still pass; without it the same
 model must succeed at each, so the probes are shown able to see a leak.
@@ -41,6 +41,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 PROJECT = FIXTURES / "demo_project"
 DECLARATION = FIXTURES / "demo_gate.json"
 TAMPERED = "tenx_tampered"
+TOKEN = "gate-token-5678"
 
 BLOCKED = ("", "blocked: FileNotFoundError", "blocked: PermissionError")
 
@@ -66,6 +67,7 @@ def needs_sandbox(test_class):
 # one-row table, so each build's own database shows what that build did.
 HOSTILE_MODEL = """
 import json
+import os
 from pathlib import Path
 
 import duckdb
@@ -111,6 +113,7 @@ def model(dbt, session):
         "write project": write(PATHS["project"]),
         "write raw": write(PATHS["raw"]),
         "write home": write(PATHS["home"]),
+        "environment token": os.environ.get("TENX_PROBE_TOKEN", "unset"),
     }}
     if second:
         found["first database"] = read(PATHS["first"])
@@ -145,12 +148,23 @@ def hostile_gate(root: Path, sandbox) -> dict:
     }
     model = HOSTILE_MODEL.format(paths=json.dumps(paths), tampered=TAMPERED)
     (project / "models" / "leak.py").write_text(model, encoding="utf-8")
-    results = run_gate(project, raw, checks, work, sandbox)
+    (project / "models" / "leak_env.sql").write_text(
+        'select \'{{ env_var("TENX_PROBE_TOKEN", "unset") }}\' as token\n', encoding="utf-8"
+    )
+    with mock.patch.dict(os.environ, {"TENX_PROBE_TOKEN": TOKEN}):
+        results = run_gate(project, raw, checks, work, sandbox)
 
     def found(database: Path) -> dict:
         con = duckdb.connect(str(database), read_only=True)
         try:
             return json.loads(con.execute("select found from leak").fetchone()[0])
+        finally:
+            con.close()
+
+    def token(database: Path) -> str:
+        con = duckdb.connect(str(database), read_only=True)
+        try:
+            return con.execute("select token from leak_env").fetchone()[0]
         finally:
             con.close()
 
@@ -168,6 +182,7 @@ def hostile_gate(root: Path, sandbox) -> dict:
         "results": results,
         "first": found(work / DATABASE_FILE),
         "second": found(work / REPEAT_DIR / REPEAT_FILE),
+        "env_var": [token(work / DATABASE_FILE), token(work / REPEAT_DIR / REPEAT_FILE)],
         "declaration intact": checks.read_bytes() == DECLARATION.read_bytes(),
         "expected tampered": tampered(work / EXPECTED_FILE),
         "first tampered": tampered(work / DATABASE_FILE),
@@ -195,6 +210,8 @@ class UnisolatedGateProbeTest(unittest.TestCase):
         self.assertTrue(seen["expected tampered"])
         self.assertTrue(seen["first tampered"])
         self.assertEqual(seen["escaped"], ["project", "raw", "home"])
+        self.assertEqual(seen["env_var"], [TOKEN, TOKEN])
+        self.assertEqual([first["environment token"], second["environment token"]], [TOKEN, TOKEN])
 
 
 @needs_sandbox
@@ -230,6 +247,11 @@ class SandboxedGateTest(unittest.TestCase):
                 with self.subTest(build=name, probe=probe):
                     self.assertIn(build[probe], BLOCKED)
         self.assertIn(self.seen["second"]["first database"], BLOCKED)
+
+    def test_a_secret_in_the_environment_reaches_neither_build(self):
+        self.assertEqual(self.seen["env_var"], ["unset", "unset"])
+        for name in ("first", "second"):
+            self.assertEqual(self.seen[name]["environment token"], "unset")
 
     def test_nothing_outside_the_build_folder_is_changed(self):
         self.assertTrue(self.seen["declaration intact"])
