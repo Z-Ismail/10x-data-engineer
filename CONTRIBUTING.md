@@ -18,7 +18,9 @@ at a time as there are processors; CI uses it.
 The sandbox tests need bubblewrap (`sudo apt install bubblewrap`) and are
 skipped without it, unless `TENX_REQUIRE_SANDBOX=1` is set, as CI does; then
 they fail. On Ubuntu 24.04 and later bubblewrap also needs an AppArmor
-profile; the CI workflow installs one.
+profile; the CI workflow installs one. A sandboxed process gets only a short
+list of environment variables, so a test whose stand-in reads its settings
+from the environment lists their names in `TENX_SANDBOX_ENV`.
 
 The tests do not run the agents themselves: they replace the `claude`
 command with a stand-in that writes a known project, or gives a known answer

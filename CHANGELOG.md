@@ -4,6 +4,17 @@ Notable changes to this project.
 
 ## Unreleased
 
+### Security
+
+- Only a short list of environment variables reaches the sandbox. Agents,
+  the gate's dbt builds and the contract's counting process ran with your
+  whole environment, so a token or cloud key in it could be read by an
+  agent and by any model it wrote (through dbt's `env_var` or a Python
+  model). They now get what any program needs (`PATH`, `HOME`, locale and
+  a few more), the agents also Claude Code's own `ANTHROPIC_` and `CLAUDE_`
+  variables and proxy settings, and anything you list in
+  `TENX_SANDBOX_ENV`. Unisolated runs are unchanged.
+
 ### Added
 
 - A measurement of what the diagnosis adds to a fix: `make fix-rates`
