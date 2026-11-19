@@ -110,6 +110,7 @@ from tenx.sandbox import (
     SandboxError,
     Unisolated,
     default_sandbox,
+    environment,
     python_folders,
 )
 
@@ -1207,13 +1208,17 @@ def build_project(
         read_only=(project, raw, *python_folders()),
         hidden=tuple(path for path in hidden if path.exists()),
     )
+    sandbox = sandbox or Unisolated()
     try:
-        command = (sandbox or Unisolated()).command(command, seen)
+        command = sandbox.command(command, seen)
     except SandboxError as error:
         raise GateError(f"the build cannot be kept apart from the gate's files: {error}") from error
     finished = subprocess.run(
         command,
         cwd=project,
+        # In a sandbox, none of the caller's secrets: a model reads any
+        # variable it is given through env_var.
+        env=environment(sandbox),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

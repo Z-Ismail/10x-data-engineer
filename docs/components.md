@@ -149,7 +149,9 @@ Building a project runs its code, so on Linux each build runs in the same
 bubblewrap sandbox as the agents: it sees the project and the raw files
 read-only, can write only its own work folder, and cannot see the
 declaration, the expected rows or (for the second build) the first build's
-database. Where no sandbox can be set up the command refuses to build, with
+database. It is given only a short list of your environment variables
+(`PATH`, `HOME`, locale and a few more), so a model cannot read a secret in
+your environment through `env_var`. Where no sandbox can be set up the command refuses to build, with
 exit status 2; `--unisolated` builds without one, for a project you trust,
 and prints a warning. See [Security](security.md).
 

@@ -136,11 +136,13 @@ class ReviewProjectTest(unittest.TestCase):
         cls.calls = cls.bed.root / "calls.txt"
         os.environ["STUB_CALLS"] = str(cls.calls)
         os.environ["STUB_SECRET"] = str(cls.bed.answers)
+        os.environ["TENX_SANDBOX_ENV"] = "STUB_CALLS,STUB_SECRET"
 
     @classmethod
     def tearDownClass(cls):
         os.environ.pop("STUB_CALLS", None)
         os.environ.pop("STUB_SECRET", None)
+        os.environ.pop("TENX_SANDBOX_ENV", None)
         cls.tmp.cleanup()
 
     def review(self, variant: str) -> dict:
@@ -230,6 +232,8 @@ class SandboxedReviewTest(unittest.TestCase):
             sandbox = Bubblewrap(default_sandbox().executable, home=root / "home")
             os.environ["STUB_SECRET"] = str(bed.answers)
             self.addCleanup(os.environ.pop, "STUB_SECRET", None)
+            os.environ["TENX_SANDBOX_ENV"] = "STUB_SECRET"
+            self.addCleanup(os.environ.pop, "TENX_SANDBOX_ENV", None)
             record = bed.review("contact_name_from_email", sandbox, "sandboxed")
             self.assertEqual(record["gate"], "PASS")
             self.assertEqual(record["answer"]["summary"], "answers hidden")

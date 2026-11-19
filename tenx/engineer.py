@@ -88,6 +88,7 @@ from tenx.sandbox import (
     default_sandbox,
     python_folders,
 )
+from tenx.sandbox import environment as sandbox_environment
 from tenx.scouts import NOTES_FILE as TABLE_NOTES_FILE
 from tenx.scouts import SCHEMA as SCOUT_SCHEMA
 from tenx.scouts import ScoutError
@@ -335,12 +336,13 @@ def run_agent(
     report is moved into place only once the agent has finished, so a stopped
     run never leaves a partial report.
     """
-    # dbt must find the project's own profiles.yml, not one set elsewhere.
-    environment = {key: value for key, value in os.environ.items() if key != "DBT_PROFILES_DIR"}
     report_file.parent.mkdir(parents=True, exist_ok=True)
     partial = report_file.with_name(report_file.name + ".partial")
     errors = report_file.with_name(report_file.name + ".stderr")
     sandbox = sandbox or Unisolated()
+    environment = sandbox_environment(sandbox, agent=True)
+    # dbt must find the project's own profiles.yml, not one set elsewhere.
+    environment.pop("DBT_PROFILES_DIR", None)
     if not isinstance(sandbox, Unisolated):
         environment.update(SANDBOXED_AGENT_ENVIRONMENT)
     try:

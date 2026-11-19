@@ -80,6 +80,8 @@ class HiddenPathsTest(unittest.TestCase):
     def diagnose(self, out: str, hide: tuple[Path, ...]) -> tuple[dict, str]:
         os.environ["PROBE_SECRET"] = str(self.secret)
         self.addCleanup(os.environ.pop, "PROBE_SECRET", None)
+        os.environ["TENX_SANDBOX_ENV"] = "PROBE_SECRET"
+        self.addCleanup(os.environ.pop, "TENX_SANDBOX_ENV", None)
         folder = self.root / out
         state = run.diagnose(
             self.project,

@@ -135,14 +135,33 @@ records are in the run folder, which no agent can see. If the run is
 killed, bubblewrap stops the agent it had started (`--die-with-parent`); a
 run started with `--unisolated` leaves that agent running until it ends.
 
+Environment variables are kept out of the sandbox unless they are on a
+short list, because a model the agent writes can read any variable it is
+given (dbt's `env_var`, a Python model, a shell command). Every sandboxed
+process, the gate's builds and the contract's counting included, gets
+`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `TZ` and the
+`LC_` variables. The agents also get what Claude Code needs: variables
+starting `ANTHROPIC_` or `CLAUDE_`, the proxy variables (`HTTPS_PROXY`,
+`HTTP_PROXY`, `NO_PROXY`, either case), `NODE_EXTRA_CA_CERTS`,
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `DISABLE_TELEMETRY`,
+`DISABLE_ERROR_REPORTING`, `DISABLE_AUTOUPDATER`, `DO_NOT_TRACK` and
+`API_TIMEOUT_MS`. The temporary-folder variables are left out, so programs
+use the sandbox's own empty `/tmp`. To pass another variable, list its name
+in `TENX_SANDBOX_ENV` (names separated by commas); anything passed this way
+can be read by the agent and by the models it writes. Cloud credentials for
+Claude Code on Amazon Bedrock, Google Cloud or Microsoft Foundry are not on
+the list, for that reason. An unisolated run passes your whole environment.
+The tests plant secrets in the runner's environment and check that a
+stand-in agent, dbt's `env_var` in its build and in the gate's builds, and
+the counting process cannot read them, and that they can without the
+sandbox.
+
 What the sandbox does not cover yet:
 
 - The agents and the gate's builds keep network access, which Claude Code
   needs, so an agent could send out the raw data it can read.
-- The agents and the gate's builds see your environment variables, and the
-  agents see Claude Code's settings folder, which holds its sign-in and the
-  history of your other sessions.
+- The agents see Claude Code's settings folder, which holds its sign-in and
+  the history of your other sessions.
 
 Until these are closed, run the agents only on data you would be comfortable
-sharing with them, and keep credentials out of the environment you run them
-from.
+sharing with them.

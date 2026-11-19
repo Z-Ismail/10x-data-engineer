@@ -65,6 +65,7 @@ class CommandTest(unittest.TestCase):
         one_project(small_bed(root / "bed"))
         cls.root, cls.claude = root, program(root / "bin", ENGINEER + STAND_IN)
         os.environ["STUB_MODELS"] = str(REFERENCE_MODELS)
+        os.environ["TENX_SANDBOX_ENV"] = "STUB_MODELS"
         cls.first = cls.tenx("run", *cls.arguments())
         cls.again = cls.tenx("run", *cls.arguments())
         cls.shown = cls.tenx("report", str(root / "out"))
@@ -72,6 +73,7 @@ class CommandTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         os.environ.pop("STUB_MODELS", None)
+        os.environ.pop("TENX_SANDBOX_ENV", None)
         cls.tmp.cleanup()
 
     @classmethod
@@ -154,6 +156,8 @@ class SandboxedRunnerTest(unittest.TestCase):
         for secret in (bed / "answers.json", other):
             os.environ["PROBE_SECRET"] = str(secret)
             self.addCleanup(os.environ.pop, "PROBE_SECRET", None)
+            os.environ["TENX_SANDBOX_ENV"] = "PROBE_SECRET"
+            self.addCleanup(os.environ.pop, "TENX_SANDBOX_ENV", None)
             for hidden, runner in (
                 (True, rates.claude_runner(out, bed, claude, sandbox)),
                 (False, rates.claude_runner(root / "elsewhere", root / "no-bed", claude, sandbox)),
