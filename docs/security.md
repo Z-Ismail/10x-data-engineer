@@ -10,14 +10,34 @@ Inside it the computer's files are read-only; the home folder, the temporary
 folders, the repository and the run folder are replaced by empty folders that
 are discarded when the agent stops; then only what the agent's work needs is
 put back: its own folder (the one place it can write), the add-on's agent
-files, the programs it runs (Claude Code, Python and dbt), Claude Code's own
-settings and sign-in, and, for the engineer, the raw files, read-only. The
+files, the programs it runs (Claude Code, Python and dbt) and, for the
+engineer, the raw files, read-only. The
 gate's expectations, the reference project the gate is tested against, the
 gate's work and the other agents' reports are never visible. The agent's
 processes have their own process ids and stop when the run stops. The tests
 check this by having a stand-in agent try to read each of these by `cat`, by
 Python, by `dbt show` with `read_text()` and by a dbt Python model, and run in
 CI.
+
+Claude Code's own config folder (`~/.claude`, or `CLAUDE_CONFIG_DIR`) and
+`~/.claude.json` are not shown either. They hold your settings, including
+hooks, which are commands Claude Code runs outside any sandbox, and the
+history of your other sessions; an agent that could write there could leave
+a hook that runs with your full rights the next time you start Claude Code.
+Each sandboxed agent instead gets an empty config folder of its own, in the
+temporary folder, which is deleted when the agent ends, also when it is
+stopped. Only your sign-in file, `.credentials.json`, if you have one, is
+shown inside it, read-write, so a token Claude Code refreshes during a run
+is saved where your own Claude Code reads it. Your settings, hooks, plugins
+and `CLAUDE.md` do not apply to sandboxed agents; managed settings kept
+outside the home folder stay readable to them. If the runner itself is
+killed outright, the folder (the agent's session files, never a copy of your
+sign-in) is left in the temporary folder. The tests plant settings, another
+session's transcript, `~/.claude.json` and a sign-in file in a home folder,
+and check that a stand-in agent sees only the sign-in file, cannot read the
+rest, cannot change your settings, that a write to the sign-in file reaches
+yours, and that its folder is gone afterwards. An unisolated run uses your
+own config folder.
 
 Claude Code can put the shell commands it runs into a memory cgroup, with
 `CLAUDE_CODE_TOOL_MEMORY_LIMIT`. Inside the sandbox `/sys` is read-only, so
@@ -160,8 +180,8 @@ What the sandbox does not cover yet:
 
 - The agents and the gate's builds keep network access, which Claude Code
   needs, so an agent could send out the raw data it can read.
-- The agents see Claude Code's settings folder, which holds its sign-in and
-  the history of your other sessions.
+- An agent can read and change its own sign-in file, as Claude Code itself
+  must, and with network access could send the token out.
 
 Until these are closed, run the agents only on data you would be comfortable
 sharing with them.

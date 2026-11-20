@@ -360,7 +360,10 @@ told to count rows with `dbt show` until every model reconciles with its
 source before it stops, but only the gate's verdict counts. The gate's
 declaration is never put in the agent's folder, so the agent cannot read the
 checks or change them, and on Linux the sandbox (see [Security](security.md))
-hides it from the agent whatever command the agent runs.
+hides it from the agent whatever command the agent runs. In the sandbox the
+agent's Claude Code uses an empty config folder of its own, deleted when it
+ends, with only your sign-in file in it, so your settings, hooks, plugins and
+other sessions are neither used nor visible.
 
 The agent runs in Claude Code without anyone at the keyboard. It may write
 files in its own folder and run `dbt`, and every other action is refused
