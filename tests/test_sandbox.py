@@ -224,6 +224,50 @@ class BubblewrapCommandTest(unittest.TestCase):
         arguments = self.sandbox.command(["true"], self.mounts(writable=(config,)))
         self.assertIn(("--bind", str(config), str(config)), mounted(arguments))
 
+    def test_a_writable_folder_outside_every_hidden_folder_is_still_bound(self):
+        # Under the read-only root it would otherwise stay read-only.
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        sandbox = Bubblewrap("bwrap", home=self.home, scratch=())
+        arguments = sandbox.command(["true"], self.mounts(writable=(elsewhere,)))
+        self.assertIn(("--bind", str(elsewhere), str(elsewhere)), mounted(arguments))
+
+    def test_a_file_is_bound_read_write_at_its_target_after_the_folders(self):
+        config = self.root / "private"
+        config.mkdir()
+        sign_in = self.home / ".claude" / ".credentials.json"
+        sign_in.parent.mkdir()
+        sign_in.write_text("{}", encoding="utf-8")
+        target = config / ".credentials.json"
+        arguments = self.sandbox.command(
+            ["true"], self.mounts(writable=(config,), files=((sign_in, target),))
+        )
+        found = mounted(arguments)
+        self.assertEqual(found.count(("--bind", str(sign_in), str(target))), 1)
+        self.assertLess(
+            found.index(("--bind", str(config), str(config))),
+            found.index(("--bind", str(sign_in), str(target))),
+        )
+        # The file's own folder is not shown.
+        self.assertNotIn(str(sign_in.parent), options(arguments))
+
+    def test_a_file_needs_a_source_file_and_a_writable_place(self):
+        config = self.root / "private"
+        config.mkdir()
+        sign_in = self.root / "credentials.json"
+        sign_in.write_text("{}", encoding="utf-8")
+        cases = {
+            "is not a file": ((self.root / "missing", config / "x"),),
+            "is not a file ": ((config, config / "x"),),
+            "outside every folder": ((sign_in, self.root / "x"),),
+            "outside every folder ": ((sign_in, self.plugin / "x"),),
+        }
+        for message, files in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(SandboxError, message.strip()):
+                self.sandbox.command(["true"], self.mounts(writable=(config,), files=files))
+        # Inside the workspace is allowed.
+        self.sandbox.command(["true"], self.mounts(files=((sign_in, self.project / "x"),)))
+
     def test_unisolated_leaves_the_command_as_it_is(self):
         self.assertEqual(Unisolated().command(["claude", "-p"], self.mounts()), ["claude", "-p"])
 
