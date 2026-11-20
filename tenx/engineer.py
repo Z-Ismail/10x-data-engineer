@@ -62,6 +62,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -119,6 +120,8 @@ DEV_DATABASE = "dev.duckdb"
 # a sandbox cannot enter because /sys is read-only there, and then no shell
 # command can start. Inside the sandbox, the cgroup is turned off.
 SANDBOXED_AGENT_ENVIRONMENT = {"CLAUDE_CODE_TOOL_MEMORY_LIMIT": "none"}
+# Claude Code's sign-in file on Linux, in its config folder.
+SIGN_IN_FILE = ".credentials.json"
 
 
 class EngineerError(Exception):
@@ -336,17 +339,48 @@ def run_agent(
     report is moved into place only once the agent has finished, so a stopped
     run never leaves a partial report.
     """
+    sandbox = sandbox or Unisolated()
+    mounts = mounts or Mounts(workspace=project)
+    if not getattr(sandbox, "isolated", True):
+        return _run(project, command, report_file, timeout, sandbox, mounts, {})
+    # A sandboxed agent gets a config folder of its own, emptied when it
+    # ends, so it never sees or changes the user's settings, hooks or other
+    # sessions. Only the sign-in file is shown in it, read-write, so that a
+    # token Claude Code refreshes is kept where the user's own copy reads it.
+    config = Path(tempfile.mkdtemp(prefix="tenx-claude-")).resolve()
+    try:
+        files = mounts.files
+        sign_in = claude_sign_in()
+        if sign_in is not None:
+            (config / SIGN_IN_FILE).touch(mode=0o600)
+            files += ((sign_in, config / SIGN_IN_FILE),)
+        private = replace(mounts, writable=(*mounts.writable, config), files=files)
+        settings = {"CLAUDE_CONFIG_DIR": str(config)}
+        return _run(project, command, report_file, timeout, sandbox, private, settings)
+    finally:
+        shutil.rmtree(config, ignore_errors=True)
+
+
+def _run(
+    project: Path,
+    command: list[str],
+    report_file: Path,
+    timeout: float,
+    sandbox: Sandbox,
+    mounts: Mounts,
+    settings: dict[str, str],
+) -> AgentRun:
     report_file.parent.mkdir(parents=True, exist_ok=True)
     partial = report_file.with_name(report_file.name + ".partial")
     errors = report_file.with_name(report_file.name + ".stderr")
-    sandbox = sandbox or Unisolated()
     environment = sandbox_environment(sandbox, agent=True)
     # dbt must find the project's own profiles.yml, not one set elsewhere.
     environment.pop("DBT_PROFILES_DIR", None)
     if not isinstance(sandbox, Unisolated):
         environment.update(SANDBOXED_AGENT_ENVIRONMENT)
+    environment.update(settings)
     try:
-        started = sandbox.command(command, mounts or Mounts(workspace=project))
+        started = sandbox.command(command, mounts)
     except SandboxError as error:
         raise EngineerError(str(error)) from error
     with partial.open("w", encoding="utf-8") as out, errors.open("w", encoding="utf-8") as err:
@@ -442,12 +476,16 @@ class Run:
     sandbox: str | None = None
 
 
-def claude_config() -> tuple[Path, ...]:
-    """Claude Code's own settings and sign-in, which it must be able to read and update."""
+def claude_sign_in() -> Path | None:
+    """The file holding the user's Claude Code sign-in, if it keeps one there.
+
+    A subscription sign-in on Linux is kept in the config folder; one from
+    an API key or a token in the environment has no file.
+    """
     configured = os.environ.get("CLAUDE_CONFIG_DIR")
     folder = Path(configured) if configured else Path.home() / ".claude"
-    paths = [folder, Path.home() / ".claude.json"]
-    return tuple(path for path in paths if path.exists())
+    path = folder / SIGN_IN_FILE
+    return path if path.is_file() else None
 
 
 def tools(claude: str) -> tuple[Path, ...]:
@@ -480,14 +518,14 @@ def mounts(
 
     The run folder (with the gate's work and the other agents' reports),
     the declaration and the repository (with its reference answers) are
-    hidden.
+    hidden. Claude Code's config folder is not shown: ``run_agent`` gives
+    each sandboxed agent a folder of its own.
     """
     shown = [Path(raw)] if raw is not None else []
     shown += [out / PLUGIN_COPY_DIR, *tools(claude)]
     return Mounts(
         workspace=workspace,
         read_only=tuple(shown),
-        writable=claude_config(),
         hidden=(PLUGIN_DIR, Path(out), Path(checks)),
     )
 

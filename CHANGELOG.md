@@ -6,6 +6,16 @@ Notable changes to this project.
 
 ### Security
 
+- Sandboxed agents no longer see Claude Code's config folder. They were
+  given `~/.claude` (or `CLAUDE_CONFIG_DIR`) and `~/.claude.json`
+  read-write, so an agent could read your other sessions and settings and
+  could write a hook into your settings that would run outside the sandbox
+  the next time you started Claude Code. Each sandboxed agent now gets an
+  empty config folder of its own, deleted when it ends, with only your
+  sign-in file shown in it. Your settings, hooks and plugins no longer apply
+  to sandboxed agents. Unisolated runs are unchanged.
+- A writable folder outside the home and temporary folders was shown to a
+  sandboxed process read-only; it is now writable as asked.
 - Only a short list of environment variables reaches the sandbox. Agents,
   the gate's dbt builds and the contract's counting process ran with your
   whole environment, so a token or cloud key in it could be read by an

@@ -32,6 +32,7 @@ from tenx.engineer import (
     PROJECT_DIR,
     USAGE_FILE,
     EngineerError,
+    claude_sign_in,
     main,
     mounts,
     run_agent,
@@ -224,6 +225,50 @@ class BubblewrapCommandTest(unittest.TestCase):
         arguments = self.sandbox.command(["true"], self.mounts(writable=(config,)))
         self.assertIn(("--bind", str(config), str(config)), mounted(arguments))
 
+    def test_a_writable_folder_outside_every_hidden_folder_is_still_bound(self):
+        # Under the read-only root it would otherwise stay read-only.
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        sandbox = Bubblewrap("bwrap", home=self.home, scratch=())
+        arguments = sandbox.command(["true"], self.mounts(writable=(elsewhere,)))
+        self.assertIn(("--bind", str(elsewhere), str(elsewhere)), mounted(arguments))
+
+    def test_a_file_is_bound_read_write_at_its_target_after_the_folders(self):
+        config = self.root / "private"
+        config.mkdir()
+        sign_in = self.home / ".claude" / ".credentials.json"
+        sign_in.parent.mkdir()
+        sign_in.write_text("{}", encoding="utf-8")
+        target = config / ".credentials.json"
+        arguments = self.sandbox.command(
+            ["true"], self.mounts(writable=(config,), files=((sign_in, target),))
+        )
+        found = mounted(arguments)
+        self.assertEqual(found.count(("--bind", str(sign_in), str(target))), 1)
+        self.assertLess(
+            found.index(("--bind", str(config), str(config))),
+            found.index(("--bind", str(sign_in), str(target))),
+        )
+        # The file's own folder is not shown.
+        self.assertNotIn(str(sign_in.parent), options(arguments))
+
+    def test_a_file_needs_a_source_file_and_a_writable_place(self):
+        config = self.root / "private"
+        config.mkdir()
+        sign_in = self.root / "credentials.json"
+        sign_in.write_text("{}", encoding="utf-8")
+        cases = {
+            "is not a file": ((self.root / "missing", config / "x"),),
+            "is not a file ": ((config, config / "x"),),
+            "outside every folder": ((sign_in, self.root / "x"),),
+            "outside every folder ": ((sign_in, self.plugin / "x"),),
+        }
+        for message, files in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(SandboxError, message.strip()):
+                self.sandbox.command(["true"], self.mounts(writable=(config,), files=files))
+        # Inside the workspace is allowed.
+        self.sandbox.command(["true"], self.mounts(files=((sign_in, self.project / "x"),)))
+
     def test_unisolated_leaves_the_command_as_it_is(self):
         self.assertEqual(Unisolated().command(["claude", "-p"], self.mounts()), ["claude", "-p"])
 
@@ -255,7 +300,8 @@ class RunnerMountsTest(unittest.TestCase):
         self.assertNotIn(self.raw, other.read_only)
         for seen in (engineer, other):
             self.assertEqual(seen.hidden, (PLUGIN_DIR, self.out, self.checks))
-            self.assertEqual(seen.writable, (self.home / ".claude", self.home / ".claude.json"))
+            # Claude Code's config folder is not shown: run_agent gives a private one.
+            self.assertEqual((seen.writable, seen.files), ((), ()))
         # Claude Code, and the Python that runs dbt, are shown.
         self.assertIn(Path(self.claude).resolve().parent, engineer.read_only)
         self.assertIn(Path(sys.prefix).resolve(), engineer.read_only)
@@ -269,14 +315,22 @@ class RunnerMountsTest(unittest.TestCase):
         with self.assertRaisesRegex(EngineerError, "which the agent must not see"):
             run_agent(self.out / "project", ["true"], self.out / "agent.json", 5, sandbox, seen)
 
-    def test_claude_code_settings_follow_its_config_folder(self):
+    def test_the_sign_in_file_is_found_in_claude_codes_config_folder(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            self.assertIsNone(claude_sign_in())
+            (self.home / ".claude" / ".credentials.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(claude_sign_in(), self.home / ".claude" / ".credentials.json")
         config = self.root / "config"
-        config.mkdir()
+        (config / ".credentials.json").mkdir(parents=True)
         with mock.patch.dict(
             os.environ, {"HOME": str(self.home), "CLAUDE_CONFIG_DIR": str(config)}
         ):
-            seen = mounts(self.out / "project", self.out, self.checks, self.claude)
-        self.assertEqual(seen.writable, (config, self.home / ".claude.json"))
+            # A folder of that name is not a sign-in.
+            self.assertIsNone(claude_sign_in())
+            (config / ".credentials.json").rmdir()
+            (config / ".credentials.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(claude_sign_in(), config / ".credentials.json")
 
 
 # Writes the agent's view of Claude Code's tool cgroup setting to a file.

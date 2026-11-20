@@ -20,7 +20,9 @@ skipped without it, unless `TENX_REQUIRE_SANDBOX=1` is set, as CI does; then
 they fail. On Ubuntu 24.04 and later bubblewrap also needs an AppArmor
 profile; the CI workflow installs one. A sandboxed process gets only a short
 list of environment variables, so a test whose stand-in reads its settings
-from the environment lists their names in `TENX_SANDBOX_ENV`.
+from the environment lists their names in `TENX_SANDBOX_ENV`. A sandboxed agent's
+`CLAUDE_CONFIG_DIR` points at an empty folder of its own, so a stand-in
+must not expect files from your Claude Code config folder.
 
 The tests do not run the agents themselves: they replace the `claude`
 command with a stand-in that writes a known project, or gives a known answer

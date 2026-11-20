@@ -83,13 +83,16 @@ class Mounts:
     ``workspace`` is the agent's working folder, and the only place it can
     write to and keep. ``writable`` paths can also be written, for a tool's
     own state. ``read_only`` paths are visible and cannot be changed.
-    ``hidden`` paths are never visible, wherever they are.
+    ``hidden`` paths are never visible, wherever they are. ``files`` are
+    single files shown read-write at another path, as (source, target)
+    pairs; the target must be inside the workspace or a writable folder.
     """
 
     workspace: Path
     read_only: tuple[Path, ...] = ()
     writable: tuple[Path, ...] = ()
     hidden: tuple[Path, ...] = ()
+    files: tuple[tuple[Path, Path], ...] = ()
 
 
 class Sandbox(Protocol):
@@ -201,12 +204,13 @@ class Bubblewrap:
                         f"{path} holds {masked}, which the agent must not see; "
                         "use a folder that does not contain it"
                     )
-        # Only paths under a mask need putting back, and the workspace, since
-        # everything else is read-only.
+        files = self._files(mounts.files, [path for path, flag in binds if flag == "--bind"])
+        # Read-only paths need putting back only from under a mask, since
+        # everything else is read-only already; writable ones always.
         binds = [
             (path, flag)
             for path, flag in binds
-            if path == workspace or any(_inside(path, masked) for masked in masks)
+            if flag == "--bind" or any(_inside(path, masked) for masked in masks)
         ]
         binds.sort(key=lambda bind: _order(bind[0]))
         arguments = [self.executable, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
@@ -214,6 +218,8 @@ class Bubblewrap:
             arguments += ["--tmpfs", str(path)]
         for path, flag in binds:
             arguments += [flag, str(path), str(path)]
+        for source, target in files:
+            arguments += ["--bind", str(source), str(target)]
         # Folders put back are mounted after the empty ones, so a hidden path
         # inside one is visible again, as is a hidden file under no empty
         # folder at all. Either is covered last.
@@ -230,6 +236,24 @@ class Bubblewrap:
                 arguments += ["--ro-bind", os.devnull, str(path)]
         arguments += ["--unshare-pid", "--die-with-parent", "--chdir", str(workspace), "--"]
         return arguments + list(command)
+
+    @staticmethod
+    def _files(
+        files: tuple[tuple[Path, Path], ...], writable: list[Path]
+    ) -> list[tuple[Path, Path]]:
+        checked = []
+        for source, target in files:
+            source = Path(source).resolve()
+            target = Path(target).parent.resolve() / Path(target).name
+            if not source.is_file():
+                raise SandboxError(f"{source} is not a file, so it cannot be shown to the agent")
+            if not any(_inside(target.parent, folder) for folder in writable):
+                raise SandboxError(
+                    f"{target} is outside every folder the agent may write to, "
+                    "so a file cannot be shown there"
+                )
+            checked.append((source, target))
+        return checked
 
     def describe(self) -> str:
         return (
