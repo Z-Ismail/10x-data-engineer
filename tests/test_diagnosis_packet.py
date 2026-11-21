@@ -107,8 +107,14 @@ class PacketFromFailingProjects(unittest.TestCase):
             self.assertIn("<build>/target", files["build/dbt.log"])
             self.assertIn("<raw>", files["build/run_results.json"])
             self.assertIn("<project>", files["build/dbt.log"])
+        # DuckDB 2.0.0 also quoted the raw file's path cut short in this
+        # variant's error; 2.0.1 does not. Either way every path it quotes is
+        # renamed.
         log = packet_files(self.runs["account_column_misspelt"][1])["build/dbt.log"]
-        self.assertIn("from read_csv('<folder>...", log)
+        quoted = re.findall(r"read_csv\('([^']*)", log)
+        self.assertTrue(quoted)
+        for path in quoted:
+            self.assertTrue(path.startswith(("<raw>/", "<folder>...")), path)
 
     def test_nothing_hidden_reaches_the_packet(self):
         hidden = {artefacts.file_hash(DECLARATION)}
