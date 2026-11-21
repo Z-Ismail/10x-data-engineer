@@ -10,13 +10,15 @@ Skipped where bubblewrap cannot run, unless TENX_REQUIRE_SANDBOX is set.
 """
 
 import copy
+import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from test_gate_sandbox import needs_sandbox
+from test_gate_sandbox import Listener, needs_sandbox
 from test_spec import CONTRACT, ORDERS, VISITS
 
 from tenx import counting
@@ -73,6 +75,41 @@ class Probes:
         )
 
 
+# Stands in for the counting script: tries a listener on the host's loopback
+# and reports what happened as a failed count.
+NETWORK_PROBE = """
+import json, socket, sys
+job = json.loads(sys.stdin.read())
+try:
+    socket.create_connection(("127.0.0.1", job["port"]), timeout=5).close()
+    found = "connected"
+except OSError as error:
+    found = "blocked " + type(error).__name__
+print(json.dumps({"failed": "", "error": found}))
+sys.exit(1)
+"""
+
+
+def probe_network(test: unittest.TestCase, probes: Probes, sandbox, hidden=()) -> tuple[str, int]:
+    """What the counting process managed, and how many connections the host's listener saw."""
+    listener = Listener()
+    run = counting._run
+
+    def with_port(command, job, *rest):
+        return run(command, json.dumps({**json.loads(job), "port": listener.port}), *rest)
+
+    try:
+        with (
+            mock.patch.object(counting, "SCRIPT", NETWORK_PROBE),
+            mock.patch.object(counting, "_run", with_port),
+            test.assertRaises(ContractError) as caught,
+        ):
+            count_kept(CONTRACT, probes.raw, probes.work, sandbox, hidden)
+    finally:
+        connections = listener.stop()
+    return str(caught.exception).rpartition(": ")[2], connections
+
+
 class UnguardedWithoutSandboxTest(unittest.TestCase):
     """The positive control: no guards and no sandbox, and both probes succeed."""
 
@@ -80,6 +117,14 @@ class UnguardedWithoutSandboxTest(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.probes = Probes(Path(folder.name))
+
+    def test_the_whole_environment_is_passed(self):
+        with (
+            mock.patch.dict(os.environ, {"TENX_PROBE_TOKEN": "count-token"}),
+            mock.patch.object(counting, "_run", wraps=counting._run) as run,
+        ):
+            count_kept(CONTRACT, self.probes.raw, self.probes.work, Unisolated())
+        self.assertEqual(run.call_args.args[4]["TENX_PROBE_TOKEN"], "count-token")
 
     def test_the_secret_is_read_and_the_raw_folder_written(self):
         probes = self.probes
@@ -91,6 +136,9 @@ class UnguardedWithoutSandboxTest(unittest.TestCase):
             with self.assertRaises(ContractError):
                 count_kept(probes.write(), probes.raw, probes.work, Unisolated())
         self.assertTrue(probes.planted.exists())
+
+    def test_the_network_is_reached(self):
+        self.assertEqual(probe_network(self, self.probes, Unisolated()), ("connected", 1))
 
 
 @needs_sandbox
@@ -133,6 +181,22 @@ class UnguardedInSandboxTest(unittest.TestCase):
         with mock.patch.object(counting.sys, "executable", given):
             counts = count_kept(CONTRACT, self.probes.raw, self.probes.work, self.box, self.hidden)
         self.assertEqual(counts["stg_shop__orders"].kept, 3)
+
+    def test_the_counting_process_gets_none_of_the_callers_secrets(self):
+        with (
+            mock.patch.dict(os.environ, {"TENX_PROBE_TOKEN": "count-token"}),
+            mock.patch.object(counting, "_run", wraps=counting._run) as run,
+        ):
+            counts = count_kept(CONTRACT, self.probes.raw, self.probes.work, self.box, self.hidden)
+        given = run.call_args.args[4]
+        self.assertNotIn("TENX_PROBE_TOKEN", given)
+        self.assertEqual(given["PATH"], os.environ["PATH"])
+        self.assertEqual(counts["stg_shop__orders"].kept, 3)
+
+    def test_the_network_is_not_reached(self):
+        found, connections = probe_network(self, self.probes, self.box, self.hidden)
+        self.assertTrue(found.startswith("blocked"), found)
+        self.assertEqual(connections, 0)
 
     def test_the_counts_are_the_same_in_the_sandbox_with_the_guards(self):
         counts = count_kept(CONTRACT, self.probes.raw, self.probes.work, self.box, self.hidden)

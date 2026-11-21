@@ -112,12 +112,12 @@ if:
 | Build | Engineer agent: dbt models on DuckDB from a plain-English goal | Available |
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
 | Specification | Architect agent: a machine-checked spec contract and `SPEC.md` for the engineer | In progress: built into the graph run, off by default (`python -m tenx.run run --architect`, `make engineer-architect`); not shown to raise the pass rate. With `--review-spec` the run waits for a person to approve, edit or reject the spec before the engineer starts. The measured comparison on the brief demo goal (`make compare-architect`, 64 runs, each spec scored against the gate's hidden declaration) was run on 2026-11-11: 5 of 32 passes with the Architect against 2 of 32 without, not enough to say it helps (chance it is better 0.87, against the 0.98 required); in 13 of the 32 runs its spec could not be used, mostly because a rule read a second table; the Architect is now told to keep each rule to its own table's columns, and such a rule is refused before counting (not yet re-measured). It stays off by default |
-| Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox; other systems refuse unless `--unisolated` |
+| Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox that is given only a short list of your environment variables and, for the agents, a Claude Code config folder of their own; the gate's builds run without the network; other systems refuse unless `--unisolated` |
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available: the graph run works only through them |
 | Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available: the per-call caps and the comparison approval apply to every run; the run ceiling applies to graph runs (`python -m tenx.run`) |
 | Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the build workflow runs as a graph that is saved after every step and can be resumed (`python -m tenx.run`), with the run ceiling enforced; with a stand-in for Claude Code it leaves byte-identical projects, notes, reports and usage to the current runner's on eight demo datasets (`make equivalence`). A paired comparison with real agents against the current runner (`make parity`, 64 pairs, a predeclared 10-point margin) was run on 2026-11-06 and found the graph non-inferior: 62 of 64 passes against 59 of 64, at 0.96 times the cost per pass. `make engineer` still uses the current runner. A run can wait for approval of the Architect's spec (`--review-spec`); approval of the handover and the other roles come later |
 | Build | Repair loop driven by the gate's report | Available in the graph run, on by default since 2026-11-11 (`python -m tenx.run run` repairs a failing project up to twice; `--repairs 0` turns it off); the comparison that measures it (`make repairs`, the engineer alone, each run against its own first round) was run on 2026-11-11: with up to two repairs 32 of 32 runs passed against 11 of 32 first rounds, +65.6 points (95% interval +47.9 to +79.6), verdict better, at 0.55 times the cost per pass |
-| Operations | Diagnostics for failing pipelines; performance and cost tuning | In progress: `python -m tenx.run diagnose --project <folder> ...` (`make diagnose PROJECT=<folder>`) checks a dbt project that already exists: it copies the project into the run's folder (the project itself is never written), the gate builds and checks the copy in the sandbox, and if the gate fails it, the Diagnostics agent reads the project, every check with what an agent may be told of it, and dbt's results and log (with the run's folders renamed, never the gate's hidden checks), and says why: confirmed facts that quote those files, causes ranked from the most likely, each with its kind from a fixed list, the model, file and line, and the checks it explains, and what it could not find out. The agent can read files but not change them; every fact and cause is checked in code before it is kept as `DIAGNOSIS.md`, and the diagnosis never changes the gate's verdict. A test bed of thirteen dbt projects that each fail the gate for one known cause (`python tests/failing_bed.py --out <folder>`) is there to measure how often it names the cause; in the first live runs on eight of them it named the right kind of cause in the right model each time it gave an answer, a handful of runs, not yet a rate. Proposing a fix through the engineer comes next |
+| Operations | Diagnostics for failing pipelines; performance and cost tuning | In progress: `python -m tenx.run diagnose --project <folder> ...` (`make diagnose PROJECT=<folder>`) checks a dbt project that already exists: it copies the project into the run's folder (the project itself is never written), the gate builds and checks the copy in the sandbox, and if the gate fails it, the Diagnostics agent reads the project, every check with what an agent may be told of it, and dbt's results and log (with the run's folders renamed, never the gate's hidden checks), and says why: confirmed facts that quote those files, causes ranked from the most likely, each with its kind from a fixed list, the model, file and line, and the checks it explains, and what it could not find out. The agent can read files but not change them; every fact and cause is checked in code before it is kept as `DIAGNOSIS.md`, and the diagnosis never changes the gate's verdict. A test bed of thirteen dbt projects that each fail the gate for one known cause (`python tests/failing_bed.py --out <folder>`) measures how often it names the cause (`make diagnosis-rates`, 52 runs: each project on four demo datasets). On 2026-11-16 its first cause named the bed's kind of cause in the bed's model in 50 of 52 runs (95% interval 87% to 99%), about US$0.04 a run, which meets the rule set before the run; the two misses gave the right cause but misquoted a check, so the code check refused the answer. Each planted cause is a few lines of SQL in one model, so this says nothing yet about larger projects. With `--fixes N` (`make diagnose PROJECT=<folder> FIXES=1`, off by default) the engineer then fixes the run's copy, given what the gate found and the diagnosis, and the gate checks the fix; the project you named is still never written, and the fix is proposed as `FIX.diff` for you to review and apply. On 2026-11-17 four bed projects were fixed this way, each passing the gate at the first fix (about US$0.08 to US$0.13 a run with the diagnosis); a measurement of how much the diagnosis helps a fix (`make fix-rates`: each bed project fixed with and without it on four datasets, paired) is built but has not run yet |
 | Review | Advisory reviewer, measured on planted defects | In progress: the reviewer agent is built into the graph run, off by default (`python -m tenx.run run --reviewer`, `make engineer-reviewer`): after a gate pass it reads the review packet (the goal, spec, profiles, the project's models and the checks that already ran, never the gate's hidden checks) and advises, with every finding checked in code against a file and line of the project; its advice is saved as `REVIEW.md` and never changes the gate's verdict. A test bed of twelve dbt projects that all pass the gate, six with one planted mistake in a column the gate does not check and six correct but written differently, is used to measure how often it catches mistakes and how often it rejects good work (`make review-rates`, 48 reviews: each of the twelve projects on four demo datasets). On 2026-11-12 it caught 24 of 24 planted mistakes at the right model and column and rejected none of the 24 correct projects, about US$0.05 a review, which meets the rule set before the run; every planted mistake is visible in one line of SQL, so this says nothing yet about subtler ones. It stays off by default until that result is applied |
 | Platforms | Snowflake first, then Databricks and BigQuery, read-only first | Planned |
 | Transformation | Marts and incremental models; plain SQL, Python and PySpark | Planned |
@@ -141,11 +141,14 @@ make engineer-brief  # the graph run on a brief goal that leaves the spec unwrit
 make engineer-architect  # the same, with the Architect writing the spec first
 make engineer-reviewer   # the graph run, with the reviewer advising after a gate pass
 make diagnose PROJECT=<folder>  # check an existing project; if it fails, the Diagnostics agent says why
+make diagnose PROJECT=<folder> FIXES=1  # the same, then the engineer proposes a fix (FIX.diff)
 make equivalence     # the graph against the current runner, with a stand-in for Claude Code
 make parity          # the graph against the current runner with real agents (needs approval)
 make repairs         # repairs against no repairs with real agents (needs approval)
 make compare-architect  # the graph with and without the Architect on the brief goal (needs approval)
 make review-rates     # the reviewer on the test bed: how often it catches mistakes and rejects good work
+make diagnosis-rates  # the Diagnostics agent on the failing bed: how often it names the root cause
+make fix-rates        # fixes on the failing bed with and without the diagnosis (needs approval)
 ```
 
 The demo data is a billing system, a CRM and a product event log for the
@@ -160,16 +163,25 @@ agent's tools does not limit what it can read. Isolation therefore comes
 from the operating system. On Linux every agent runs in a
 [bubblewrap](https://github.com/containers/bubblewrap) sandbox that shows it
 only its own folder, the programs it runs and the data its work needs; the
-gate's expectations, the repository and your home folder are hidden. Where
+gate's expectations, the repository and your home folder are hidden, Claude
+Code's config folder included: each agent gets an empty one of its own, with
+only your sign-in file in it, so it cannot read your other sessions or leave
+a hook in your settings. Where
 no sandbox can be set up, the runner refuses to start the agents unless you
 pass `--unisolated`, and the run is then marked as unisolated.
 
 The gate builds the agent's project in the same sandbox, so a dbt Python
 model the agent wrote cannot read the gate's expectations or change its
-databases either. The sandbox does not yet limit network access or
-environment variables. Until it does, run the agents only on data you would
-be comfortable sharing with them. Details, and how the
-isolation is tested, are in [docs/security.md](docs/security.md).
+databases either. Of your environment variables, only a short list reaches
+the sandbox: what any program needs (such as `PATH` and `HOME`) and, for the
+agents, what Claude Code needs to sign in and reach its service (its own
+`ANTHROPIC_` and `CLAUDE_` variables and proxy settings). A token or cloud
+key in your environment stays outside; name a variable in
+`TENX_SANDBOX_ENV` to pass it on purpose. The gate's builds have no network
+and see none of the system's sockets, and dbt does not load a `.env` file
+for them. The agents keep network access, which Claude Code needs, so run
+them only on data you would be comfortable sharing with them. Details, and
+how the isolation is tested, are in [docs/security.md](docs/security.md).
 
 ## Costs
 

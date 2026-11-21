@@ -406,7 +406,7 @@ class CommandLineTest(unittest.TestCase):
                 self.assertIn("--repairs", done.stderr)
                 self.assertFalse(self.out.exists())
 
-    def diagnose(self, project: Path) -> subprocess.CompletedProcess:
+    def diagnose(self, project: Path, *extra: str) -> subprocess.CompletedProcess:
         return self.tenx(
             "diagnose",
             "--project",
@@ -420,6 +420,7 @@ class CommandLineTest(unittest.TestCase):
             "--out",
             str(self.out),
             "--unisolated",
+            *extra,
         )
 
     def test_a_failing_project_is_diagnosed_and_left_as_it_was(self):
@@ -452,6 +453,63 @@ class CommandLineTest(unittest.TestCase):
             text = Path(path).read_bytes()
             self.assertNotEqual(text, declaration)
             self.assertNotIn(str(self.root).encode(), text, path)
+
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_a_failing_project_is_fixed_in_a_copy_and_the_fix_proposed_as_a_diff(self):
+        # The stand-in engineer copies the reference models, which repair the variant.
+        project = make(variant("crosswalk_whole_email"), self.root / "project")
+        before = {p: p.read_bytes() for p in sorted(project.rglob("*")) if p.is_file()}
+        done = self.diagnose(project, "--fixes", "1")
+        self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
+        attempt = self.out / "engineer" / "attempt-1"
+        self.assertTrue(
+            done.stdout.startswith(
+                "status: passed\n"
+                f"project: {project.resolve()} (not changed; checked as a copy in "
+                f"{self.out / 'project'})\n"
+                "as handed over: 1 of 24 checks failed or could not run\n"
+                f"fix: {attempt / 'work'}\n"
+                f"proposed change: {attempt / 'FIX.diff'} (review it, then apply it)\n"
+            ),
+            done.stdout,
+        )
+        self.assertIn("gate: PASS", done.stdout)
+        self.assertEqual(
+            {p: p.read_bytes() for p in sorted(project.rglob("*")) if p.is_file()}, before
+        )
+        given = json.loads(self.record.read_text())["files"]
+        self.assertLessEqual(
+            {"DIAGNOSIS.md", "GATE_REPORT.md", "GOAL.md", "profiles.yml", "dbt_project.yml"},
+            set(given),
+        )
+        usage = json.loads((self.out / "usage.json").read_text())
+        self.assertEqual([role["role"] for role in usage["roles"]], ["diagnostics", "engineer"])
+        # Applied to the project as handed over, the diff gives the fix's models.
+        applied = self.root / "applied"
+        shutil.copytree(project, applied)
+        diff = (attempt / "FIX.diff").read_text()
+        self.assertIn(f"+++ b/models/{CROSSWALK}\n", diff)
+        self.assertNotIn("profiles.yml", diff)
+        (applied / "FIX.diff").write_text(diff)
+        result = subprocess.run(
+            ["git", "apply", "FIX.diff"], cwd=applied, capture_output=True, text=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        def models(folder):
+            return {
+                p.relative_to(folder).as_posix(): p.read_text()
+                for p in sorted((folder / "models").rglob("*"))
+                if p.is_file()
+            }
+
+        self.assertEqual(models(applied), models(attempt / "work"))
+
+    def test_fixes_outside_none_to_three_are_refused(self):
+        done = self.diagnose(self.root, "--fixes", "4")
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("--fixes", done.stderr)
+        self.assertFalse(self.out.exists())
 
     def test_a_folder_that_is_not_a_project_is_refused(self):
         done = self.diagnose(self.root)

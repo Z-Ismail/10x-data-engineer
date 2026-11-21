@@ -345,7 +345,8 @@ class EngineeringRequest(Record):
     architect: bool = False
     isolation: Literal["bubblewrap", "unisolated"] = "bubblewrap"
     # How many times the engineer may repair its work after the validator
-    # fails it; none unless asked.
+    # fails it; none unless asked. In the operate workflow, how many times it
+    # may fix (in the run's copy) the project it was handed.
     repairs: Annotated[int, Field(ge=0, le=MAX_REPAIRS)] = 0
     # Whether the run waits for a person to approve, edit or reject the
     # architect's spec before the engineer starts.
@@ -354,9 +355,14 @@ class EngineeringRequest(Record):
     # advises on what the checks cannot see; its advice changes no verdict.
     reviewer: bool = False
     # "build" makes a project from the goal; "operate" checks the existing
-    # project in ``project`` and, if it fails, works out why.
+    # project in ``project`` and, if it fails, works out why and, with
+    # repairs, proposes a fix.
     workflow: Literal["build", "operate"] = "build"
     project: Text | None = None
+    # Whether an operate run leaves the diagnostics agent out, so that a fix
+    # is made from the checks' findings alone (to measure what the diagnosis
+    # adds); the build workflow has no diagnostics step to leave out.
+    skip_diagnosis: bool = False
 
     @model_validator(mode="after")
     def _review_needs_a_spec(self):
@@ -369,6 +375,8 @@ class EngineeringRequest(Record):
         if self.workflow == "build":
             if self.project is not None:
                 raise ValueError("a project is given only to the operate workflow")
+            if self.skip_diagnosis:
+                raise ValueError("skip_diagnosis is only for the operate workflow")
             return self
         if self.project is None:
             raise ValueError("the operate workflow needs the project to check")
@@ -378,12 +386,12 @@ class EngineeringRequest(Record):
             "architect": self.architect,
             "review_spec": self.review_spec,
             "reviewer": self.reviewer,
-            "repairs": self.repairs,
         }
         asked = [name for name, value in building.items() if value]
         if asked:
             raise ValueError(
-                f"the operate workflow builds nothing, so it takes no {', '.join(asked)}"
+                "the operate workflow works on the project it is given, so it takes no "
+                + ", ".join(asked)
             )
         return self
 
@@ -405,7 +413,7 @@ STEPS = (
 )
 # The steps only one workflow takes.
 ONLY = {
-    "build": ("scouts", "cross-source", "architect", "review", "engineer", "reviewer"),
+    "build": ("scouts", "cross-source", "architect", "review", "reviewer"),
     "operate": ("intake", "diagnostics"),
 }
 

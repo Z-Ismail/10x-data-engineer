@@ -16,9 +16,12 @@ import io
 import json
 import os
 import shutil
+import socket
 import stat
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -32,6 +35,7 @@ from tenx.engineer import (
     PROJECT_DIR,
     USAGE_FILE,
     EngineerError,
+    claude_sign_in,
     main,
     mounts,
     run_agent,
@@ -192,6 +196,25 @@ class BubblewrapCommandTest(unittest.TestCase):
         arguments = sandbox.command(["true"], self.mounts(hidden=(self.repo, self.out, secret)))
         self.assertEqual(mounted(arguments)[-4], ("--ro-bind", os.devnull, str(secret)))
 
+    def test_offline_the_command_has_its_own_network_and_no_system_sockets(self):
+        arguments = self.sandbox.command(["dbt"], self.mounts(network=False))
+        found = mounted(arguments)
+        self.assertIn(("--unshare-net",), found)
+        # Hidden with the other emptied folders, before anything is put back.
+        empty = found.index(("--tmpfs", "/run"))
+        self.assertLess(found.index(("--proc", "/proc")), empty)
+        self.assertLess(empty, found.index(("--bind", str(self.project), str(self.project))))
+        self.assertEqual(arguments[arguments.index("--") + 1 :], ["dbt"])
+
+    def test_by_default_the_network_and_system_sockets_stay(self):
+        found = mounted(self.sandbox.command(["claude"], self.mounts()))
+        self.assertNotIn(("--unshare-net",), found)
+        self.assertNotIn(("--tmpfs", "/run"), found)
+
+    def test_offline_a_folder_holding_the_system_sockets_is_refused(self):
+        with self.assertRaisesRegex(SandboxError, "holds /run"):
+            self.sandbox.command(["true"], self.mounts(read_only=(Path("/run"),), network=False))
+
     def test_refuses_to_show_a_folder_that_holds_the_home_or_temporary_folders(self):
         for shown in (self.home, self.root):
             with (
@@ -224,6 +247,50 @@ class BubblewrapCommandTest(unittest.TestCase):
         arguments = self.sandbox.command(["true"], self.mounts(writable=(config,)))
         self.assertIn(("--bind", str(config), str(config)), mounted(arguments))
 
+    def test_a_writable_folder_outside_every_hidden_folder_is_still_bound(self):
+        # Under the read-only root it would otherwise stay read-only.
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        sandbox = Bubblewrap("bwrap", home=self.home, scratch=())
+        arguments = sandbox.command(["true"], self.mounts(writable=(elsewhere,)))
+        self.assertIn(("--bind", str(elsewhere), str(elsewhere)), mounted(arguments))
+
+    def test_a_file_is_bound_read_write_at_its_target_after_the_folders(self):
+        config = self.root / "private"
+        config.mkdir()
+        sign_in = self.home / ".claude" / ".credentials.json"
+        sign_in.parent.mkdir()
+        sign_in.write_text("{}", encoding="utf-8")
+        target = config / ".credentials.json"
+        arguments = self.sandbox.command(
+            ["true"], self.mounts(writable=(config,), files=((sign_in, target),))
+        )
+        found = mounted(arguments)
+        self.assertEqual(found.count(("--bind", str(sign_in), str(target))), 1)
+        self.assertLess(
+            found.index(("--bind", str(config), str(config))),
+            found.index(("--bind", str(sign_in), str(target))),
+        )
+        # The file's own folder is not shown.
+        self.assertNotIn(str(sign_in.parent), options(arguments))
+
+    def test_a_file_needs_a_source_file_and_a_writable_place(self):
+        config = self.root / "private"
+        config.mkdir()
+        sign_in = self.root / "credentials.json"
+        sign_in.write_text("{}", encoding="utf-8")
+        cases = {
+            "is not a file": ((self.root / "missing", config / "x"),),
+            "is not a file ": ((config, config / "x"),),
+            "outside every folder": ((sign_in, self.root / "x"),),
+            "outside every folder ": ((sign_in, self.plugin / "x"),),
+        }
+        for message, files in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(SandboxError, message.strip()):
+                self.sandbox.command(["true"], self.mounts(writable=(config,), files=files))
+        # Inside the workspace is allowed.
+        self.sandbox.command(["true"], self.mounts(files=((sign_in, self.project / "x"),)))
+
     def test_unisolated_leaves_the_command_as_it_is(self):
         self.assertEqual(Unisolated().command(["claude", "-p"], self.mounts()), ["claude", "-p"])
 
@@ -255,7 +322,8 @@ class RunnerMountsTest(unittest.TestCase):
         self.assertNotIn(self.raw, other.read_only)
         for seen in (engineer, other):
             self.assertEqual(seen.hidden, (PLUGIN_DIR, self.out, self.checks))
-            self.assertEqual(seen.writable, (self.home / ".claude", self.home / ".claude.json"))
+            # Claude Code's config folder is not shown: run_agent gives a private one.
+            self.assertEqual((seen.writable, seen.files), ((), ()))
         # Claude Code, and the Python that runs dbt, are shown.
         self.assertIn(Path(self.claude).resolve().parent, engineer.read_only)
         self.assertIn(Path(sys.prefix).resolve(), engineer.read_only)
@@ -269,14 +337,22 @@ class RunnerMountsTest(unittest.TestCase):
         with self.assertRaisesRegex(EngineerError, "which the agent must not see"):
             run_agent(self.out / "project", ["true"], self.out / "agent.json", 5, sandbox, seen)
 
-    def test_claude_code_settings_follow_its_config_folder(self):
+    def test_the_sign_in_file_is_found_in_claude_codes_config_folder(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            self.assertIsNone(claude_sign_in())
+            (self.home / ".claude" / ".credentials.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(claude_sign_in(), self.home / ".claude" / ".credentials.json")
         config = self.root / "config"
-        config.mkdir()
+        (config / ".credentials.json").mkdir(parents=True)
         with mock.patch.dict(
             os.environ, {"HOME": str(self.home), "CLAUDE_CONFIG_DIR": str(config)}
         ):
-            seen = mounts(self.out / "project", self.out, self.checks, self.claude)
-        self.assertEqual(seen.writable, (config, self.home / ".claude.json"))
+            # A folder of that name is not a sign-in.
+            self.assertIsNone(claude_sign_in())
+            (config / ".credentials.json").rmdir()
+            (config / ".credentials.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(claude_sign_in(), config / ".credentials.json")
 
 
 # Writes the agent's view of Claude Code's tool cgroup setting to a file.
@@ -373,6 +449,24 @@ class DefaultSandboxTest(unittest.TestCase):
             ):
                 default_sandbox(platform="linux")
 
+    def test_refuses_a_bubblewrap_that_cannot_cut_the_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "bwrap"
+            fake.write_text(
+                '#!/bin/sh\nfor a in "$@"; do\n'
+                '  [ "$a" = --unshare-net ] && echo "bwrap: loopback: Operation not permitted" >&2'
+                " && exit 1\ndone\nexit 0\n",
+                encoding="utf-8",
+            )
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            with (
+                mock.patch("tenx.sandbox.which", return_value=str(fake)),
+                self.assertRaisesRegex(
+                    SandboxError, r"cannot set up a sandbox here \(bwrap: loopback"
+                ),
+            ):
+                default_sandbox(platform="linux")
+
 
 class PythonFoldersTest(unittest.TestCase):
     """The folders a command run with this Python needs, worked out by hand."""
@@ -461,7 +555,8 @@ class CommandLineSandboxTest(unittest.TestCase):
 
 
 # The hostile stand-in, started as the engineer inside the sandbox. It tries
-# to read everything in PROBE_SECRETS, to read the raw data, to write outside
+# to read everything in PROBE_SECRETS and the PROBE_TOKEN variable (itself and
+# through dbt's env_var), to read the raw data, to write outside
 # its project, and to read the declaration through dbt, then copies the
 # reference models (kept beside it) into the project. What it saw goes into
 # probes.json in the project, the one place a write is kept.
@@ -500,6 +595,10 @@ declaration = os.environ["PROBE_DECLARATION"]
 query = f"select contains(content, 'exclusions') as leaked from read_text('{declaration}')"
 code, output = dbt("show", "--inline", query, "--output", "json")
 found["dbt show"] = {"exit": code, "leaked": '"leaked": true' in output, "tail": output[-600:]}
+found["environment token"] = os.environ.get("PROBE_TOKEN")
+query = "select '{{ env_var(\"PROBE_TOKEN\", \"unset\") }}' as token"
+code, output = dbt("show", "--inline", query, "--output", "json")
+found["dbt env_var"] = {"exit": code, "leaked": "token-1234" in output, "tail": output[-600:]}
 model = here / "models" / "leak.py"
 model.parent.mkdir(exist_ok=True)
 model.write_text(
@@ -563,6 +662,8 @@ def probe_run(root: Path, writes: dict, *flags: str, sandbox=None) -> tuple[int,
         "PROBE_RAW": str(raw / "billing" / "customers.csv"),
         "PROBE_DECLARATION": str(checks),
         "PROBE_WRITES": json.dumps(writes),
+        "TENX_SANDBOX_ENV": "PROBE_SECRETS,PROBE_RAW,PROBE_DECLARATION,PROBE_WRITES",
+        "PROBE_TOKEN": "token-1234",
     }
     arguments = ["--raw", str(raw), "--goal", str(DEMO_GOAL), "--checks", str(checks)]
     arguments += ["--out", str(out), "--no-cross-source", *flags]
@@ -599,6 +700,8 @@ class UnisolatedProbeTest(unittest.TestCase):
             self.assertIn("id_test", probes["list"][str(root / "home" / ".ssh")])
             self.assertIn("agent.json.partial", probes["out_listing"])
             self.assertTrue(probes["dbt show"]["leaked"])
+            self.assertEqual(probes["environment token"], "token-1234")
+            self.assertTrue(probes["dbt env_var"]["leaked"], probes["dbt env_var"]["tail"])
             self.assertEqual(
                 probes["dbt python model"]["read"], (root / "checks" / "gate.json").read_text()
             )
@@ -644,6 +747,13 @@ class SandboxedRunTest(unittest.TestCase):
             for secret, seen in self.probes[way].items():
                 with self.subTest(way=way, secret=secret):
                     self.assertFalse(seen)
+
+    def test_a_secret_in_the_environment_cannot_be_read_by_python_or_dbt(self):
+        self.assertIsNone(self.probes["environment token"])
+        shown = self.probes["dbt env_var"]
+        self.assertEqual(shown["exit"], 0, shown["tail"])
+        self.assertFalse(shown["leaked"], shown["tail"])
+        self.assertIn("unset", shown["tail"])
 
     def test_the_run_folder_shows_only_the_project_and_the_add_on(self):
         self.assertEqual(self.probes["out_listing"], ["plugin", "project"])
@@ -748,6 +858,112 @@ class SandboxedTimeoutTest(unittest.TestCase):
             last = beat.read_text()
             time.sleep(1)
             self.assertEqual(beat.read_text(), last, "the agent's child is still running")
+
+
+# Tries, from inside the sandbox, a TCP listener on the host's loopback and
+# a Unix socket outside, and lists a folder.
+NETWORK_PROBE = """
+import json, os, socket, sys
+port, path, folder = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+found = {}
+try:
+    socket.create_connection(("127.0.0.1", port), timeout=5).sendall(b"tcp")
+    found["tcp"] = "connected"
+except OSError as error:
+    found["tcp"] = "blocked: " + type(error).__name__
+try:
+    unix = socket.socket(socket.AF_UNIX)
+    unix.settimeout(5)
+    unix.connect(path)
+    unix.sendall(b"unix")
+    found["unix"] = "connected"
+except OSError as error:
+    found["unix"] = "blocked: " + type(error).__name__
+found["listed"] = sorted(os.listdir(folder)) if os.path.isdir(folder) else None
+print(json.dumps(found))
+"""
+
+
+@needs_sandbox
+class NetworkProbeTest(unittest.TestCase):
+    """Offline, neither a listener on the host nor a system socket is reached.
+
+    The test's files are kept in the home folder and the sandbox is told
+    another home, so the socket folder is visible unless the sandbox hides
+    it; it stands for /run, which a test cannot write to.
+    """
+
+    def probe(self, network: bool) -> tuple[dict, list[bytes]]:
+        tmp = tempfile.TemporaryDirectory(dir=Path.home())
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        work, sockets = root / "work", root / "sockets"
+        work.mkdir()
+        sockets.mkdir()
+        path = sockets / "s.sock"
+        tcp = socket.create_server(("127.0.0.1", 0))
+        unix = socket.socket(socket.AF_UNIX)
+        unix.bind(str(path))
+        unix.listen()
+        received: list[bytes] = []
+
+        def serve(server):
+            server.settimeout(30)
+            try:
+                connection, _ = server.accept()
+                with connection:
+                    received.append(connection.recv(16))
+            except OSError:
+                pass
+
+        threads = [threading.Thread(target=serve, args=(s,)) for s in (tcp, unix)]
+        for thread in threads:
+            thread.start()
+        sandbox = Bubblewrap(default_sandbox().executable, home=root / "home")
+        python = os.path.normpath(os.path.abspath(sys.executable))
+        port = str(tcp.getsockname()[1])
+        command = [python, "-I", "-c", NETWORK_PROBE, port, str(path), str(sockets)]
+        seen = Mounts(workspace=work, read_only=python_folders(), network=network)
+        with mock.patch("tenx.sandbox.SOCKETS_FOLDER", sockets):
+            command = sandbox.command(command, seen)
+        finished = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        # Wake any listener still waiting, so that its thread ends.
+        for address, family in (
+            (("127.0.0.1", int(port)), socket.AF_INET),
+            (str(path), socket.AF_UNIX),
+        ):
+            with socket.socket(family) as poke:
+                poke.connect(address)
+        for thread in threads:
+            thread.join()
+        tcp.close()
+        unix.close()
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        return json.loads(finished.stdout), [data for data in received if data]
+
+    def test_offline_nothing_outside_is_reached(self):
+        found, received = self.probe(network=False)
+        self.assertTrue(found["tcp"].startswith("blocked"), found)
+        self.assertTrue(found["unix"].startswith("blocked"), found)
+        self.assertEqual(found["listed"], [])
+        self.assertEqual(received, [])
+
+    def test_with_the_network_both_are_reached(self):
+        found, received = self.probe(network=True)
+        self.assertEqual((found["tcp"], found["unix"]), ("connected", "connected"))
+        self.assertEqual(found["listed"], ["s.sock"])
+        self.assertEqual(sorted(received), [b"tcp", b"unix"])
+
+    def test_offline_the_real_sockets_folder_is_empty(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        command = default_sandbox().command(
+            # /run/user is emptied for every sandbox, so it is an empty folder here.
+            ["find", "/run", "-mindepth", "1", "!", "-path", "/run/user"],
+            Mounts(workspace=Path(tmp.name), network=False),
+        )
+        finished = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual((finished.returncode, finished.stdout), (0, ""), finished.stderr)
 
 
 if __name__ == "__main__":

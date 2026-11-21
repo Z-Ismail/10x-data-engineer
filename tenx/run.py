@@ -2,7 +2,7 @@
 
     python -m tenx.run run --raw <folder> --goal <file> --checks <file> --out <folder>
     python -m tenx.run diagnose --project <folder> --raw <folder> --goal <file> \
-        --checks <file> --out <folder>
+        --checks <file> --out <folder> [--fixes N]
     python -m tenx.run resume --out <folder>
     python -m tenx.run status --out <folder>
     python -m tenx.run approve --out <folder> [--contract <file>]
@@ -31,6 +31,13 @@ build's own records and says why, as ``DIAGNOSIS.md``. The agent can read
 files but not change them; its diagnosis is advice and changes neither the
 run's status nor its exit status.
 
+With ``--fixes N`` the engineer then fixes the run's copy of a project the
+gate failed, given what the gate found and the diagnosis, and the gate
+checks the fix; up to N fixes, each made only while the last one failed
+fewer checks than the one before. The project itself is still never
+written: the run proposes the fix as ``FIX.diff``, to review and apply
+yourself, and its status and exit status are then the fix's.
+
 With ``--review-spec`` (and ``--architect``) the run waits after the spec is
 written. ``approve`` carries it on with that spec, or with ``--contract``,
 a contract of your own (the architect's is ``contract.json`` beside its
@@ -53,6 +60,7 @@ import argparse
 import json
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from langgraph.types import Command
@@ -109,8 +117,18 @@ class RunError(Exception):
     """The run cannot start or resume, for the reason given."""
 
 
-def toolkit(request: EngineeringRequest, claude: str, sandbox: Sandbox, budget: Budget) -> Toolkit:
-    """The DuckDB, dbt and Claude Code ports a run works through."""
+def toolkit(
+    request: EngineeringRequest,
+    claude: str,
+    sandbox: Sandbox,
+    budget: Budget,
+    hide: tuple[Path, ...] = (),
+) -> Toolkit:
+    """The DuckDB, dbt and Claude Code ports a run works through.
+
+    ``hide`` names more paths that no agent and no build of the validator
+    may see, beside the run's folder, the add-on and the declaration.
+    """
     out = Path(request.out)
     plugin = out / PLUGIN_COPY_DIR
     if not plugin.is_dir():
@@ -118,7 +136,8 @@ def toolkit(request: EngineeringRequest, claude: str, sandbox: Sandbox, budget: 
     checks = Path(request.declaration)
 
     def seen(workspace: Path, raw: bool):
-        return mounts(workspace, out, checks, claude, raw=Path(request.raw) if raw else None)
+        shown = mounts(workspace, out, checks, claude, raw=Path(request.raw) if raw else None)
+        return replace(shown, hidden=(*shown.hidden, *hide))
 
     return Toolkit(
         profiler=DuckDBProfiler(),
@@ -129,7 +148,7 @@ def toolkit(request: EngineeringRequest, claude: str, sandbox: Sandbox, budget: 
         roles=ROLES,
         mounts=seen,
         plugin=plugin,
-        hidden=(PLUGIN_DIR, out),
+        hidden=(PLUGIN_DIR, out, *hide),
         budget=budget,
         timeout=TIMEOUT_MINUTES * 60,
     )
@@ -200,20 +219,35 @@ def diagnose(
     rules: Policy | None = None,
     sandbox: Sandbox | None = None,
     claude: str = "claude",
+    hide: tuple[Path, ...] = (),
+    fixes: int = 0,
+    skip_diagnosis: bool = False,
 ) -> dict:
     """Check an existing project, and diagnose it if it fails. Returns the final state.
 
     ``project`` is copied into the run's folder and never written; ``goal``
     says what it was built for, and ``checks`` is the gate's declaration.
+    ``hide`` names more paths the agent and the gate's builds must not see,
+    such as the folder the project came from; a resume does not keep them.
+    ``fixes`` is how many times the engineer may fix the run's copy of a
+    failed project; none by default. ``skip_diagnosis`` leaves the
+    diagnostics agent out, so a fix is made from the checks' findings alone;
+    it is for measuring what the diagnosis adds, and a resume keeps it.
     """
     project = Path(project)
     if not (project / "dbt_project.yml").is_file():
         raise RunError(f"{project} is not a project folder with a dbt_project.yml")
-    asked = {"workflow": "operate", "project": str(project.resolve()), "cross_source": False}
-    return _begin(raw, goal, checks, out, rules, sandbox, claude, asked)
+    asked = {
+        "workflow": "operate",
+        "project": str(project.resolve()),
+        "cross_source": False,
+        "repairs": fixes,
+        "skip_diagnosis": skip_diagnosis,
+    }
+    return _begin(raw, goal, checks, out, rules, sandbox, claude, asked, hide)
 
 
-def _begin(raw, goal, checks, out, rules, sandbox, claude, asked: dict) -> dict:
+def _begin(raw, goal, checks, out, rules, sandbox, claude, asked: dict, hide=()) -> dict:
     if not (PLUGIN_DIR / "agents" / "engineer.md").is_file():
         raise RunError(f"the agent definitions are not in {PLUGIN_DIR}; run from a clone")
     load_declaration(checks)
@@ -241,7 +275,9 @@ def _begin(raw, goal, checks, out, rules, sandbox, claude, asked: dict) -> dict:
         "request": request.dump(),
         "budget": ResourceBudget.of(budget.policy).dump(),
     }
-    return _invoke(request, begin, toolkit(request, claude, sandbox, budget))
+    # A path that does not exist holds nothing to hide, and cannot be masked.
+    hidden = tuple(Path(path).resolve() for path in hide if Path(path).exists())
+    return _invoke(request, begin, toolkit(request, claude, sandbox, budget, hidden))
 
 
 def saved(out: Path) -> tuple[dict, tuple[str, ...], list[str]]:
@@ -365,11 +401,23 @@ def summary(state: dict) -> str:
     if state.get("reason"):
         lines.append(f"reason: {state['reason']}")
     attempts = state.get("attempts") or {}
-    if "engineer" in attempts:
+    if request.workflow == "operate":
+        copy = out / "project"
+        if "engineer" not in attempts:
+            lines.append(f"project: {request.project} (checked as a copy in {copy})")
+        else:
+            first = state["validations"][0]
+            lines.append(f"project: {request.project} (not changed; checked as a copy in {copy})")
+            lines.append(
+                f"as handed over: {len(first['failures'])} of {first['checks']} checks failed "
+                "or could not run"
+            )
+            attempt = out / "engineer" / f"attempt-{attempts['engineer']}"
+            lines.append(f"fix: {attempt / 'work'}")
+            lines.append(f"proposed change: {attempt / 'FIX.diff'} (review it, then apply it)")
+    elif "engineer" in attempts:
         project = out / "engineer" / f"attempt-{attempts['engineer']}" / "work"
         lines.append(f"project: {project}")
-    elif request.workflow == "operate":
-        lines.append(f"project: {request.project} (checked as a copy in {out / 'project'})")
     text = "\n".join(lines) + "\n"
     if "gate" in attempts:
         gate = out / "gate" / f"attempt-{attempts['gate']}" / GATE_REPORT_FILE
@@ -457,6 +505,16 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--goal", type=Path, required=True, help="what the project is for")
     check.add_argument("--checks", type=Path, required=True, help="the gate's JSON declaration")
     check.add_argument("--out", type=Path, required=True, help="empty folder for the run")
+    check.add_argument(
+        "--fixes",
+        type=int,
+        choices=range(MAX_REPAIRS + 1),
+        default=0,
+        metavar="N",
+        help="if the gate fails the project, let the engineer fix the run's copy up to N "
+        f"times (0 to {MAX_REPAIRS}), given what failed and the diagnosis; your project is "
+        "never written, the fix is proposed as FIX.diff (default 0: no fix)",
+    )
     check.add_argument("--policy", type=Path, help="JSON spending policy (ceiling and caps)")
     check.add_argument(
         "--unisolated",
@@ -504,7 +562,14 @@ def main(argv: list[str] | None = None) -> int:
             rules = spending.load(args.policy) if args.policy else None
             sandbox = default_sandbox(unisolated=args.unisolated)
             state = diagnose(
-                args.project, args.raw, args.goal, args.checks, args.out, rules, sandbox
+                args.project,
+                args.raw,
+                args.goal,
+                args.checks,
+                args.out,
+                rules,
+                sandbox,
+                fixes=args.fixes,
             )
         elif args.command == "approve":
             answer = {"decision": "approve"}

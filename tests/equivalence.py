@@ -161,6 +161,16 @@ def probes(raw: Path, out: Path) -> list[str]:
     ]
 
 
+STAND_IN_SETTINGS = (
+    "STAND_IN_ANSWER",
+    "STAND_IN_ENGINEER",
+    "STAND_IN_MODELS",
+    "STAND_IN_PROBE",
+    "STAND_IN_HANG",
+    "STAND_IN_REPAIR_MODELS",
+)
+
+
 def environment(scenario: Scenario, claude: Path, raw: Path, out: Path) -> dict:
     return {
         "STAND_IN_ANSWER": json.dumps(scenario.answer or {}),
@@ -168,6 +178,8 @@ def environment(scenario: Scenario, claude: Path, raw: Path, out: Path) -> dict:
         "STAND_IN_MODELS": str(claude.parent / scenario.models),
         "STAND_IN_PROBE": json.dumps(probes(raw, out)),
         "PATH": f"{claude.parent}{os.pathsep}{os.environ['PATH']}",
+        # The stand-in's settings, passed into the sandbox by name.
+        "TENX_SANDBOX_ENV": ",".join(STAND_IN_SETTINGS),
     }
 
 

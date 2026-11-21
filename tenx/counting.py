@@ -28,7 +28,7 @@ from tenx.contract import ContractError, to_declaration
 from tenx.gate import GateError, claimed_by_filters, parse_declaration, source_files
 from tenx.ports import KeptRows
 from tenx.profile import relation
-from tenx.sandbox import Mounts, Sandbox, SandboxError, Unisolated, python_folders
+from tenx.sandbox import Mounts, Sandbox, SandboxError, Unisolated, environment, python_folders
 
 TIMEOUT_SECONDS = 300.0
 
@@ -83,10 +83,13 @@ def _queries(contract: dict, raw: Path) -> tuple[list, list[tuple]]:
     return queries, plan
 
 
-def _run(command: list[str], job: str, cwd: Path, timeout: float) -> tuple[int, str]:
+def _run(
+    command: list[str], job: str, cwd: Path, timeout: float, env: dict[str, str]
+) -> tuple[int, str]:
     process = subprocess.Popen(
         command,
         cwd=cwd,
+        env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -124,6 +127,8 @@ def count_kept(
         workspace=workdir,
         read_only=(raw, *python_folders()),
         hidden=tuple(path for path in hidden if path.exists()),
+        # The rules read only the raw files, so nothing they run can send them out.
+        network=False,
     )
     try:
         # The interpreter as given, made absolute and tidied but not resolved:
@@ -131,11 +136,12 @@ def count_kept(
         # finds the environment's packages. The process starts in workdir,
         # and the folders on a path such as ../venv/bin/python may be hidden.
         python = os.path.normpath(os.path.abspath(sys.executable))
-        command = (sandbox or Unisolated()).command([python, "-I", "-c", SCRIPT], seen)
+        sandbox = sandbox or Unisolated()
+        command = sandbox.command([python, "-I", "-c", SCRIPT], seen)
     except SandboxError as error:
         raise ContractError(f"the rules cannot be counted apart from the run: {error}") from error
     job = json.dumps({"raw": f"{raw}/", "queries": queries})
-    code, output = _run(command, job, workdir, timeout)
+    code, output = _run(command, job, workdir, timeout, environment(sandbox))
     try:
         answer = json.loads(output.strip().splitlines()[-1])
     except (ValueError, IndexError):

@@ -4,8 +4,75 @@ Notable changes to this project.
 
 ## Unreleased
 
+### Security
+
+- The gate's dbt builds and the contract's counting process run without the
+  network. They run agent-written code and need nothing from outside, but
+  could reach the internet and the system's sockets (such as Docker's). In
+  the sandbox they now get a network of their own with only a loopback
+  interface and an empty `/run`. The start-up check now needs bubblewrap to
+  be able to do this. Agents are unchanged.
+- The gate's dbt builds no longer load a `.env` file. dbt loads one from the
+  folder it starts in or any folder above it, so a file beside the project,
+  or above the gate's work folder, could set variables the sandbox keeps
+  out. A project that needs a variable from your environment can be given
+  it with `TENX_SANDBOX_ENV`.
+- Sandboxed agents no longer see Claude Code's config folder. They were
+  given `~/.claude` (or `CLAUDE_CONFIG_DIR`) and `~/.claude.json`
+  read-write, so an agent could read your other sessions and settings and
+  could write a hook into your settings that would run outside the sandbox
+  the next time you started Claude Code. Each sandboxed agent now gets an
+  empty config folder of its own, deleted when it ends, with only your
+  sign-in file shown in it. Your settings, hooks and plugins no longer apply
+  to sandboxed agents. Unisolated runs are unchanged.
+- A writable folder outside the home and temporary folders was shown to a
+  sandboxed process read-only; it is now writable as asked.
+- Only a short list of environment variables reaches the sandbox. Agents,
+  the gate's dbt builds and the contract's counting process ran with your
+  whole environment, so a token or cloud key in it could be read by an
+  agent and by any model it wrote (through dbt's `env_var` or a Python
+  model). They now get what any program needs (`PATH`, `HOME`, locale and
+  a few more), the agents also Claude Code's own `ANTHROPIC_` and `CLAUDE_`
+  variables and proxy settings, and anything you list in
+  `TENX_SANDBOX_ENV`. Unisolated runs are unchanged.
+
 ### Added
 
+- A measurement of what the diagnosis adds to a fix: `make fix-rates`
+  (`python -m tenx.fix_rates run | report`) fixes each failing-bed project
+  on four demo datasets twice with `python -m tenx.run diagnose --fixes 1`,
+  once with the Diagnostics agent's diagnosis and once with the
+  diagnostics step left out, and pairs the two. It reports the difference
+  in fix rates with Tango's 95% interval against a rule set before the
+  first run, the cost per passing fix of each, and each variant on its own
+  line; the bed and the measurement's folder are hidden from the gate and
+  the agents; it is priced before it starts and resumes where it stopped.
+  `tenx.run.diagnose` gains `skip_diagnosis` for it.
+
+- A fix step in the diagnose run: `python -m tenx.run diagnose ...
+  --fixes N` (`make diagnose PROJECT=<folder> FIXES=N`, off by default).
+  After the diagnosis, the engineer fixes the run's copy of a project the
+  gate failed, given `GATE_REPORT.md` and, on the first fix, `DIAGNOSIS.md`;
+  the gate checks each fix, up to N, while each fails fewer checks than the
+  one before. The project is never written: the change is proposed as
+  `FIX.diff`, which follows no link. The run's status and exit status are
+  the last fix's. The dbt adapter gains a capability to prepare a project
+  it did not make for the agent's own builds (its `profiles.yml`, and
+  `raw_dir` when the project sets no `vars`).
+
+- A measurement of the Diagnostics agent on the failing bed: `make
+  diagnosis-rates` (`python -m tenx.diagnosis_rates run | report`)
+  diagnoses each of the bed's thirteen projects on four demo datasets with
+  the same run as `python -m tenx.run diagnose`, with the bed and the
+  measurement's folder hidden from the gate and the agent, and scores each
+  diagnosis against the bed's answers: right only when the first cause
+  names the known kind of cause and model. It reports the accuracy with
+  its 95% interval, observed and planted variants apart and each variant
+  on its own line, against a rule set before the first run; it is priced
+  before it starts and resumes where it stopped. The first run gave 50 of
+  52 right (95% 87% to 99%), useful by that rule.
+- A diagnose run keeps the checked diagnosis as data in `diagnosis.json`
+  beside `DIAGNOSIS.md`.
 - The Diagnostics agent, in a new operate run: `python -m tenx.run
   diagnose --project <folder> --raw <folder> --goal <file> --checks <file>
   --out <folder>` (`make diagnose PROJECT=<folder>`) copies an existing

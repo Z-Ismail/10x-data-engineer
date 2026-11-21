@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from tenx.diagnostics import DIAGNOSIS_FILE
 from tenx.domain import MAX_REPAIRS, ValidationResult
 
 __all__ = ["MAX_REPAIRS", "REPORT_FILE", "Decision", "decide", "render"]
@@ -26,23 +27,52 @@ def _counted(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
-def render(validation: ValidationResult) -> str:
-    """``GATE_REPORT.md`` for a failed validation, as the engineer is given it."""
+def render(validation: ValidationResult, handed_over: bool = False, diagnosis: bool = False) -> str:
+    """``GATE_REPORT.md`` for a failed validation, as the engineer is given it.
+
+    ``handed_over`` says the project was not the engineer's own attempt but
+    one a person handed to the run (the operate workflow's first fix), and
+    ``diagnosis`` that ``DIAGNOSIS.md`` beside it says why it failed.
+    """
     if validation.passed:
         raise ValueError("a validation that passed has nothing to repair")
+    if diagnosis and not handed_over:
+        raise ValueError("a diagnosis is given only with a project handed over")
     failed = [f for f in validation.failures if f.status == "fail"]
     skipped = [f for f in validation.failures if f.status == "skip"]
     passed = validation.checks - len(validation.failures)
-    lines = [
-        "# What the checks found",
-        "",
-        "Your previous attempt was built from an empty database and checked after you",
-        f"finished. {_counted(len(failed), 'check')} failed, {passed} passed"
-        + (f" and {len(skipped)} could not run." if skipped else "."),
-        "The project in this folder is that attempt. Find the cause of each failure",
-        "and fix it in the models, for every row it affects, not only for the rows or",
-        "values named here, and run `dbt build` again before you stop.",
-    ]
+    counted = f"{_counted(len(failed), 'check')} failed, {passed} passed" + (
+        f" and {len(skipped)} could not run." if skipped else "."
+    )
+    if handed_over:
+        lines = [
+            "# What the checks found",
+            "",
+            "The project in this folder was handed over failing its checks. It was built",
+            f"from an empty database and checked. {counted}",
+            "It is not your previous attempt, but treat it as one: find the cause of each",
+            "failure and fix it in the models, for every row it affects, not only for the",
+            "rows or values named here, change nothing the failures do not need, and run",
+            "`dbt build` again before you stop.",
+        ]
+        if diagnosis:
+            lines += [
+                "",
+                f"`{DIAGNOSIS_FILE}` in this folder is a diagnosis of these failures, written by",
+                "another agent from the project, the checks' feedback and the build's log.",
+                "Its file and line numbers are this project's. Check each cause it names",
+                "against the project before you act on it; it can be wrong.",
+            ]
+    else:
+        lines = [
+            "# What the checks found",
+            "",
+            "Your previous attempt was built from an empty database and checked after you",
+            f"finished. {counted}",
+            "The project in this folder is that attempt. Find the cause of each failure",
+            "and fix it in the models, for every row it affects, not only for the rows or",
+            "values named here, and run `dbt build` again before you stop.",
+        ]
     for failure in failed:
         lines += ["", f"## {failure.check}: {failure.subject}", ""]
         lines.append(failure.feedback or "Failed. No more is said about this check.")

@@ -19,6 +19,7 @@ make engineer-graph    # the same as make engineer, as a graph that can be resum
 make engineer-architect  # the graph run on the brief goal, the Architect writing a spec first
 make engineer-reviewer   # the graph run with the reviewer reading the project after a gate pass
 make diagnose PROJECT=<folder>  # check an existing project on the demo data; diagnose it if it fails
+make diagnose PROJECT=<folder> FIXES=1  # the same, then propose a fix checked by the gate
 make equivalence       # the graph against the earlier runner with a stand-in for Claude Code
 make parity      # the graph against the earlier runner with real agents, 64 pairs;
                  # needs PARITY_FLAGS=--approve-cost (estimated above US$5)
@@ -148,7 +149,11 @@ Building a project runs its code, so on Linux each build runs in the same
 bubblewrap sandbox as the agents: it sees the project and the raw files
 read-only, can write only its own work folder, and cannot see the
 declaration, the expected rows or (for the second build) the first build's
-database. Where no sandbox can be set up the command refuses to build, with
+database. It is given only a short list of your environment variables
+(`PATH`, `HOME`, locale and a few more), so a model cannot read a secret in
+your environment through `env_var`. It has no network and sees none of the
+system's sockets, and dbt does not load a `.env` file for it (sandboxed or
+not). Where no sandbox can be set up the command refuses to build, with
 exit status 2; `--unisolated` builds without one, for a project you trust,
 and prints a warning. See [Security](security.md).
 
@@ -357,7 +362,10 @@ told to count rows with `dbt show` until every model reconciles with its
 source before it stops, but only the gate's verdict counts. The gate's
 declaration is never put in the agent's folder, so the agent cannot read the
 checks or change them, and on Linux the sandbox (see [Security](security.md))
-hides it from the agent whatever command the agent runs.
+hides it from the agent whatever command the agent runs. In the sandbox the
+agent's Claude Code uses an empty config folder of its own, deleted when it
+ends, with only your sign-in file in it, so your settings, hooks, plugins and
+other sessions are neither used nor visible.
 
 The agent runs in Claude Code without anyone at the keyboard. It may write
 files in its own folder and run `dbt`, and every other action is refused
@@ -918,7 +926,7 @@ names must exist, a staging model takes columns only from its own table,
 and a rule may name no table; a money column written with its own table in
 front is kept by its name),
 then counts each rule on the raw files, in a separate process in the
-sandbox (see [security](security.md)). A checked and counted contract is
+sandbox with no network (see [security](security.md)). A checked and counted contract is
 kept as `architect/attempt-<n>/contract.json`, with what each model keeps
 of its source in `counts.json`, and written out as `SPEC.md`,
 which every engineer attempt finds in its folder; the engineer is asked to
@@ -1520,7 +1528,8 @@ The answer is checked in code; an answer that fails the check, a crash, a
 packet that would hold a hidden file and a ceiling that cannot hold the
 call each leave the run without a diagnosis and a finding that says why.
 A checked diagnosis is printed after the gate's report and kept as
-`<out>/diagnostics/attempt-1/DIAGNOSIS.md`, with a `diagnostics` row in
+`<out>/diagnostics/attempt-1/DIAGNOSIS.md` (and, as data, `diagnosis.json`
+beside it), with a `diagnostics` row in
 `usage.json`. It is advice: the run's status and exit status are the
 gate's (1 when the project fails). `resume` and `status` work as for a
 build run.
@@ -1545,8 +1554,134 @@ In the first live runs (Claude Code 2.1.325, bubblewrap), on eight of the
 bed's thirteen variants one run each, every answer that passed the check
 named the bed's cause and model, at US$0.025 to 0.048 a call; one answer
 was refused because it read part of a check's feedback as the check's
-subject, which the backticks above now prevent. That is a handful of runs,
-not a rate; the bed is there to measure one.
+subject, which the backticks above now prevent. The measurement below
+gives the rate.
+
+### Fixing a diagnosed project
+
+```
+python -m tenx.run diagnose --project <folder> --raw demo/data --goal demo/goal.md \
+    --checks tests/fixtures/demo_gate.json --out runs/diagnose --fixes 1
+```
+
+With `--fixes N` (0 to 3, default 0) a project the gate fails is fixed
+after its diagnosis. The engineer agent (the same one a build run uses,
+with the same tools and sandbox, and the raw files readable) starts from
+the run's copy of the project, prepared so that its own `dbt build` runs
+in its folder: the run writes its own `profiles.yml` (a DuckDB file in
+the folder, under the project's profile name) and adds `raw_dir` to
+`dbt_project.yml` when the file has no `vars` block. A `vars` block
+without `raw_dir` is refused rather than rewritten, and the run then
+ends with the diagnosis and no fix. The first fix is given
+`GATE_REPORT.md`, which says the project was handed over failing its
+checks and what each check lets an agent be told, and, when there is a
+checked diagnosis, `DIAGNOSIS.md`, to check against the project before
+acting on it. The gate then checks the fix. Further fixes follow the
+build run's repair rule: each starts from the last fix with that fix's
+report (not the diagnosis, which describes the project as handed over),
+and is made only while the last one failed fewer checks than the one
+before.
+
+The project you named is never written. Each fix is
+`<out>/engineer/attempt-<n>/work`, and its change from the project as
+handed over is `FIX.diff` beside it, a unified diff that `git apply` or
+`patch -p1` applies in the project's folder. The diff is written outside
+the sandbox from files an agent wrote, so it never follows a link (a
+link is named with its target) and opens only regular files; a file that
+is not text or is over 256 KiB is named without its content; what dbt
+leaves after a build and the files the run gives the agent are left out.
+The run's status and exit status are then the last fix's (0 when it
+passes), and the summary names your project as not changed, how many
+checks it failed, the fix and `FIX.diff`. The diagnosis and each fix
+have a row in `usage.json`.
+
+On the demo data (seed 42, 200 companies) four failing-bed projects were
+fixed this way on 2026-11-17, in bubblewrap, each passing the gate at the
+first fix: yen amounts scaled by 100, refunds dropped, a misspelt column
+(eleven checks failed or not run) and a crosswalk on whole email
+addresses; US$0.08 to US$0.13 a run for the diagnosis and the fix
+together. Whether the diagnosis raises the fix rate over the gate's
+report alone is not measured yet; see "Measuring what the diagnosis adds
+to a fix" below.
+
+### Measuring the diagnosis
+
+`make diagnosis-rates` (`python -m tenx.diagnosis_rates run`) diagnoses
+every project of the failing bed (`tests/failing_bed.py`: thirteen
+projects that each fail the gate for one known cause, two copied from
+mistakes engineer agents made in live runs and eleven planted) once on
+each of four demo datasets (seeds 1, 7, 42 and 2026 at 200 companies), 52
+runs. Each run is `python -m tenx.run diagnose` on that project, in its own
+folder, with the bed (and its `answers.json`) and the measurement's folder
+hidden from the gate's builds and from the agent. Each diagnosis is then
+scored against the answers: it is **right** only when its first cause
+names both the bed's kind of cause and the bed's model. A run that ends
+without a checked diagnosis counts against the agent, as it gives a person
+nothing. Observed and planted variants are reported apart, and each
+variant on its own line.
+
+The accuracy is given with its 95% interval. The rule was set before the
+first run: the diagnosis is **useful** when the accuracy's lower limit is
+at least 60%, **weak** when its upper limit is below 60%, and otherwise
+**unclear**. The runs are priced before any starts (US$0.08 each, typical);
+above US$5 it stops unless given `--approve-cost`. A second start carries
+on where the first stopped; `python -m tenx.diagnosis_rates report
+runs/diagnosis-rates` prints the report again.
+
+The report of the run on 2026-11-16 (Claude Code 2.1.325, Claude Code's
+estimates, not a bill; the per-variant lines are shortened here):
+
+```
+Diagnosis measurement: useful
+
+Right (first cause names the cause and the model): 50 of 52 (96%, 95% 87% to 99%)
+  observed in live runs: 8 of 8 (100%, 95% 66% to 100%)
+  planted: 42 of 44 (95%, 95% 85% to 99%)
+Otherwise: model only 0, cause only 0, wrong 0, no cause 0, no diagnosis 2
+The known cause anywhere in the diagnosis: 50 of 52
+Variants right on every dataset: 12 of 13
+Cost: US$2.0890 for 52 runs, US$0.0402 a run, US$0.0418 a right diagnosis (Claude Code's own estimates)
+
+  crosswalk_inner_join          planted   2 of 4
+  (each of the other twelve variants 4 of 4)
+```
+
+### Measuring what the diagnosis adds to a fix
+
+`make fix-rates` (`python -m tenx.fix_rates run`) fixes every project of
+the failing bed once on each of the same four demo datasets in two ways:
+with `python -m tenx.run diagnose --fixes 1` as it is, where the engineer
+is given `DIAGNOSIS.md` beside what the gate found, and with the
+diagnostics step left out, where it is given what the gate found alone.
+Everything else is the same, so the two runs of a project on a dataset
+are a pair (52 pairs, 104 runs). A run is **fixed** when the gate passes
+the engineer's one fix. The bed and the measurement's folder are hidden
+from the gate's builds and from the agents, as in `make diagnosis-rates`.
+
+The report counts the pairs fixed both ways, only with the diagnosis,
+only without it and neither, and gives the difference in fix rates (with
+minus without) with Tango's 95% interval for paired proportions. The rule
+was set before the first run: the diagnosis **helps** when the interval
+lies above 0, **hurts** when it lies below 0, brings **no gain** when its
+upper limit is below 10 points, and is otherwise **unclear**. Beside it
+are the cost per passing fix in each way (the diagnosis counted in the
+runs that have it) and the ratio with its bootstrap interval, each
+variant on its own line, and each pair with how its diagnosis scored.
+The runs are priced before any starts (US$0.48 a pair at the typical
+figures, about US$25 for the whole bed), so it stops unless given
+`--approve-cost`; a second start carries on where the first stopped, and
+`python -m tenx.fix_rates report runs/fix-rates` prints the report again.
+It has not been run on the whole bed yet.
+
+Both runs without a diagnosis were of one variant, and in both the first
+cause the agent gave was the right one, but a fact quoted a check's line
+with a figure changed, so the code check refused the whole answer. The
+bed's causes are each a few lines of SQL in one model and the gate's
+report points at the model in twelve of the thirteen variants, so this
+says how the agent does on mistakes like these, not on larger projects
+with packages or macros. Runs of one variant are not independent, so the
+interval is narrower than it should be; by variant, twelve of thirteen
+were right on all four datasets.
 
 ## Run records and graph state
 
@@ -1594,7 +1729,7 @@ construct objects of any class a checkpoint file names.
 | `.claude-plugin/` | Manifest that tells Claude Code what the add-on contains |
 | `agents/` | The agents' instructions |
 | `demo/` | Demo data generator, and the goal for the demo data |
-| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer, the diagnosis packet and the check of a diagnosis |
+| `tenx/` | Python package: the source profiler, the overlap report, the gate, the agents' runner and its sandbox, the row sample, the checks of the cross-source agent's and scouts' answers, the comparison and its paired verdicts, the run artefacts, the spending policy, the capability interfaces, the run records, the review packet and the check of the reviewer's answer, the diagnosis packet and the check of a diagnosis, the proposed fix as a diff, and the measurements of the reviewer and of the diagnosis |
 | `tenx/adapters/`, `tenx/backends/` | The interfaces' implementations: DuckDB and dbt, and Claude Code |
 | `tenx/graph/` | The graph run: its steps, its state and checkpoints |
 | `tenx/run.py` | The graph run's command line: run, resume, status |

@@ -70,7 +70,8 @@ Building the project runs its code, and a dbt Python model can run any
 Python, so each build can run in a sandbox: it sees the project and the raw
 files read-only and can write only its own work folder, and the declaration
 and the expected rows are hidden from it, as is the first build's database
-from the second. The gate's own checks run outside the sandbox.
+from the second. It has no network. The gate's own checks run outside the
+sandbox.
 
 Usage:
     python -m tenx.gate path/to/project --raw demo/data --checks gate.json
@@ -110,6 +111,7 @@ from tenx.sandbox import (
     SandboxError,
     Unisolated,
     default_sandbox,
+    environment,
     python_folders,
 )
 
@@ -1147,6 +1149,12 @@ def check_repeat_build(
     return results
 
 
+# dbt loads a .env file from the folder it starts in or any folder above it,
+# which would let a file beside the project, or above the gate's work folder,
+# set variables for the build. The gate chooses how a project is built.
+BUILD_ENVIRONMENT = {"PYTHON_DOTENV_DISABLED": "1"}
+
+
 def build_project(
     project: Path,
     raw: Path,
@@ -1160,9 +1168,9 @@ def build_project(
     dbt runs as its own process, as its documentation asks of callers, and
     with a connection profile written here, so the project cannot choose
     which database it is built into. In ``sandbox`` the build sees the
-    project and the raw files read-only, can write only workdir, and never
-    sees the ``hidden`` paths. Returns the exit status, the parsed
-    ``run_results.json`` if dbt wrote one, and what dbt printed.
+    project and the raw files read-only, can write only workdir, never
+    sees the ``hidden`` paths and has no network. Returns the exit status,
+    the parsed ``run_results.json`` if dbt wrote one, and what dbt printed.
     """
     if not dbt_installed():
         raise GateError(
@@ -1206,14 +1214,20 @@ def build_project(
         workspace=workdir,
         read_only=(project, raw, *python_folders()),
         hidden=tuple(path for path in hidden if path.exists()),
+        # A build reads only local files, so nothing it runs can send them out.
+        network=False,
     )
+    sandbox = sandbox or Unisolated()
     try:
-        command = (sandbox or Unisolated()).command(command, seen)
+        command = sandbox.command(command, seen)
     except SandboxError as error:
         raise GateError(f"the build cannot be kept apart from the gate's files: {error}") from error
     finished = subprocess.run(
         command,
         cwd=project,
+        # In a sandbox, none of the caller's secrets: a model reads any
+        # variable it is given through env_var.
+        env=environment(sandbox) | BUILD_ENVIRONMENT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

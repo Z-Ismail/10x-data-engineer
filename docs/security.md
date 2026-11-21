@@ -10,14 +10,34 @@ Inside it the computer's files are read-only; the home folder, the temporary
 folders, the repository and the run folder are replaced by empty folders that
 are discarded when the agent stops; then only what the agent's work needs is
 put back: its own folder (the one place it can write), the add-on's agent
-files, the programs it runs (Claude Code, Python and dbt), Claude Code's own
-settings and sign-in, and, for the engineer, the raw files, read-only. The
+files, the programs it runs (Claude Code, Python and dbt) and, for the
+engineer, the raw files, read-only. The
 gate's expectations, the reference project the gate is tested against, the
 gate's work and the other agents' reports are never visible. The agent's
 processes have their own process ids and stop when the run stops. The tests
 check this by having a stand-in agent try to read each of these by `cat`, by
 Python, by `dbt show` with `read_text()` and by a dbt Python model, and run in
 CI.
+
+Claude Code's own config folder (`~/.claude`, or `CLAUDE_CONFIG_DIR`) and
+`~/.claude.json` are not shown either. They hold your settings, including
+hooks, which are commands Claude Code runs outside any sandbox, and the
+history of your other sessions; an agent that could write there could leave
+a hook that runs with your full rights the next time you start Claude Code.
+Each sandboxed agent instead gets an empty config folder of its own, in the
+temporary folder, which is deleted when the agent ends, also when it is
+stopped. Only your sign-in file, `.credentials.json`, if you have one, is
+shown inside it, read-write, so a token Claude Code refreshes during a run
+is saved where your own Claude Code reads it. Your settings, hooks, plugins
+and `CLAUDE.md` do not apply to sandboxed agents; managed settings kept
+outside the home folder stay readable to them. If the runner itself is
+killed outright, the folder (the agent's session files, never a copy of your
+sign-in) is left in the temporary folder. The tests plant settings, another
+session's transcript, `~/.claude.json` and a sign-in file in a home folder,
+and check that a stand-in agent sees only the sign-in file, cannot read the
+rest, cannot change your settings, that a write to the sign-in file reaches
+yours, and that its folder is gone afterwards. An unisolated run uses your
+own config folder.
 
 Claude Code can put the shell commands it runs into a memory cgroup, with
 `CLAUDE_CODE_TOOL_MEMORY_LIMIT`. Inside the sandbox `/sys` is read-only, so
@@ -106,7 +126,20 @@ The project it is pointed at is copied into the run's folder before
 anything reads it, outside the sandbox, so the copy follows no link (a
 link is copied as a link) and opens nothing that is not a regular file;
 the gate builds the copy in the sandbox, and the project itself is never
-written.
+written. When the diagnosis is measured on the failing bed (`make
+diagnosis-rates`), or fixes with and without it (`make fix-rates`), the
+bed with its answers and the measurement's folder, which holds the other
+runs' diagnoses and fixes, are hidden from the gate's builds and from the
+agents as well.
+
+With `--fixes`, the engineer that fixes a diagnosed project runs in the
+same sandbox as in a build run, on the run's copy, and the project itself
+is still never written. The run's own `profiles.yml` replaces any the
+project carries, so the agent's builds go to a DuckDB file in its folder,
+never to a connection the project names. The proposed change, `FIX.diff`,
+is written outside the sandbox from the agent's files, so it follows no
+link and opens nothing that is not a regular file; applying it is left to
+you.
 
 If bubblewrap is missing or cannot set up a sandbox, the runner refuses to
 start the agents and says how to install or allow it. On Ubuntu 24.04 and
@@ -122,14 +155,54 @@ records are in the run folder, which no agent can see. If the run is
 killed, bubblewrap stops the agent it had started (`--die-with-parent`); a
 run started with `--unisolated` leaves that agent running until it ends.
 
+Environment variables are kept out of the sandbox unless they are on a
+short list, because a model the agent writes can read any variable it is
+given (dbt's `env_var`, a Python model, a shell command). Every sandboxed
+process, the gate's builds and the contract's counting included, gets
+`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `TZ` and the
+`LC_` variables. The agents also get what Claude Code needs: variables
+starting `ANTHROPIC_` or `CLAUDE_`, the proxy variables (`HTTPS_PROXY`,
+`HTTP_PROXY`, `NO_PROXY`, either case), `NODE_EXTRA_CA_CERTS`,
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `DISABLE_TELEMETRY`,
+`DISABLE_ERROR_REPORTING`, `DISABLE_AUTOUPDATER`, `DO_NOT_TRACK` and
+`API_TIMEOUT_MS`. The temporary-folder variables are left out, so programs
+use the sandbox's own empty `/tmp`. To pass another variable, list its name
+in `TENX_SANDBOX_ENV` (names separated by commas); anything passed this way
+can be read by the agent and by the models it writes. Cloud credentials for
+Claude Code on Amazon Bedrock, Google Cloud or Microsoft Foundry are not on
+the list, for that reason. An unisolated run passes your whole environment.
+The tests plant secrets in the runner's environment and check that a
+stand-in agent, dbt's `env_var` in its build and in the gate's builds, and
+the counting process cannot read them, and that they can without the
+sandbox.
+
+The gate's builds and the contract's counting process run agent-written
+code but need nothing from outside, so they run without the network: they
+get a network of their own with only a loopback interface
+(`--unshare-net`), and `/run`, where the system keeps its sockets (Docker's,
+the D-Bus system bus), is an empty folder for them, because a socket file
+can still be reached through a read-only mount and from another network.
+The start-up check sets up such a sandbox, so a machine where bubblewrap
+cannot make one is refused before any agent runs. dbt loads a `.env` file
+from the folder it starts in or any folder above it; the gate's builds run
+with `PYTHON_DOTENV_DISABLED=1`, sandboxed or not, so a `.env` beside the
+project or above the gate's work folder cannot set variables for them. In
+the tests, a model in the gate's builds and a stand-in counting process try
+to connect to a listener on the host, which works only without the sandbox;
+a sandboxed process with the network cut cannot reach a socket file in the
+folder standing for `/run`, and reaches it with the network; and the gate's
+builds read variables from `.env` files only when the switch is taken away.
+
 What the sandbox does not cover yet:
 
-- The agents and the gate's builds keep network access, which Claude Code
-  needs, so an agent could send out the raw data it can read.
-- The agents and the gate's builds see your environment variables, and the
-  agents see Claude Code's settings folder, which holds its sign-in and the
-  history of your other sessions.
+- The agents keep network access, which Claude Code needs, so an agent
+  could send out the raw data it can read. They also keep `/run`, since
+  name lookups can depend on it, so an agent can reach the system's
+  sockets, Docker's included if your user may use it.
+- Socket files outside `/run` (in a folder of yours that is not hidden)
+  can be reached from any sandboxed process.
+- An agent can read and change its own sign-in file, as Claude Code itself
+  must, and with network access could send the token out.
 
 Until these are closed, run the agents only on data you would be comfortable
-sharing with them, and keep credentials out of the environment you run them
-from.
+sharing with them.

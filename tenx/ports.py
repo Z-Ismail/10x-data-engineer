@@ -26,6 +26,7 @@ __all__ = [
     "BUILD_RECORD",
     "COUNT_KEPT",
     "OVERLAP",
+    "PREPARE",
     "PROFILE",
     "RUN_AGENT",
     "SCAFFOLD",
@@ -57,6 +58,9 @@ VALIDATE = "validate a project"
 RUN_AGENT = "run an agent"
 STRUCTURED_ANSWER = "give a structured answer"
 COUNT_KEPT = "count the rows a spec keeps"
+# An engine that can make a project it did not scaffold buildable by an
+# agent in its own folder has a method prepare(project, raw) -> changed files.
+PREPARE = "prepare an existing project for an agent's builds"
 # A validator that keeps what its first build wrote about itself (results,
 # log) has a method build_record(workdir) -> {name: path}.
 BUILD_RECORD = "keep a record of its build"
@@ -227,6 +231,11 @@ class TransformEngine(Protocol):
     ) -> BuildResult:
         """Build the project from nothing into ``workdir``, in ``sandbox`` if given."""
         ...
+
+    # An engine with PREPARE also has:
+    # def prepare(self, project: Path, raw: Path) -> list[str]
+    # making a project it did not scaffold buildable by an agent in that
+    # folder, and naming the files it changed.
 
 
 @runtime_checkable

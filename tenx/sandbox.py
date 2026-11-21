@@ -23,6 +23,7 @@ import site
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
@@ -34,7 +35,46 @@ BWRAP_INSTALL = (
 # Folders every sandbox hides, as well as the home folder. /run/user holds
 # the user's own sockets, such as an ssh agent's.
 SCRATCH_FOLDERS = (Path("/tmp"), Path("/var/tmp"), Path("/run/user"))
+# Where the system keeps its sockets, such as Docker's and the D-Bus system
+# bus. A socket file stays reachable through a read-only mount and from
+# another network namespace, so a process cut off from the network is not
+# shown this folder either. Agents keep it: name lookups can depend on it.
+SOCKETS_FOLDER = Path("/run")
 CHECK_SECONDS = 30
+
+# What a sandboxed process is given of the caller's environment. Anything
+# else stays outside: a token, a cloud key or a database address in the
+# environment would otherwise be readable by the agent and by any model it
+# writes (dbt's env_var, a Python model, a shell command).
+#
+# Every sandboxed process: where programs are, who and where it is, and how
+# to print text. The temporary-folder variables are left out, so programs use
+# the sandbox's own empty /tmp.
+PROCESS_NAMES = frozenset({"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ"})
+PROCESS_PREFIXES = ("LC_",)
+# An agent as well: what Claude Code needs to sign in and reach its service,
+# through a proxy and with extra certificates if the user has them.
+AGENT_NAMES = frozenset(
+    {
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "DISABLE_TELEMETRY",
+        "DISABLE_ERROR_REPORTING",
+        "DISABLE_AUTOUPDATER",
+        "DO_NOT_TRACK",
+        "API_TIMEOUT_MS",
+    }
+)
+AGENT_PREFIXES = ("ANTHROPIC_", "CLAUDE_")
+# Names a user asks for on purpose, separated by commas.
+PASS_VARIABLE = "TENX_SANDBOX_ENV"
 
 
 class SandboxError(Exception):
@@ -48,13 +88,19 @@ class Mounts:
     ``workspace`` is the agent's working folder, and the only place it can
     write to and keep. ``writable`` paths can also be written, for a tool's
     own state. ``read_only`` paths are visible and cannot be changed.
-    ``hidden`` paths are never visible, wherever they are.
+    ``hidden`` paths are never visible, wherever they are. ``files`` are
+    single files shown read-write at another path, as (source, target)
+    pairs; the target must be inside the workspace or a writable folder.
+    With ``network`` off, the command has no network but its own loopback
+    and reaches none of the system's sockets.
     """
 
     workspace: Path
     read_only: tuple[Path, ...] = ()
     writable: tuple[Path, ...] = ()
     hidden: tuple[Path, ...] = ()
+    files: tuple[tuple[Path, Path], ...] = ()
+    network: bool = True
 
 
 class Sandbox(Protocol):
@@ -84,6 +130,30 @@ class Unisolated:
 
     def describe(self) -> str:
         return "none (--unisolated): the agents could read and change any file you can"
+
+
+def environment(
+    sandbox: Sandbox, source: Mapping[str, str] | None = None, agent: bool = False
+) -> dict[str, str]:
+    """The environment a process started in ``sandbox`` is given.
+
+    Without isolation, the whole of ``source`` (the caller's environment by
+    default), as the user chose. In a sandbox, only the names every process
+    needs, those an agent needs when ``agent`` is set, and any the user
+    names in TENX_SANDBOX_ENV.
+    """
+    source = os.environ if source is None else source
+    # Anything not marked unisolated is treated as a sandbox.
+    if not getattr(sandbox, "isolated", True):
+        return dict(source)
+    names, prefixes = set(PROCESS_NAMES), PROCESS_PREFIXES
+    if agent:
+        names |= AGENT_NAMES
+        prefixes += AGENT_PREFIXES
+    names |= {name.strip() for name in source.get(PASS_VARIABLE, "").split(",") if name.strip()}
+    return {
+        name: value for name, value in source.items() if name in names or name.startswith(prefixes)
+    }
 
 
 def python_folders() -> tuple[Path, ...]:
@@ -128,6 +198,8 @@ class Bubblewrap:
         hidden = [Path(path).resolve() for path in mounts.hidden]
         # Hidden folders are replaced by empty ones; files are dealt with last.
         scratch = [Path(self.home).resolve(), *self.scratch]
+        if not mounts.network:
+            scratch.append(SOCKETS_FOLDER)
         masks = scratch + [path for path in hidden if path.is_dir()]
         masks = sorted({path for path in masks if path.is_dir()}, key=_order)
         binds = [(workspace, "--bind")]
@@ -142,12 +214,13 @@ class Bubblewrap:
                         f"{path} holds {masked}, which the agent must not see; "
                         "use a folder that does not contain it"
                     )
-        # Only paths under a mask need putting back, and the workspace, since
-        # everything else is read-only.
+        files = self._files(mounts.files, [path for path, flag in binds if flag == "--bind"])
+        # Read-only paths need putting back only from under a mask, since
+        # everything else is read-only already; writable ones always.
         binds = [
             (path, flag)
             for path, flag in binds
-            if path == workspace or any(_inside(path, masked) for masked in masks)
+            if flag == "--bind" or any(_inside(path, masked) for masked in masks)
         ]
         binds.sort(key=lambda bind: _order(bind[0]))
         arguments = [self.executable, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
@@ -155,6 +228,8 @@ class Bubblewrap:
             arguments += ["--tmpfs", str(path)]
         for path, flag in binds:
             arguments += [flag, str(path), str(path)]
+        for source, target in files:
+            arguments += ["--bind", str(source), str(target)]
         # Folders put back are mounted after the empty ones, so a hidden path
         # inside one is visible again, as is a hidden file under no empty
         # folder at all. Either is covered last.
@@ -169,8 +244,28 @@ class Bubblewrap:
                 arguments += ["--tmpfs", str(path)]
             else:
                 arguments += ["--ro-bind", os.devnull, str(path)]
+        if not mounts.network:
+            arguments.append("--unshare-net")
         arguments += ["--unshare-pid", "--die-with-parent", "--chdir", str(workspace), "--"]
         return arguments + list(command)
+
+    @staticmethod
+    def _files(
+        files: tuple[tuple[Path, Path], ...], writable: list[Path]
+    ) -> list[tuple[Path, Path]]:
+        checked = []
+        for source, target in files:
+            source = Path(source).resolve()
+            target = Path(target).parent.resolve() / Path(target).name
+            if not source.is_file():
+                raise SandboxError(f"{source} is not a file, so it cannot be shown to the agent")
+            if not any(_inside(target.parent, folder) for folder in writable):
+                raise SandboxError(
+                    f"{target} is outside every folder the agent may write to, "
+                    "so a file cannot be shown there"
+                )
+            checked.append((source, target))
+        return checked
 
     def describe(self) -> str:
         return (
@@ -180,9 +275,13 @@ class Bubblewrap:
 
 
 def check(sandbox: Bubblewrap) -> None:
-    """Start an empty command in the sandbox, so a broken one fails before any agent runs."""
+    """Start an empty command in the sandbox, so a broken one fails before any agent runs.
+
+    The command is cut off from the network, as the gate's builds are, so a
+    sandbox that cannot do that fails here too.
+    """
     with tempfile.TemporaryDirectory() as folder:
-        probe = sandbox.command(["true"], Mounts(workspace=Path(folder)))
+        probe = sandbox.command(["true"], Mounts(workspace=Path(folder), network=False))
         try:
             finished = subprocess.run(
                 probe,

@@ -39,6 +39,7 @@ from tenx import reviewer as advice
 from tenx.contract import ContractError, check_contract, contract_from_report
 from tenx.cross_source import NOTES_FILE, NotesError, notes_from_report
 from tenx.cross_source import render as render_notes
+from tenx.diagnostics import DIAGNOSIS_FILE
 from tenx.domain import (
     AgentFinding,
     ApprovalDecision,
@@ -50,12 +51,14 @@ from tenx.domain import (
     ResourceBudget,
     ValidationResult,
 )
+from tenx.fix import FIX_FILE, proposed_diff
 from tenx.graph.state import FAILED, PASSED, RUNNING, STOPPED, GraphState, plain
 from tenx.ledger import Ledger, role_usage
 from tenx.policy import Budget, BudgetStop
 from tenx.ports import (
     COUNT_KEPT,
     OVERLAP,
+    PREPARE,
     PROFILE,
     RUN_AGENT,
     SCAFFOLD,
@@ -101,6 +104,8 @@ PROFILE_STEP, OVERLAP_STEP, CROSS_SOURCE_STEP = "profile", "overlap", "cross-sou
 ARCHITECT_STEP, REVIEW_STEP, ENGINEER_STEP = "architect", "review", "engineer"
 GATE_STEP, REVIEWER_STEP, REPORT_STEP = "gate", "reviewer", "report"
 INTAKE_STEP, DIAGNOSTICS_STEP = "intake", "diagnostics"
+# The operate workflow's copy of the project it was given, as it was given.
+HANDED_OVER = "handed over"
 WORK_STEPS = (
     INTAKE_STEP,
     PROFILE_STEP,
@@ -152,7 +157,11 @@ def _stop(reason: str, **update) -> dict:
 def steps_for(request: EngineeringRequest) -> tuple[str, ...]:
     """The steps the request's workflow takes, in order."""
     if request.workflow == "operate":
-        return (INTAKE_STEP, PROFILE_STEP, OVERLAP_STEP, GATE_STEP, DIAGNOSTICS_STEP, REPORT_STEP)
+        # With repairs the engineer fixes the project after its diagnosis; the
+        # plan lists steps in their fixed order, and the routes run them.
+        fix = (ENGINEER_STEP,) if request.repairs else ()
+        diagnose = () if request.skip_diagnosis else (DIAGNOSTICS_STEP,)
+        return (INTAKE_STEP, PROFILE_STEP, OVERLAP_STEP, *fix, GATE_STEP, *diagnose, REPORT_STEP)
     middle = (CROSS_SOURCE_STEP,) if request.cross_source else ()
     middle += (ARCHITECT_STEP,) if request.architect else ()
     middle += (REVIEW_STEP,) if request.review_spec else ()
@@ -161,7 +170,9 @@ def steps_for(request: EngineeringRequest) -> tuple[str, ...]:
     return (PROFILE_STEP, *overlap, *middle, ENGINEER_STEP, GATE_STEP, *after, REPORT_STEP)
 
 
-def needs(toolkit: Toolkit, steps: tuple[str, ...]) -> list[tuple[object, str]]:
+def needs(
+    toolkit: Toolkit, steps: tuple[str, ...], workflow: str = "build"
+) -> list[tuple[object, str]]:
     """Each port the steps use, with the capability each step asks of it."""
     wanted = {
         PROFILE_STEP: [(toolkit.profiler, PROFILE)],
@@ -172,7 +183,11 @@ def needs(toolkit: Toolkit, steps: tuple[str, ...]) -> list[tuple[object, str]]:
             (toolkit.backend, STRUCTURED_ANSWER),
             (toolkit.profiler, COUNT_KEPT),
         ],
-        ENGINEER_STEP: [(toolkit.engine, SCAFFOLD), (toolkit.backend, RUN_AGENT)],
+        # The engineer starts a project from nothing, or fixes one it was handed.
+        ENGINEER_STEP: [
+            (toolkit.engine, PREPARE if workflow == "operate" else SCAFFOLD),
+            (toolkit.backend, RUN_AGENT),
+        ],
         GATE_STEP: [(toolkit.validator, VALIDATE)],
         REVIEWER_STEP: [(toolkit.backend, RUN_AGENT), (toolkit.backend, STRUCTURED_ANSWER)],
         DIAGNOSTICS_STEP: [(toolkit.backend, RUN_AGENT), (toolkit.backend, STRUCTURED_ANSWER)],
@@ -191,7 +206,7 @@ def plan_node(toolkit: Toolkit):
         steps = steps_for(request)
         chosen = ExecutionPlan(workflow=request.workflow, steps=steps).dump()
         try:
-            for port, capability in needs(toolkit, steps):
+            for port, capability in needs(toolkit, steps, request.workflow):
                 require(port, capability)
         except UnsupportedCapability as missing:
             return _stop(str(missing), plan=chosen, budget=budget)
@@ -585,16 +600,26 @@ def _after_review(state: GraphState) -> str:
 
 
 # What a repair does not carry over from the attempt it repairs: what the
-# build left, and the inputs, which every attempt is given afresh.
-NOT_CARRIED = ("target", "logs", "dbt_packages", "*.duckdb", "*.duckdb.wal", "*.duckdb.tmp")
+# build left (dbt keeps an anonymous ID in .user.yml beside profiles.yml).
+NOT_CARRIED = (
+    "target",
+    "logs",
+    "dbt_packages",
+    ".user.yml",
+    "*.duckdb",
+    "*.duckdb.wal",
+    "*.duckdb.tmp",
+)
+
+
+# What an attempt is given afresh, so neither carried over nor part of a fix.
+INPUTS = (GOAL_FILE, SOURCE_PROFILES_DIR, NOTES_FILE, SPEC_FILE, REPAIR_FILE, DIAGNOSIS_FILE)
 
 
 def _carry_over(previous: Path, work: Path) -> None:
     # A link the agent made is copied as a link, never followed: this copy
     # runs outside the sandbox and could otherwise read what the agent cannot.
-    skip = shutil.ignore_patterns(
-        *NOT_CARRIED, GOAL_FILE, SOURCE_PROFILES_DIR, NOTES_FILE, SPEC_FILE, REPAIR_FILE
-    )
+    skip = shutil.ignore_patterns(*NOT_CARRIED, *INPUTS)
     shutil.copytree(previous, work, symlinks=True, ignore=skip, dirs_exist_ok=True)
 
 
@@ -604,11 +629,18 @@ def engineer_node(toolkit: Toolkit):
     After a failed validation the same step repairs: the new attempt starts
     from the project just checked, with ``GATE_REPORT.md`` saying what the
     validator let it be told of each failure.
+
+    In the operate workflow every attempt is a fix of the project handed
+    over: the first starts from the run's copy of it, prepared by the
+    transform engine so the agent can build it, with ``DIAGNOSIS.md`` when
+    the diagnostics agent gave one; each attempt's change from that copy is
+    written as ``FIX.diff``.
     """
 
     def engineer(state: GraphState) -> dict:
         request = _request(state)
         found = state["artefacts"]
+        operate = request.workflow == "operate"
         profiles = Path(found["profiles"]["path"])
         files = {"goal": Path(request.goal), "profiles": profiles}
         if "joins" in found:
@@ -621,11 +653,34 @@ def engineer_node(toolkit: Toolkit):
         if repairing:
             files["previous project"] = Path(found["project"]["path"])
             files["gate report"] = Path(found["gate report"]["path"])
+        # Only the first fix starts from the project the diagnosis describes.
+        handed_over = operate and len(checked) == 1
+        if handed_over and "diagnosis" in found:
+            files["diagnosis"] = Path(found["diagnosis"]["path"])
+        if operate:
+            from tenx.graph.operate import fix_base
+
+            try:
+                base = fix_base(toolkit, request, Path(found[HANDED_OVER]["path"]))
+            except PlatformError as problem:
+                finding = AgentFinding(
+                    agent=ENGINEER_STEP, claim=f"no fix: {problem}", kind="fact", confidence="high"
+                )
+                return plain(
+                    {"findings": [finding.dump()], "status": FAILED, "reason": f"no fix: {problem}"}
+                )
 
         def prepare(work: Path) -> None:
             if repairing:
                 _carry_over(files["previous project"], work)
-                artefacts.write_text(work / REPAIR_FILE, render_repair(checked[-1]))
+                if operate:
+                    toolkit.engine.prepare(work, Path(request.raw))
+                report = render_repair(
+                    checked[-1], handed_over=handed_over, diagnosis="diagnosis" in files
+                )
+                artefacts.write_text(work / REPAIR_FILE, report)
+                if "diagnosis" in files:
+                    shutil.copyfile(files["diagnosis"], work / DIAGNOSIS_FILE)
             else:
                 toolkit.engine.scaffold(work, Path(request.raw))
             shutil.copytree(profiles, work / SOURCE_PROFILES_DIR)
@@ -639,12 +694,19 @@ def engineer_node(toolkit: Toolkit):
         if call.stopped:
             if repairing:
                 # The run has a verdict; not affording a repair leaves it failed.
-                reason = f"no repair made: {call.update['reason']}"
+                reason = f"no {'fix' if operate else 'repair'} made: {call.update['reason']}"
                 return {**call.update, "status": FAILED, "reason": reason}
             return call.update
         number = call.update["attempts"][ENGINEER_STEP]
         project = ArtefactRef.of("project", call.folder / artefacts.WORK_DIR, attempt=number)
-        update = {**call.update, "artefacts": {"project": project.dump()}, "rounds": [number]}
+        made = {"project": project.dump()}
+        if operate:
+            diff = call.folder / FIX_FILE
+            artefacts.write_text(
+                diff, proposed_diff(base, Path(project.path), (*NOT_CARRIED, *INPUTS))
+            )
+            made["fix"] = ArtefactRef.of("fix", diff, attempt=number).dump()
+        update = {**call.update, "artefacts": made, "rounds": [number]}
         if "spec" in files:
             given = ArtefactRef.load(spec)
             held = Path(project.path) / SPEC_FILE
@@ -831,7 +893,11 @@ def ledger(state: GraphState, roles: Mapping[str, Role], sandbox: str) -> Ledger
         (cost["node"], cost["attempt"]): cost["outcome"] for cost in state.get("costs") or []
     }
     used = []
-    for step in (CROSS_SOURCE_STEP, ARCHITECT_STEP, ENGINEER_STEP, DIAGNOSTICS_STEP, REVIEWER_STEP):
+    order = (CROSS_SOURCE_STEP, ARCHITECT_STEP, ENGINEER_STEP, DIAGNOSTICS_STEP, REVIEWER_STEP)
+    if _request(state).workflow == "operate":
+        # The diagnosis comes before any fix.
+        order = (DIAGNOSTICS_STEP, ENGINEER_STEP)
+    for step in order:
         last = (state.get("attempts") or {}).get(step)
         if last is None:
             continue
@@ -872,8 +938,27 @@ def report_node(toolkit: Toolkit):
     return report
 
 
+def _operate_next(step: str, state: GraphState) -> str:
+    """The operate workflow's route: check, diagnose, then fix while fixes may help."""
+    if state.get("status") != RUNNING:
+        return REPORT_STEP
+    if step == ENGINEER_STEP:
+        return GATE_STEP
+    checked = [ValidationResult.load(item) for item in state.get("validations") or []]
+    if step == GATE_STEP and len(checked) == 1 and not _request(state).skip_diagnosis:
+        # The diagnostics step says why it gives no diagnosis of a passed project.
+        return DIAGNOSTICS_STEP
+    if step in (GATE_STEP, DIAGNOSTICS_STEP):
+        fix = checked and decide(checked, _request(state).repairs).repair
+        return ENGINEER_STEP if fix else REPORT_STEP
+    order = (PLAN, INTAKE_STEP, PROFILE_STEP, OVERLAP_STEP, GATE_STEP)
+    return order[order.index(step) + 1]
+
+
 def _after(step: str):
     def route(state: GraphState) -> str:
+        if state.get("status") == RUNNING and _request(state).workflow == "operate":
+            return _operate_next(step, state)
         if state.get("status") != RUNNING:
             return REPORT_STEP
         steps = ExecutionPlan.load(state["plan"]).steps
@@ -887,15 +972,14 @@ def _after_gate(state: GraphState) -> str:
     """Repair a failed project while repairs remain and each one makes headway."""
     if state.get("status") != RUNNING:
         return REPORT_STEP
+    if _request(state).workflow == "operate":
+        return _operate_next(GATE_STEP, state)
     checked = [ValidationResult.load(item) for item in state.get("validations") or []]
     if checked and decide(checked, _request(state).repairs).repair:
         return ENGINEER_STEP
     # Only a project the validator passed is reviewed.
     if checked and checked[-1].passed and _request(state).reviewer:
         return REVIEWER_STEP
-    # The diagnostics step says why it gives no diagnosis of a passed project.
-    if checked and _request(state).workflow == "operate":
-        return DIAGNOSTICS_STEP
     return REPORT_STEP
 
 

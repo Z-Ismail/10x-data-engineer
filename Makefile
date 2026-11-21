@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer diagnose equivalence compare parity repairs compare-architect review-rates clean
+.PHONY: install test test-parallel lint demo-data profile overlap engineer engineer-alone engineer-scouts engineer-graph engineer-brief engineer-architect engineer-reviewer diagnose equivalence compare parity repairs compare-architect review-rates diagnosis-rates fix-rates clean
 
 install:
 	$(PYTHON) -m pip install -e ".[pipeline,graph]"
@@ -65,13 +65,15 @@ engineer-reviewer: demo-data
 
 # Check an existing project on the demo data and, if the gate fails it, have
 # the diagnostics agent say why (DIAGNOSIS.md); the project is not changed.
-# Needs Claude Code, signed in. Failing projects to try:
+# With FIXES=N the engineer then fixes a copy, checked again by the gate and
+# proposed as FIX.diff. Needs Claude Code, signed in. Failing projects to try:
 # python tests/failing_bed.py --out runs/bed (then PROJECT=runs/bed/projects/project-01)
+FIXES ?= 0
 diagnose: demo-data
-	@test -n "$(PROJECT)" || { echo "usage: make diagnose PROJECT=<folder>" >&2; exit 2; }
+	@test -n "$(PROJECT)" || { echo "usage: make diagnose PROJECT=<folder> [FIXES=N]" >&2; exit 2; }
 	rm -rf runs/diagnose
 	$(PYTHON) -m tenx.run diagnose --project "$(PROJECT)" --raw demo/data --goal demo/goal.md \
-		--checks tests/fixtures/demo_gate.json --out runs/diagnose
+		--checks tests/fixtures/demo_gate.json --out runs/diagnose --fixes $(FIXES)
 
 # The old runner and the graph on the eight comparison datasets, with a
 # stand-in for Claude Code that answers the same way every time: every
@@ -193,6 +195,48 @@ review-rates:
 	$(PYTHON) -m tenx.review_rates run --bed $(REVIEW_BED) --goal demo/goal.md \
 		--checks tests/fixtures/demo_gate.json --out runs/review-rates $(REVIEW_FLAGS) \
 		$(foreach seed,$(REVIEW_SEEDS),--raw s$(seed)-200=$(COMPARE_DATA)/s$(seed)-200/data)
+
+# The Diagnostics agent on the failing bed: thirteen projects that each fail
+# the gate for one known reason, each diagnosed once on each of
+# DIAGNOSIS_SEEDS at 200 companies (52 diagnoses by default) by the same run
+# as make diagnose, scored against the bed's answers, which the agent never
+# sees. Needs Claude Code, signed in, and bubblewrap. Run it again to resume.
+# Estimated above US$5, it stops before any diagnosis unless approved:
+# make diagnosis-rates DIAGNOSIS_FLAGS=--approve-cost
+DIAGNOSIS_SEEDS ?= 1 7 42 2026
+DIAGNOSIS_FLAGS ?=
+FAILING_BED = runs/failing-bed
+
+diagnosis-rates:
+	@for seed in $(DIAGNOSIS_SEEDS); do \
+		folder=$(COMPARE_DATA)/s$$seed-200; \
+		test -d $$folder/data || $(PYTHON) demo/generate.py --seed $$seed --companies 200 \
+			--out $$folder/data --answers-out $$folder/answers || exit 1; \
+	done
+	test -f $(FAILING_BED)/answers.json || $(PYTHON) tests/failing_bed.py --out $(FAILING_BED)
+	$(PYTHON) -m tenx.diagnosis_rates run --bed $(FAILING_BED) --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/diagnosis-rates $(DIAGNOSIS_FLAGS) \
+		$(foreach seed,$(DIAGNOSIS_SEEDS),--raw s$(seed)-200=$(COMPARE_DATA)/s$(seed)-200/data)
+
+# What the diagnosis adds to a fix: each failing-bed project fixed once on
+# each of DIAGNOSIS_SEEDS at 200 companies by the same run as
+# make diagnose FIXES=1, once with the Diagnostics agent's diagnosis and
+# once without it (52 pairs, 104 runs by default), paired and compared.
+# Needs Claude Code, signed in, and bubblewrap. Run it again to resume.
+# Estimated above US$5, it stops before any run unless approved:
+# make fix-rates FIX_FLAGS=--approve-cost
+FIX_FLAGS ?=
+
+fix-rates:
+	@for seed in $(DIAGNOSIS_SEEDS); do \
+		folder=$(COMPARE_DATA)/s$$seed-200; \
+		test -d $$folder/data || $(PYTHON) demo/generate.py --seed $$seed --companies 200 \
+			--out $$folder/data --answers-out $$folder/answers || exit 1; \
+	done
+	test -f $(FAILING_BED)/answers.json || $(PYTHON) tests/failing_bed.py --out $(FAILING_BED)
+	$(PYTHON) -m tenx.fix_rates run --bed $(FAILING_BED) --goal demo/goal.md \
+		--checks tests/fixtures/demo_gate.json --out runs/fix-rates $(FIX_FLAGS) \
+		$(foreach seed,$(DIAGNOSIS_SEEDS),--raw s$(seed)-200=$(COMPARE_DATA)/s$(seed)-200/data)
 
 clean:
 	rm -rf demo/data demo/answers profiles runs
