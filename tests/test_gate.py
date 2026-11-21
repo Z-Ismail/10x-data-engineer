@@ -1553,13 +1553,15 @@ class BuildSandbox(unittest.TestCase):
         first, second = sandbox.seen
         shown = (self.project, self.raw, *python_folders())
         hidden = (self.checks, elsewhere, self.work / "expected.duckdb")
-        self.assertEqual(first, Mounts(self.work, read_only=shown, hidden=hidden))
+        # Neither build has the network.
+        self.assertEqual(first, Mounts(self.work, read_only=shown, hidden=hidden, network=False))
         self.assertEqual(
             second,
             Mounts(
                 self.work / "repeat",
                 read_only=shown,
                 hidden=(*hidden, self.work / "build.duckdb"),
+                network=False,
             ),
         )
 
