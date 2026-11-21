@@ -127,6 +127,8 @@ def count_kept(
         workspace=workdir,
         read_only=(raw, *python_folders()),
         hidden=tuple(path for path in hidden if path.exists()),
+        # The rules read only the raw files, so nothing they run can send them out.
+        network=False,
     )
     try:
         # The interpreter as given, made absolute and tidied but not resolved:

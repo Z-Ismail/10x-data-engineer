@@ -176,10 +176,31 @@ stand-in agent, dbt's `env_var` in its build and in the gate's builds, and
 the counting process cannot read them, and that they can without the
 sandbox.
 
+The gate's builds and the contract's counting process run agent-written
+code but need nothing from outside, so they run without the network: they
+get a network of their own with only a loopback interface
+(`--unshare-net`), and `/run`, where the system keeps its sockets (Docker's,
+the D-Bus system bus), is an empty folder for them, because a socket file
+can still be reached through a read-only mount and from another network.
+The start-up check sets up such a sandbox, so a machine where bubblewrap
+cannot make one is refused before any agent runs. dbt loads a `.env` file
+from the folder it starts in or any folder above it; the gate's builds run
+with `PYTHON_DOTENV_DISABLED=1`, sandboxed or not, so a `.env` beside the
+project or above the gate's work folder cannot set variables for them. In
+the tests, a model in the gate's builds and a stand-in counting process try
+to connect to a listener on the host, which works only without the sandbox;
+a sandboxed process with the network cut cannot reach a socket file in the
+folder standing for `/run`, and reaches it with the network; and the gate's
+builds read variables from `.env` files only when the switch is taken away.
+
 What the sandbox does not cover yet:
 
-- The agents and the gate's builds keep network access, which Claude Code
-  needs, so an agent could send out the raw data it can read.
+- The agents keep network access, which Claude Code needs, so an agent
+  could send out the raw data it can read. They also keep `/run`, since
+  name lookups can depend on it, so an agent can reach the system's
+  sockets, Docker's included if your user may use it.
+- Socket files outside `/run` (in a folder of yours that is not hidden)
+  can be reached from any sandboxed process.
 - An agent can read and change its own sign-in file, as Claude Code itself
   must, and with network access could send the token out.
 

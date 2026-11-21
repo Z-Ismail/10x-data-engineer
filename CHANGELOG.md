@@ -6,6 +6,17 @@ Notable changes to this project.
 
 ### Security
 
+- The gate's dbt builds and the contract's counting process run without the
+  network. They run agent-written code and need nothing from outside, but
+  could reach the internet and the system's sockets (such as Docker's). In
+  the sandbox they now get a network of their own with only a loopback
+  interface and an empty `/run`. The start-up check now needs bubblewrap to
+  be able to do this. Agents are unchanged.
+- The gate's dbt builds no longer load a `.env` file. dbt loads one from the
+  folder it starts in or any folder above it, so a file beside the project,
+  or above the gate's work folder, could set variables the sandbox keeps
+  out. A project that needs a variable from your environment can be given
+  it with `TENX_SANDBOX_ENV`.
 - Sandboxed agents no longer see Claude Code's config folder. They were
   given `~/.claude` (or `CLAUDE_CONFIG_DIR`) and `~/.claude.json`
   read-write, so an agent could read your other sessions and settings and

@@ -16,9 +16,12 @@ import io
 import json
 import os
 import shutil
+import socket
 import stat
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -192,6 +195,25 @@ class BubblewrapCommandTest(unittest.TestCase):
         sandbox = Bubblewrap("bwrap", home=self.home, scratch=())
         arguments = sandbox.command(["true"], self.mounts(hidden=(self.repo, self.out, secret)))
         self.assertEqual(mounted(arguments)[-4], ("--ro-bind", os.devnull, str(secret)))
+
+    def test_offline_the_command_has_its_own_network_and_no_system_sockets(self):
+        arguments = self.sandbox.command(["dbt"], self.mounts(network=False))
+        found = mounted(arguments)
+        self.assertIn(("--unshare-net",), found)
+        # Hidden with the other emptied folders, before anything is put back.
+        empty = found.index(("--tmpfs", "/run"))
+        self.assertLess(found.index(("--proc", "/proc")), empty)
+        self.assertLess(empty, found.index(("--bind", str(self.project), str(self.project))))
+        self.assertEqual(arguments[arguments.index("--") + 1 :], ["dbt"])
+
+    def test_by_default_the_network_and_system_sockets_stay(self):
+        found = mounted(self.sandbox.command(["claude"], self.mounts()))
+        self.assertNotIn(("--unshare-net",), found)
+        self.assertNotIn(("--tmpfs", "/run"), found)
+
+    def test_offline_a_folder_holding_the_system_sockets_is_refused(self):
+        with self.assertRaisesRegex(SandboxError, "holds /run"):
+            self.sandbox.command(["true"], self.mounts(read_only=(Path("/run"),), network=False))
 
     def test_refuses_to_show_a_folder_that_holds_the_home_or_temporary_folders(self):
         for shown in (self.home, self.root):
@@ -423,6 +445,24 @@ class DefaultSandboxTest(unittest.TestCase):
                 mock.patch("tenx.sandbox.which", return_value=str(fake)),
                 self.assertRaisesRegex(
                     SandboxError, r"cannot set up a sandbox here \(bwrap: setting up uid map"
+                ),
+            ):
+                default_sandbox(platform="linux")
+
+    def test_refuses_a_bubblewrap_that_cannot_cut_the_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "bwrap"
+            fake.write_text(
+                '#!/bin/sh\nfor a in "$@"; do\n'
+                '  [ "$a" = --unshare-net ] && echo "bwrap: loopback: Operation not permitted" >&2'
+                " && exit 1\ndone\nexit 0\n",
+                encoding="utf-8",
+            )
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            with (
+                mock.patch("tenx.sandbox.which", return_value=str(fake)),
+                self.assertRaisesRegex(
+                    SandboxError, r"cannot set up a sandbox here \(bwrap: loopback"
                 ),
             ):
                 default_sandbox(platform="linux")
@@ -818,6 +858,112 @@ class SandboxedTimeoutTest(unittest.TestCase):
             last = beat.read_text()
             time.sleep(1)
             self.assertEqual(beat.read_text(), last, "the agent's child is still running")
+
+
+# Tries, from inside the sandbox, a TCP listener on the host's loopback and
+# a Unix socket outside, and lists a folder.
+NETWORK_PROBE = """
+import json, os, socket, sys
+port, path, folder = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+found = {}
+try:
+    socket.create_connection(("127.0.0.1", port), timeout=5).sendall(b"tcp")
+    found["tcp"] = "connected"
+except OSError as error:
+    found["tcp"] = "blocked: " + type(error).__name__
+try:
+    unix = socket.socket(socket.AF_UNIX)
+    unix.settimeout(5)
+    unix.connect(path)
+    unix.sendall(b"unix")
+    found["unix"] = "connected"
+except OSError as error:
+    found["unix"] = "blocked: " + type(error).__name__
+found["listed"] = sorted(os.listdir(folder)) if os.path.isdir(folder) else None
+print(json.dumps(found))
+"""
+
+
+@needs_sandbox
+class NetworkProbeTest(unittest.TestCase):
+    """Offline, neither a listener on the host nor a system socket is reached.
+
+    The test's files are kept in the home folder and the sandbox is told
+    another home, so the socket folder is visible unless the sandbox hides
+    it; it stands for /run, which a test cannot write to.
+    """
+
+    def probe(self, network: bool) -> tuple[dict, list[bytes]]:
+        tmp = tempfile.TemporaryDirectory(dir=Path.home())
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        work, sockets = root / "work", root / "sockets"
+        work.mkdir()
+        sockets.mkdir()
+        path = sockets / "s.sock"
+        tcp = socket.create_server(("127.0.0.1", 0))
+        unix = socket.socket(socket.AF_UNIX)
+        unix.bind(str(path))
+        unix.listen()
+        received: list[bytes] = []
+
+        def serve(server):
+            server.settimeout(30)
+            try:
+                connection, _ = server.accept()
+                with connection:
+                    received.append(connection.recv(16))
+            except OSError:
+                pass
+
+        threads = [threading.Thread(target=serve, args=(s,)) for s in (tcp, unix)]
+        for thread in threads:
+            thread.start()
+        sandbox = Bubblewrap(default_sandbox().executable, home=root / "home")
+        python = os.path.normpath(os.path.abspath(sys.executable))
+        port = str(tcp.getsockname()[1])
+        command = [python, "-I", "-c", NETWORK_PROBE, port, str(path), str(sockets)]
+        seen = Mounts(workspace=work, read_only=python_folders(), network=network)
+        with mock.patch("tenx.sandbox.SOCKETS_FOLDER", sockets):
+            command = sandbox.command(command, seen)
+        finished = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        # Wake any listener still waiting, so that its thread ends.
+        for address, family in (
+            (("127.0.0.1", int(port)), socket.AF_INET),
+            (str(path), socket.AF_UNIX),
+        ):
+            with socket.socket(family) as poke:
+                poke.connect(address)
+        for thread in threads:
+            thread.join()
+        tcp.close()
+        unix.close()
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        return json.loads(finished.stdout), [data for data in received if data]
+
+    def test_offline_nothing_outside_is_reached(self):
+        found, received = self.probe(network=False)
+        self.assertTrue(found["tcp"].startswith("blocked"), found)
+        self.assertTrue(found["unix"].startswith("blocked"), found)
+        self.assertEqual(found["listed"], [])
+        self.assertEqual(received, [])
+
+    def test_with_the_network_both_are_reached(self):
+        found, received = self.probe(network=True)
+        self.assertEqual((found["tcp"], found["unix"]), ("connected", "connected"))
+        self.assertEqual(found["listed"], ["s.sock"])
+        self.assertEqual(sorted(received), [b"tcp", b"unix"])
+
+    def test_offline_the_real_sockets_folder_is_empty(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        command = default_sandbox().command(
+            # /run/user is emptied for every sandbox, so it is an empty folder here.
+            ["find", "/run", "-mindepth", "1", "!", "-path", "/run/user"],
+            Mounts(workspace=Path(tmp.name), network=False),
+        )
+        finished = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual((finished.returncode, finished.stdout), (0, ""), finished.stderr)
 
 
 if __name__ == "__main__":

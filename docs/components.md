@@ -151,7 +151,9 @@ read-only, can write only its own work folder, and cannot see the
 declaration, the expected rows or (for the second build) the first build's
 database. It is given only a short list of your environment variables
 (`PATH`, `HOME`, locale and a few more), so a model cannot read a secret in
-your environment through `env_var`. Where no sandbox can be set up the command refuses to build, with
+your environment through `env_var`. It has no network and sees none of the
+system's sockets, and dbt does not load a `.env` file for it (sandboxed or
+not). Where no sandbox can be set up the command refuses to build, with
 exit status 2; `--unisolated` builds without one, for a project you trust,
 and prints a warning. See [Security](security.md).
 
@@ -924,7 +926,7 @@ names must exist, a staging model takes columns only from its own table,
 and a rule may name no table; a money column written with its own table in
 front is kept by its name),
 then counts each rule on the raw files, in a separate process in the
-sandbox (see [security](security.md)). A checked and counted contract is
+sandbox with no network (see [security](security.md)). A checked and counted contract is
 kept as `architect/attempt-<n>/contract.json`, with what each model keeps
 of its source in `counts.json`, and written out as `SPEC.md`,
 which every engineer attempt finds in its folder; the engineer is asked to

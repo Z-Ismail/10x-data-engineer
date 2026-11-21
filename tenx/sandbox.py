@@ -35,6 +35,11 @@ BWRAP_INSTALL = (
 # Folders every sandbox hides, as well as the home folder. /run/user holds
 # the user's own sockets, such as an ssh agent's.
 SCRATCH_FOLDERS = (Path("/tmp"), Path("/var/tmp"), Path("/run/user"))
+# Where the system keeps its sockets, such as Docker's and the D-Bus system
+# bus. A socket file stays reachable through a read-only mount and from
+# another network namespace, so a process cut off from the network is not
+# shown this folder either. Agents keep it: name lookups can depend on it.
+SOCKETS_FOLDER = Path("/run")
 CHECK_SECONDS = 30
 
 # What a sandboxed process is given of the caller's environment. Anything
@@ -86,6 +91,8 @@ class Mounts:
     ``hidden`` paths are never visible, wherever they are. ``files`` are
     single files shown read-write at another path, as (source, target)
     pairs; the target must be inside the workspace or a writable folder.
+    With ``network`` off, the command has no network but its own loopback
+    and reaches none of the system's sockets.
     """
 
     workspace: Path
@@ -93,6 +100,7 @@ class Mounts:
     writable: tuple[Path, ...] = ()
     hidden: tuple[Path, ...] = ()
     files: tuple[tuple[Path, Path], ...] = ()
+    network: bool = True
 
 
 class Sandbox(Protocol):
@@ -190,6 +198,8 @@ class Bubblewrap:
         hidden = [Path(path).resolve() for path in mounts.hidden]
         # Hidden folders are replaced by empty ones; files are dealt with last.
         scratch = [Path(self.home).resolve(), *self.scratch]
+        if not mounts.network:
+            scratch.append(SOCKETS_FOLDER)
         masks = scratch + [path for path in hidden if path.is_dir()]
         masks = sorted({path for path in masks if path.is_dir()}, key=_order)
         binds = [(workspace, "--bind")]
@@ -234,6 +244,8 @@ class Bubblewrap:
                 arguments += ["--tmpfs", str(path)]
             else:
                 arguments += ["--ro-bind", os.devnull, str(path)]
+        if not mounts.network:
+            arguments.append("--unshare-net")
         arguments += ["--unshare-pid", "--die-with-parent", "--chdir", str(workspace), "--"]
         return arguments + list(command)
 
@@ -263,9 +275,13 @@ class Bubblewrap:
 
 
 def check(sandbox: Bubblewrap) -> None:
-    """Start an empty command in the sandbox, so a broken one fails before any agent runs."""
+    """Start an empty command in the sandbox, so a broken one fails before any agent runs.
+
+    The command is cut off from the network, as the gate's builds are, so a
+    sandbox that cannot do that fails here too.
+    """
     with tempfile.TemporaryDirectory() as folder:
-        probe = sandbox.command(["true"], Mounts(workspace=Path(folder)))
+        probe = sandbox.command(["true"], Mounts(workspace=Path(folder), network=False))
         try:
             finished = subprocess.run(
                 probe,
