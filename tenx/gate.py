@@ -1169,8 +1169,8 @@ def build_project(
     with a connection profile written here, so the project cannot choose
     which database it is built into. In ``sandbox`` the build sees the
     project and the raw files read-only, can write only workdir, never
-    sees the ``hidden`` paths and has no network. Returns the exit status, the parsed
-    ``run_results.json`` if dbt wrote one, and what dbt printed.
+    sees the ``hidden`` paths and has no network. Returns the exit status,
+    the parsed ``run_results.json`` if dbt wrote one, and what dbt printed.
     """
     if not dbt_installed():
         raise GateError(
