@@ -112,7 +112,7 @@ if:
 | Build | Engineer agent: dbt models on DuckDB from a plain-English goal | Available |
 | Measurement | Usage ledger per role, and measured comparisons of crew configurations | Available |
 | Specification | Architect agent: a machine-checked spec contract and `SPEC.md` for the engineer | In progress: built into the graph run, off by default (`python -m tenx.run run --architect`, `make engineer-architect`); not shown to raise the pass rate. With `--review-spec` the run waits for a person to approve, edit or reject the spec before the engineer starts. The measured comparison on the brief demo goal (`make compare-architect`, 64 runs, each spec scored against the gate's hidden declaration) was run on 2026-11-11: 5 of 32 passes with the Architect against 2 of 32 without, not enough to say it helps (chance it is better 0.87, against the 0.98 required); in 13 of the 32 runs its spec could not be used, mostly because a rule read a second table; the Architect is now told to keep each rule to its own table's columns, and such a rule is refused before counting (not yet re-measured). It stays off by default |
-| Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox that is given only a short list of your environment variables and, for the agents, a Claude Code config folder of their own; other systems refuse unless `--unisolated` |
+| Safety | Operating-system sandbox for every agent, failing closed | Available on Linux: every agent, and the gate's builds of its work, run in a bubblewrap sandbox that is given only a short list of your environment variables and, for the agents, a Claude Code config folder of their own; the gate's builds run without the network; other systems refuse unless `--unisolated` |
 | Portability | Capability interfaces for sources, transform engine, validation, sandbox and agents; DuckDB, dbt and Claude Code as the first implementations | Available: the graph run works only through them |
 | Cost control | Spending policy: a cap per agent call, a run ceiling enforced by reserving each call's cap before it starts, and approval for comparisons estimated above US$5 | Available: the per-call caps and the comparison approval apply to every run; the run ceiling applies to graph runs (`python -m tenx.run`) |
 | Orchestration | Six-role workflow with checkpoints, resume, approvals and spending limits | In progress: the build workflow runs as a graph that is saved after every step and can be resumed (`python -m tenx.run`), with the run ceiling enforced; with a stand-in for Claude Code it leaves byte-identical projects, notes, reports and usage to the current runner's on eight demo datasets (`make equivalence`). A paired comparison with real agents against the current runner (`make parity`, 64 pairs, a predeclared 10-point margin) was run on 2026-11-06 and found the graph non-inferior: 62 of 64 passes against 59 of 64, at 0.96 times the cost per pass. `make engineer` still uses the current runner. A run can wait for approval of the Architect's spec (`--review-spec`); approval of the handover and the other roles come later |
@@ -177,10 +177,11 @@ the sandbox: what any program needs (such as `PATH` and `HOME`) and, for the
 agents, what Claude Code needs to sign in and reach its service (its own
 `ANTHROPIC_` and `CLAUDE_` variables and proxy settings). A token or cloud
 key in your environment stays outside; name a variable in
-`TENX_SANDBOX_ENV` to pass it on purpose. The sandbox does not yet limit
-network access. Until it does, run the agents only on data you would be
-comfortable sharing with them. Details, and how the
-isolation is tested, are in [docs/security.md](docs/security.md).
+`TENX_SANDBOX_ENV` to pass it on purpose. The gate's builds have no network
+and see none of the system's sockets, and dbt does not load a `.env` file
+for them. The agents keep network access, which Claude Code needs, so run
+them only on data you would be comfortable sharing with them. Details, and
+how the isolation is tested, are in [docs/security.md](docs/security.md).
 
 ## Costs
 

@@ -22,7 +22,9 @@ profile; the CI workflow installs one. A sandboxed process gets only a short
 list of environment variables, so a test whose stand-in reads its settings
 from the environment lists their names in `TENX_SANDBOX_ENV`. A sandboxed agent's
 `CLAUDE_CONFIG_DIR` points at an empty folder of its own, so a stand-in
-must not expect files from your Claude Code config folder.
+must not expect files from your Claude Code config folder. The gate's builds
+and the counting process have no network and an empty `/run`, and dbt
+loads no `.env` file in the gate's builds.
 
 The tests do not run the agents themselves: they replace the `claude`
 command with a stand-in that writes a known project, or gives a known answer
