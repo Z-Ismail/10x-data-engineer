@@ -11,14 +11,21 @@ The sandbox tests are skipped where bubblewrap cannot run, unless
 TENX_REQUIRE_SANDBOX is set, as it is in CI; then they fail instead.
 """
 
+import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tenx.sandbox import Bubblewrap, Mounts
+from test_gate_sandbox import needs_sandbox
+
+from tenx.sandbox import KEPT_SOCKETS, Bubblewrap, Mounts, default_sandbox, python_folders
 
 
 def options(arguments: list[str]) -> list[str]:
@@ -160,6 +167,167 @@ class SocketMasksTest(unittest.TestCase):
         )
         self.assertEqual(found.count("--tmpfs"), 2)
         self.assertNotIn(os.devnull, found)
+
+
+# From inside the sandbox: says it is ready, waits for the word to go, then
+# tries a TCP listener on the host's loopback and each Unix socket named.
+PROBE = """
+import json, os, socket, sys, time
+work, port, paths = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
+open(os.path.join(work, "ready"), "w").close()
+while not os.path.exists(os.path.join(work, "go")):
+    time.sleep(0.05)
+found = {}
+for name, family, address in [("tcp", socket.AF_INET, ("127.0.0.1", port))] + [
+    (path, socket.AF_UNIX, path) for path in paths
+]:
+    try:
+        with socket.socket(family) as client:
+            client.settimeout(5)
+            client.connect(address)
+            client.sendall(b"hello")
+        found[name] = "connected"
+    except OSError as error:
+        found[name] = "blocked: " + type(error).__name__
+print(json.dumps(found))
+"""
+
+# Every socket under the folders named, following links, one path a line.
+FIND_SOCKETS = """
+import os, stat, sys
+for top in sys.argv[1:]:
+    for folder, _, names in os.walk(top, followlinks=True):
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                if stat.S_ISSOCK(os.stat(path).st_mode):
+                    print(path)
+            except OSError:
+                pass
+"""
+
+
+@needs_sandbox
+class SocketsInTheSandboxTest(unittest.TestCase):
+    """In the real sandbox, with the network kept, as an agent has it.
+
+    The test's files are kept in the home folder and the sandbox is told
+    another home, so they are visible unless the sandbox hides them; the
+    folder standing for /run is given to the sandbox as its sockets folder.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(dir=Path.home(), prefix="s")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.run_folder = self.root / "run"
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.received: dict[str, list[bytes]] = {}
+
+    def serve(self, server: socket.socket, name: str) -> None:
+        self.received[name] = []
+
+        def accept():
+            while True:
+                try:
+                    connection, _ = server.accept()
+                except OSError:
+                    return
+                with connection:
+                    self.received[name].append(connection.recv(16))
+
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(server.close)
+        self.addCleanup(server.shutdown, socket.SHUT_RDWR)
+
+    def unix(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.serve(listen(path), str(path))
+        return path
+
+    def start(self, paths: list[Path], **changes) -> subprocess.Popen:
+        tcp = socket.create_server(("127.0.0.1", 0))
+        self.serve(tcp, "tcp")
+        values = {"home": self.root / "home", "sockets": (self.run_folder,)}
+        values.update(changes)
+        sandbox = Bubblewrap(default_sandbox().executable, **values)
+        python = os.path.normpath(os.path.abspath(sys.executable))
+        port = str(tcp.getsockname()[1])
+        command = [python, "-I", "-c", PROBE, str(self.work), port, *map(str, paths)]
+        seen = Mounts(workspace=self.work, read_only=python_folders())
+        return subprocess.Popen(
+            sandbox.command(command, seen), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
+    def finish(self, process: subprocess.Popen) -> dict:
+        (self.work / "go").touch()
+        stdout, stderr = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 0, stderr)
+        found = json.loads(stdout)
+        # Give the listeners time to take what was sent.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(
+            found.get(name) == "connected" and not data for name, data in self.received.items()
+        ):
+            time.sleep(0.05)
+        return found
+
+    def test_the_network_stays_and_the_system_sockets_are_out_of_reach(self):
+        own = self.unix(self.run_folder / "docker" / "docker.sock")
+        loose = self.unix(self.run_folder / "docker.sock")
+        found = self.finish(self.start([own, loose]))
+        self.assertEqual(found["tcp"], "connected")
+        self.assertTrue(found[str(own)].startswith("blocked"), found)
+        self.assertTrue(found[str(loose)].startswith("blocked"), found)
+        self.assertEqual(self.received[str(own)] + self.received[str(loose)], [])
+        self.assertEqual(self.received["tcp"], [b"hello"])
+
+    def test_sockets_for_name_lookups_and_unlisted_folders_are_reached(self):
+        kept = self.unix(self.run_folder / "nscd" / "socket")
+        elsewhere = self.unix(self.root / "elsewhere" / "s.sock")
+        process = self.start([kept, elsewhere], kept_sockets=(kept.parent,))
+        found = self.finish(process)
+        self.assertEqual(
+            found, {"tcp": "connected", str(kept): "connected", str(elsewhere): "connected"}
+        )
+
+    def test_a_socket_made_again_while_the_agent_runs_stays_out_of_reach(self):
+        own = self.unix(self.run_folder / "docker" / "docker.sock")
+        process = self.start([own])
+        deadline = time.monotonic() + 30
+        while not (self.work / "ready").exists():
+            self.assertLess(time.monotonic(), deadline, "the probe never started")
+            time.sleep(0.05)
+        # The service restarts: its old socket goes and a new one is made.
+        own.unlink()
+        self.unix(own)
+        found = self.finish(process)
+        self.assertTrue(found[str(own)].startswith("blocked"), found)
+        self.assertEqual(self.received[str(own)], [])
+
+    def test_no_socket_of_this_computer_is_left_but_those_for_name_lookups(self):
+        # find trusts the folder's entry types, which still say socket for
+        # one covered by an empty file, so each path is looked up instead.
+        python = os.path.normpath(os.path.abspath(sys.executable))
+        find = [python, "-I", "-c", FIND_SOCKETS, "/run", "/var/run"]
+        kept = [Path(folder).resolve() for folder in KEPT_SOCKETS]
+
+        def stray(command: list[str]) -> list[Path]:
+            finished = subprocess.run(
+                command, capture_output=True, text=True, timeout=60, check=False
+            )
+            found = [Path(line) for line in finished.stdout.splitlines()]
+            return [path for path in found if not any(f == path or f in path.parents for f in kept)]
+
+        # Without the sandbox the same search finds what is to be hidden,
+        # where this computer has any such socket the user may reach.
+        outside = [path for path in stray(find) if not path.is_relative_to("/run/user")]
+        seen = Mounts(workspace=self.work, read_only=python_folders())
+        sandboxed = default_sandbox().command(find, seen)
+        self.assertEqual(stray(sandboxed), [], f"outside the sandbox: {outside}")
 
 
 if __name__ == "__main__":
