@@ -114,7 +114,9 @@ class BubblewrapCommandTest(unittest.TestCase):
         for folder in (self.project, self.plugin, self.raw, self.checks.parent):
             folder.mkdir(parents=True)
         self.checks.write_text("{}", encoding="utf-8")
-        self.sandbox = Bubblewrap("bwrap", home=self.home)
+        # The system's sockets differ from one computer to another; their
+        # covering is tested on its own in test_sandbox_sockets.
+        self.sandbox = Bubblewrap("bwrap", home=self.home, sockets=())
 
     def mounts(self, **changes) -> Mounts:
         values = {

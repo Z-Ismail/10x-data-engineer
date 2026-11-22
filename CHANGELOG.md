@@ -6,6 +6,12 @@ Notable changes to this project.
 
 ### Security
 
+- Sandboxed agents no longer reach the system's sockets. They keep the
+  network, which Claude Code needs, and kept `/run`, where a socket file
+  stays reachable through a read-only mount: Docker's socket alone gives
+  control of the computer to whoever may use it. Each socket in `/run` and
+  `/var/run` is now covered when an agent starts, by emptying its own folder
+  or by an empty file; the sockets that answer name lookups stay.
 - The gate's dbt builds and the contract's counting process run without the
   network. They run agent-written code and need nothing from outside, but
   could reach the internet and the system's sockets (such as Docker's). In

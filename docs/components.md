@@ -153,8 +153,9 @@ database. It is given only a short list of your environment variables
 (`PATH`, `HOME`, locale and a few more), so a model cannot read a secret in
 your environment through `env_var`. It has no network and sees none of the
 system's sockets, and dbt does not load a `.env` file for it (sandboxed or
-not). Where no sandbox can be set up the command refuses to build, with
-exit status 2; `--unisolated` builds without one, for a project you trust,
+not). The agents keep the network but not the system's sockets, except
+those that answer name lookups. Where no sandbox can be set up the command
+refuses to build, with exit status 2; `--unisolated` builds without one, for a project you trust,
 and prints a warning. See [Security](security.md).
 
 What to expect is declared in a JSON file that is kept outside the dbt

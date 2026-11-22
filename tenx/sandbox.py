@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import site
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,12 @@ SCRATCH_FOLDERS = (Path("/tmp"), Path("/var/tmp"), Path("/run/user"))
 # another network namespace, so a process cut off from the network is not
 # shown this folder either. Agents keep it: name lookups can depend on it.
 SOCKETS_FOLDER = Path("/run")
+# Agents keep the network but not the system's sockets: every socket found in
+# these folders when the sandbox starts is covered. Docker's socket alone
+# gives control of the computer to whoever may use it.
+SOCKET_FOLDERS = (SOCKETS_FOLDER, Path("/var/run"))
+# Except the ones that only answer name lookups, which can need them.
+KEPT_SOCKETS = (Path("/run/systemd/resolve"), Path("/run/nscd"))
 CHECK_SECONDS = 30
 
 # What a sandboxed process is given of the caller's environment. Anything
@@ -92,7 +99,8 @@ class Mounts:
     single files shown read-write at another path, as (source, target)
     pairs; the target must be inside the workspace or a writable folder.
     With ``network`` off, the command has no network but its own loopback
-    and reaches none of the system's sockets.
+    and none of the system's sockets folder. With it on, the system's
+    sockets are covered one by one, except those for name lookups.
     """
 
     workspace: Path
@@ -183,6 +191,22 @@ def _order(path: Path) -> tuple[int, str]:
     return len(path.parts), str(path)
 
 
+def _sockets(folder: Path):
+    """Every socket in a folder and the folders in it, links to sockets included."""
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                yield from _sockets(Path(entry.path))
+            elif stat.S_ISSOCK(os.stat(entry.path).st_mode):
+                yield Path(entry.path)
+        except OSError:
+            continue
+
+
 @dataclass(frozen=True)
 class Bubblewrap:
     """A bubblewrap sandbox (Linux)."""
@@ -190,6 +214,8 @@ class Bubblewrap:
     executable: str = "bwrap"
     home: Path = field(default_factory=Path.home)
     scratch: tuple[Path, ...] = SCRATCH_FOLDERS
+    sockets: tuple[Path, ...] = SOCKET_FOLDERS
+    kept_sockets: tuple[Path, ...] = KEPT_SOCKETS
     name: str = "bubblewrap"
     isolated: bool = True
 
@@ -226,6 +252,9 @@ class Bubblewrap:
         arguments = [self.executable, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
         for path in masks:
             arguments += ["--tmpfs", str(path)]
+        if mounts.network:
+            for covering in self._socket_masks(masks):
+                arguments += covering
         for path, flag in binds:
             arguments += [flag, str(path), str(path)]
         for source, target in files:
@@ -248,6 +277,35 @@ class Bubblewrap:
             arguments.append("--unshare-net")
         arguments += ["--unshare-pid", "--die-with-parent", "--chdir", str(workspace), "--"]
         return arguments + list(command)
+
+    def _socket_masks(self, masks: list[Path]) -> list[list[str]]:
+        """What covers each system socket, for a sandbox that keeps the network.
+
+        A socket in its own folder is covered by emptying that folder, so a
+        service that makes its socket again while the agent runs is still
+        hidden; one straight in a sockets folder, or kept company by a folder
+        for name lookups, by an empty file. A link to a socket covers the
+        socket it leads to. Folders the user cannot open are passed over: no
+        one in the sandbox could reach a socket in them either.
+        """
+        roots = sorted({Path(path).resolve() for path in self.sockets if Path(path).is_dir()})
+        kept = [Path(path).resolve() for path in self.kept_sockets]
+        found = {path.resolve() for root in roots for path in _sockets(root)}
+        folders, files = set(), set()
+        for path in found:
+            if any(_inside(path, folder) for folder in kept + masks):
+                continue
+            parent = path.parent
+            own_folder = any(parent != root and _inside(parent, root) for root in roots)
+            if own_folder and not any(_inside(folder, parent) for folder in kept):
+                folders.add(parent)
+            else:
+                files.add(path)
+        folders = {f for f in folders if not any(f != o and _inside(f, o) for o in folders)}
+        files = {f for f in files if not any(_inside(f, folder) for folder in folders)}
+        covered = [(path, ["--tmpfs", str(path)]) for path in folders]
+        covered += [(path, ["--ro-bind", os.devnull, str(path)]) for path in files]
+        return [arguments for _, arguments in sorted(covered, key=lambda item: _order(item[0]))]
 
     @staticmethod
     def _files(
