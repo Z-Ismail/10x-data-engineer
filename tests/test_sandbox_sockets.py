@@ -319,7 +319,8 @@ class SocketsInTheSandboxTest(unittest.TestCase):
             finished = subprocess.run(
                 command, capture_output=True, text=True, timeout=60, check=False
             )
-            found = [Path(line) for line in finished.stdout.splitlines()]
+            # /var/run is usually a link to /run, so a kept socket shows twice.
+            found = [Path(line).resolve() for line in finished.stdout.splitlines()]
             return [path for path in found if not any(f == path or f in path.parents for f in kept)]
 
         # Without the sandbox the same search finds what is to be hidden,
