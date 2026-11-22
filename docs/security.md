@@ -193,12 +193,28 @@ a sandboxed process with the network cut cannot reach a socket file in the
 folder standing for `/run`, and reaches it with the network; and the gate's
 builds read variables from `.env` files only when the switch is taken away.
 
+The agents keep the network, and `/run` too, since on some systems
+`/etc/resolv.conf` leads into it. Instead, every socket found in `/run` and
+`/var/run` when an agent starts is covered: a socket in a folder of its own
+(containerd's under `/run/containerd`, the D-Bus system bus under `/run/dbus`) by
+emptying that folder, so a service that makes its socket again while the
+agent runs stays hidden; one straight in `/run` (`/run/docker.sock`), or
+beside a name-lookup folder, by an empty file. A link to a socket covers
+the socket it leads to. The sockets that answer name lookups,
+`/run/systemd/resolve` and `/run/nscd`, stay. In the tests, a process in
+the real sandbox with the network kept connects to a listener on the host
+but not to a socket in a folder standing for `/run`, nor to one made again
+there while it runs; it reaches a socket in a name-lookup folder and one
+outside the sockets folders; and no socket of the computer running the
+tests is left in its `/run` but the name-lookup ones.
+
 What the sandbox does not cover yet:
 
 - The agents keep network access, which Claude Code needs, so an agent
-  could send out the raw data it can read. They also keep `/run`, since
-  name lookups can depend on it, so an agent can reach the system's
-  sockets, Docker's included if your user may use it.
+  could send out the raw data it can read.
+- A socket straight in `/run` that a service makes again while an agent
+  runs (Docker restarted, say) is visible to that agent from then on, as is
+  any socket that first appears after the agent started.
 - Socket files outside `/run` (in a folder of yours that is not hidden)
   can be reached from any sandboxed process.
 - An agent can read and change its own sign-in file, as Claude Code itself
