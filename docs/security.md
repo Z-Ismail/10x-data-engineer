@@ -208,6 +208,26 @@ there while it runs; it reaches a socket in a name-lookup folder and one
 outside the sockets folders; and no socket of the computer running the
 tests is left in its `/run` but the name-lookup ones.
 
+A socket can also be bound to an abstract name instead of a file. It has no
+file to cover, and it belongs to the network, which agents share with the
+computer, so an X server, an older D-Bus session bus or any other program
+listening on such a name would answer an agent. Where the kernel offers
+Landlock's scoping (Linux 6.12 and later), each agent starts through a
+short launcher, run with the runner's own Python inside the sandbox, that
+restricts itself so that it and every process it starts can connect only to
+abstract sockets made inside that restriction, and then becomes the agent.
+If the restriction cannot be set, the launcher stops without starting the
+agent, and the start-up check runs it once before any agent. The gate's
+builds and the counting process need none of this: without the network they
+cannot reach these sockets at all. In the tests, a process in the real
+sandbox with the network kept cannot connect to a listener on an abstract
+name outside, and can without the launcher; its own abstract socket between
+its own processes, a socket file in a folder it is shown and a listener on
+the host's network still answer it; and a launcher that cannot set the
+restriction starts nothing. On older kernels agents run without it, and
+`python -m tenx.engineer` says in its sandbox line that they are not kept
+from abstract sockets.
+
 What the sandbox does not cover yet:
 
 - The agents keep network access, which Claude Code needs, so an agent
@@ -217,6 +237,9 @@ What the sandbox does not cover yet:
   any socket that first appears after the agent started.
 - Socket files outside `/run` (in a folder of yours that is not hidden)
   can be reached from any sandboxed process.
+- On kernels before Linux 6.12, or where Landlock is turned off, an agent
+  can connect to sockets bound to abstract names outside the sandbox. The
+  names of those sockets stay readable in `/proc/net/unix` either way.
 - An agent can read and change its own sign-in file, as Claude Code itself
   must, and with network access could send the token out.
 

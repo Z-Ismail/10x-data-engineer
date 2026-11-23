@@ -18,6 +18,7 @@ for an unisolated run on purpose, and that run is then marked as such.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import site
 import stat
@@ -25,7 +26,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from shutil import which
 from typing import Protocol
@@ -48,6 +49,46 @@ SOCKET_FOLDERS = (SOCKETS_FOLDER, Path("/var/run"))
 # Except the ones that only answer name lookups, which can need them.
 KEPT_SOCKETS = (Path("/run/systemd/resolve"), Path("/run/nscd"))
 CHECK_SECONDS = 30
+# A socket bound to an abstract name has no file to cover: it belongs to the
+# network, which agents share with the computer. Landlock (Linux 6.12 and
+# later, its ABI 6) can keep a process and its children from connecting to
+# any abstract socket made outside them.
+LANDLOCK_SCOPE_ABI = 6
+# Exit code of the launcher when it cannot keep the command from those sockets.
+SCOPE_FAILED = 126
+# Run inside the sandbox before the agent: scope this process, then become
+# the agent, which inherits the scope with everything it starts. Any failed
+# step stops here, so the agent never runs unscoped by mistake.
+SCOPE_LAUNCHER = (
+    f"SCOPE_FAILED = {SCOPE_FAILED}\n"
+    + """\
+import ctypes, os, sys
+
+CREATE_RULESET, RESTRICT_SELF = 444, 446
+SET_NO_NEW_PRIVS = 38
+SCOPE_ABSTRACT_UNIX_SOCKET = 1
+
+
+class Ruleset(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in ("fs", "net", "scoped")]
+
+
+libc = ctypes.CDLL(None, use_errno=True)
+ruleset = Ruleset(0, 0, SCOPE_ABSTRACT_UNIX_SOCKET)
+size = ctypes.c_size_t(ctypes.sizeof(ruleset))
+fd = libc.syscall(CREATE_RULESET, ctypes.byref(ruleset), size, ctypes.c_uint32(0))
+if (
+    fd < 0
+    or libc.prctl(SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+    or libc.syscall(RESTRICT_SELF, fd, ctypes.c_uint32(0)) != 0
+):
+    error = os.strerror(ctypes.get_errno())
+    sys.stderr.write(f"cannot keep the agent from abstract sockets: {error}\\n")
+    sys.exit(SCOPE_FAILED)
+os.close(fd)
+os.execvp(sys.argv[1], sys.argv[1:])
+"""
+)
 
 # What a sandboxed process is given of the caller's environment. Anything
 # else stays outside: a token, a cloud key or a database address in the
@@ -182,6 +223,19 @@ def python_folders() -> tuple[Path, ...]:
     return tuple(unique)
 
 
+def landlock_abi() -> int:
+    """The Landlock ABI version this kernel offers; 0 where it has none or it is off."""
+    if not sys.platform.startswith("linux"):
+        return 0
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        # landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)
+        version = libc.syscall(444, None, ctypes.c_size_t(0), ctypes.c_uint32(1))
+    except (OSError, AttributeError):
+        return 0
+    return max(int(version), 0)
+
+
 def _inside(path: Path, folder: Path) -> bool:
     return path == folder or folder in path.parents
 
@@ -216,10 +270,19 @@ class Bubblewrap:
     scratch: tuple[Path, ...] = SCRATCH_FOLDERS
     sockets: tuple[Path, ...] = SOCKET_FOLDERS
     kept_sockets: tuple[Path, ...] = KEPT_SOCKETS
+    # Keep commands that keep the network from abstract sockets made outside
+    # them, through SCOPE_LAUNCHER. Needs Landlock ABI 6; default_sandbox
+    # turns it on where the kernel has it.
+    scope_abstract_sockets: bool = False
     name: str = "bubblewrap"
     isolated: bool = True
 
     def command(self, command: list[str], mounts: Mounts) -> list[str]:
+        if mounts.network and self.scope_abstract_sockets:
+            # The launcher runs with the runner's own Python, shown read-only.
+            command = [sys.executable, "-I", "-c", SCOPE_LAUNCHER, *command]
+            shown = tuple(p for p in python_folders() if p not in mounts.read_only)
+            mounts = replace(mounts, read_only=(*mounts.read_only, *shown))
         workspace = Path(mounts.workspace).resolve()
         hidden = [Path(path).resolve() for path in mounts.hidden]
         # Hidden folders are replaced by empty ones; files are dealt with last.
@@ -326,9 +389,14 @@ class Bubblewrap:
         return checked
 
     def describe(self) -> str:
+        sockets = (
+            "kept from abstract sockets outside"
+            if self.scope_abstract_sockets
+            else "not kept from abstract sockets outside (needs Linux 6.12 or later)"
+        )
         return (
             "bubblewrap: the agents and the gate's builds see only their own folder "
-            "and the files their work needs"
+            f"and the files their work needs; the agents are {sockets}"
         )
 
 
@@ -336,10 +404,28 @@ def check(sandbox: Bubblewrap) -> None:
     """Start an empty command in the sandbox, so a broken one fails before any agent runs.
 
     The command is cut off from the network, as the gate's builds are, so a
-    sandbox that cannot do that fails here too.
+    sandbox that cannot do that fails here too. Where agents are kept from
+    abstract sockets, a second command keeps the network, as agents do, and
+    starts through the launcher, so a launcher that cannot run fails here.
     """
+    _probe(
+        sandbox,
+        network=False,
+        hint="On Ubuntu 24.04 and later, AppArmor blocks it unless bubblewrap has a "
+        "profile that allows user namespaces",
+    )
+    if sandbox.scope_abstract_sockets:
+        _probe(
+            sandbox,
+            network=True,
+            hint="The kernel offers Landlock's scoping, but the agents could not be "
+            "kept from abstract sockets with it",
+        )
+
+
+def _probe(sandbox: Bubblewrap, network: bool, hint: str) -> None:
     with tempfile.TemporaryDirectory() as folder:
-        probe = sandbox.command(["true"], Mounts(workspace=Path(folder), network=False))
+        probe = sandbox.command(["true"], Mounts(workspace=Path(folder), network=network))
         try:
             finished = subprocess.run(
                 probe,
@@ -356,9 +442,7 @@ def check(sandbox: Bubblewrap) -> None:
         detail = finished.stdout.strip().splitlines()
         reason = detail[-1] if detail else f"exit {finished.returncode}"
         raise SandboxError(
-            f"bubblewrap is installed but cannot set up a sandbox here ({reason}). "
-            "On Ubuntu 24.04 and later, AppArmor blocks it unless bubblewrap has a "
-            "profile that allows user namespaces"
+            f"bubblewrap is installed but cannot set up a sandbox here ({reason}). {hint}"
         )
 
 
@@ -378,6 +462,6 @@ def default_sandbox(unisolated: bool = False, platform: str | None = None) -> Sa
     executable = which("bwrap")
     if executable is None:
         raise SandboxError(f"bubblewrap (bwrap) is needed to keep agents apart; {BWRAP_INSTALL}")
-    sandbox = Bubblewrap(executable)
+    sandbox = Bubblewrap(executable, scope_abstract_sockets=landlock_abi() >= LANDLOCK_SCOPE_ABI)
     check(sandbox)
     return sandbox
