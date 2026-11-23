@@ -389,9 +389,14 @@ class Bubblewrap:
         return checked
 
     def describe(self) -> str:
+        sockets = (
+            "kept from abstract sockets outside"
+            if self.scope_abstract_sockets
+            else "not kept from abstract sockets outside (needs Linux 6.12 or later)"
+        )
         return (
             "bubblewrap: the agents and the gate's builds see only their own folder "
-            "and the files their work needs"
+            f"and the files their work needs; the agents are {sockets}"
         )
 
 
@@ -399,10 +404,28 @@ def check(sandbox: Bubblewrap) -> None:
     """Start an empty command in the sandbox, so a broken one fails before any agent runs.
 
     The command is cut off from the network, as the gate's builds are, so a
-    sandbox that cannot do that fails here too.
+    sandbox that cannot do that fails here too. Where agents are kept from
+    abstract sockets, a second command keeps the network, as agents do, and
+    starts through the launcher, so a launcher that cannot run fails here.
     """
+    _probe(
+        sandbox,
+        network=False,
+        hint="On Ubuntu 24.04 and later, AppArmor blocks it unless bubblewrap has a "
+        "profile that allows user namespaces",
+    )
+    if sandbox.scope_abstract_sockets:
+        _probe(
+            sandbox,
+            network=True,
+            hint="The kernel offers Landlock's scoping, but the agents could not be "
+            "kept from abstract sockets with it",
+        )
+
+
+def _probe(sandbox: Bubblewrap, network: bool, hint: str) -> None:
     with tempfile.TemporaryDirectory() as folder:
-        probe = sandbox.command(["true"], Mounts(workspace=Path(folder), network=False))
+        probe = sandbox.command(["true"], Mounts(workspace=Path(folder), network=network))
         try:
             finished = subprocess.run(
                 probe,
@@ -419,9 +442,7 @@ def check(sandbox: Bubblewrap) -> None:
         detail = finished.stdout.strip().splitlines()
         reason = detail[-1] if detail else f"exit {finished.returncode}"
         raise SandboxError(
-            f"bubblewrap is installed but cannot set up a sandbox here ({reason}). "
-            "On Ubuntu 24.04 and later, AppArmor blocks it unless bubblewrap has a "
-            "profile that allows user namespaces"
+            f"bubblewrap is installed but cannot set up a sandbox here ({reason}). {hint}"
         )
 
 
@@ -441,6 +462,6 @@ def default_sandbox(unisolated: bool = False, platform: str | None = None) -> Sa
     executable = which("bwrap")
     if executable is None:
         raise SandboxError(f"bubblewrap (bwrap) is needed to keep agents apart; {BWRAP_INSTALL}")
-    sandbox = Bubblewrap(executable)
+    sandbox = Bubblewrap(executable, scope_abstract_sockets=landlock_abi() >= LANDLOCK_SCOPE_ABI)
     check(sandbox)
     return sandbox

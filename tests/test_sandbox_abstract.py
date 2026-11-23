@@ -16,6 +16,7 @@ that need Landlock's scoping are skipped on kernels without it.
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,7 @@ from tenx.sandbox import (
     SCOPE_LAUNCHER,
     Bubblewrap,
     Mounts,
+    SandboxError,
     default_sandbox,
     landlock_abi,
     python_folders,
@@ -218,12 +220,66 @@ class ScopeSandboxTest(unittest.TestCase):
         self.assertNotEqual(broken, SCOPE_LAUNCHER)
         marker = self.work / "started"
         command = [sys.executable, "-I", "-c", f"open({str(marker)!r}, 'w')"]
+        sandbox = self.sandbox(True)
         with mock.patch("tenx.sandbox.SCOPE_LAUNCHER", broken):
-            arguments = self.sandbox(True).command(command, Mounts(workspace=self.work))
+            arguments = sandbox.command(command, Mounts(workspace=self.work))
         finished = subprocess.run(arguments, capture_output=True, text=True, check=False)
         self.assertEqual(finished.returncode, SCOPE_FAILED)
         self.assertIn("cannot keep the agent from abstract sockets", finished.stderr)
         self.assertFalse(marker.exists())
+
+
+# A stand-in for bubblewrap: fails as the launcher does when it is asked to
+# start a command through the launcher, and succeeds otherwise.
+FAILING_LAUNCHER = """#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = -I ]; then
+    echo "cannot keep the agent from abstract sockets: Invalid argument" >&2
+    exit 126
+  fi
+done
+exit 0
+"""
+
+
+class DefaultSandboxTest(unittest.TestCase):
+    """Where the scope is turned on, and how a sandbox that cannot use it is refused."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.bwrap = Path(tmp.name) / "bwrap"
+        self.bwrap.write_text(FAILING_LAUNCHER, encoding="utf-8")
+        self.bwrap.chmod(self.bwrap.stat().st_mode | stat.S_IXUSR)
+
+    def sandbox(self, abi: int):
+        with (
+            mock.patch("tenx.sandbox.which", return_value=str(self.bwrap)),
+            mock.patch("tenx.sandbox.landlock_abi", return_value=abi),
+        ):
+            return default_sandbox(platform="linux")
+
+    def test_the_scope_is_off_on_kernels_without_it(self):
+        for abi in (0, 1, 5):
+            sandbox = self.sandbox(abi)
+            self.assertFalse(sandbox.scope_abstract_sockets, abi)
+            self.assertIn("not kept from abstract sockets", sandbox.describe())
+
+    def test_a_kernel_with_the_scope_but_a_launcher_that_fails_is_refused(self):
+        for abi in (6, 7):
+            with self.assertRaisesRegex(
+                SandboxError,
+                r"cannot set up a sandbox here \(cannot keep the agent from abstract "
+                r"sockets: Invalid argument\)\. The kernel offers Landlock",
+            ):
+                self.sandbox(abi)
+
+    def test_the_scope_is_on_where_the_kernel_has_it(self):
+        self.bwrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        for abi in (6, 7, 8):
+            sandbox = self.sandbox(abi)
+            self.assertTrue(sandbox.scope_abstract_sockets, abi)
+            self.assertIn("the agents are kept from abstract sockets", sandbox.describe())
 
 
 if __name__ == "__main__":
