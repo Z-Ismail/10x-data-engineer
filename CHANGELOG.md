@@ -6,6 +6,15 @@ Notable changes to this project.
 
 ### Security
 
+- Sandboxed agents can no longer connect to Unix sockets bound to abstract
+  names outside their sandbox. Such a socket has no file to cover and
+  belongs to the network, which agents share with the computer, so an X
+  server or a session bus listening on one could answer an agent. Each
+  agent now starts through a short launcher that scopes it with Landlock
+  (Linux 6.12 and later), so it and everything it starts can reach only
+  abstract sockets made inside that scope. On older kernels agents run as
+  before, and `python -m tenx.engineer` says in its sandbox line that they
+  are not kept from them.
 - Sandboxed agents no longer reach the system's sockets. They keep the
   network, which Claude Code needs, and kept `/run`, where a socket file
   stays reachable through a read-only mount: Docker's socket alone gives
