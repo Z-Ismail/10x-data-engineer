@@ -29,13 +29,14 @@ from test_gate_sandbox import needs_sandbox
 
 from tenx.sandbox import (
     LANDLOCK_SCOPE_ABI,
+    LANDLOCK_STEP,
     SCOPE_FAILED,
-    SCOPE_LAUNCHER,
     Bubblewrap,
     Mounts,
     SandboxError,
     default_sandbox,
     landlock_abi,
+    launcher,
     python_folders,
 )
 
@@ -115,7 +116,7 @@ class ScopeCommandTest(unittest.TestCase):
     def test_an_agent_starts_through_the_launcher(self):
         self.assertEqual(
             after_options(self.command(True)),
-            [sys.executable, "-I", "-c", SCOPE_LAUNCHER, "claude", "-p", "go"],
+            [sys.executable, "-I", "-c", launcher(True, None), "claude", "-p", "go"],
         )
 
     def test_the_launcher_is_given_its_python(self):
@@ -143,9 +144,11 @@ class ScopeCommandTest(unittest.TestCase):
     def test_the_launcher_asks_for_the_abstract_socket_scope(self):
         # The ruleset handles no file or port access, only the scope, whose
         # first bit is LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET.
-        self.assertIn("Ruleset(0, 0, SCOPE_ABSTRACT_UNIX_SOCKET)", SCOPE_LAUNCHER)
-        self.assertIn("SCOPE_ABSTRACT_UNIX_SOCKET = 1\n", SCOPE_LAUNCHER)
-        compile(SCOPE_LAUNCHER, "launcher", "exec")
+        self.assertIn("Ruleset(0, 0, SCOPE_ABSTRACT_UNIX_SOCKET)", LANDLOCK_STEP)
+        self.assertIn("SCOPE_ABSTRACT_UNIX_SOCKET = 1\n", LANDLOCK_STEP)
+        self.assertIn(LANDLOCK_STEP, launcher(True, None))
+        self.assertNotIn(LANDLOCK_STEP, launcher(False, b"\0" * 8))
+        compile(launcher(True, None), "launcher", "exec")
 
 
 @needs_sandbox
@@ -216,12 +219,12 @@ class ScopeSandboxTest(unittest.TestCase):
 
     def test_the_launcher_starts_nothing_when_it_cannot_scope(self):
         # The real launcher with a system call the kernel does not have.
-        broken = SCOPE_LAUNCHER.replace("= 444, 446", "= 99999, 446")
-        self.assertNotEqual(broken, SCOPE_LAUNCHER)
+        broken = LANDLOCK_STEP.replace("= 444, 446", "= 99999, 446")
+        self.assertNotEqual(broken, LANDLOCK_STEP)
         marker = self.work / "started"
         command = [sys.executable, "-I", "-c", f"open({str(marker)!r}, 'w')"]
         sandbox = self.sandbox(True)
-        with mock.patch("tenx.sandbox.SCOPE_LAUNCHER", broken):
+        with mock.patch("tenx.sandbox.LANDLOCK_STEP", broken):
             arguments = sandbox.command(command, Mounts(workspace=self.work))
         finished = subprocess.run(arguments, capture_output=True, text=True, check=False)
         self.assertEqual(finished.returncode, SCOPE_FAILED)
@@ -253,9 +256,11 @@ class DefaultSandboxTest(unittest.TestCase):
         self.bwrap.chmod(self.bwrap.stat().st_mode | stat.S_IXUSR)
 
     def sandbox(self, abi: int):
+        # Without the Unix socket filter, so that only Landlock decides.
         with (
             mock.patch("tenx.sandbox.which", return_value=str(self.bwrap)),
             mock.patch("tenx.sandbox.landlock_abi", return_value=abi),
+            mock.patch("tenx.sandbox.seccomp.unix_socket_filter", return_value=None),
         ):
             return default_sandbox(platform="linux")
 
@@ -263,14 +268,14 @@ class DefaultSandboxTest(unittest.TestCase):
         for abi in (0, 1, 5):
             sandbox = self.sandbox(abi)
             self.assertFalse(sandbox.scope_abstract_sockets, abi)
-            self.assertIn("not kept from abstract sockets", sandbox.describe())
+            self.assertIn("not from abstract sockets outside by Landlock", sandbox.describe())
 
     def test_a_kernel_with_the_scope_but_a_launcher_that_fails_is_refused(self):
         for abi in (6, 7):
             with self.assertRaisesRegex(
                 SandboxError,
                 r"cannot set up a sandbox here \(cannot keep the agent from abstract "
-                r"sockets: Invalid argument\)\. The kernel offers Landlock",
+                r"sockets: Invalid argument\)\. The agents could not be kept from sockets",
             ):
                 self.sandbox(abi)
 
@@ -279,7 +284,7 @@ class DefaultSandboxTest(unittest.TestCase):
         for abi in (6, 7, 8):
             sandbox = self.sandbox(abi)
             self.assertTrue(sandbox.scope_abstract_sockets, abi)
-            self.assertIn("the agents are kept from abstract sockets", sandbox.describe())
+            self.assertIn("and from abstract sockets outside", sandbox.describe())
 
 
 if __name__ == "__main__":

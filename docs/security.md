@@ -228,18 +228,49 @@ restriction starts nothing. On older kernels agents run without it, and
 `python -m tenx.engineer` says in its sandbox line that they are not kept
 from abstract sockets.
 
+Covering socket files one at a time still leaves gaps: a socket a service
+makes again while an agent runs, or one that first appears after it
+starts, a socket file outside `/run`, and abstract sockets on kernels
+without Landlock's scope. Every one of them needs a new socket, so on
+x86_64 and aarch64 the same launcher also installs a seccomp filter, which
+the kernel applies to the agent and to every process it starts and which
+cannot be removed. The filter refuses `socket()` for Unix sockets (with
+"permission denied"), and Unix socket pairs other than stream pairs, which
+programs use to talk to their own children and which reach nothing else (a
+datagram pair can send to another socket by address). It also refuses
+io_uring, which can open a socket without calling `socket()`, and any call
+made through another architecture's entry, such as the 32-bit one a 64-bit
+x86 program can still use, whose numbers differ. A name lookup cannot ask
+a lookup service over a socket (nscd, systemd-resolved) either, so it
+depends on the other sources your system lists, such as `/etc/resolv.conf`.
+If the filter cannot be installed, the launcher starts
+nothing, and the start-up check tries it once before any agent. In the
+tests, the filter is run by an interpreter written apart from it on each
+call that matters, and copies broken on purpose (no architecture check, no
+x32 check, io_uring allowed, the socket type not masked) fail; installed in
+a real process, it refuses Unix sockets, datagram pairs, io_uring and the
+32-bit entry, in that process and its children, while network sockets and
+stream pairs work; and in the real sandbox a process with the network kept
+can no longer reach a socket file in a folder it is shown or an abstract
+socket outside, even with Landlock's scope off, and can without the filter.
+On other machines agents run without the filter, and `python -m
+tenx.engineer` says so in its sandbox line.
+
 What the sandbox does not cover yet:
 
 - The agents keep network access, which Claude Code needs, so an agent
   could send out the raw data it can read.
-- A socket straight in `/run` that a service makes again while an agent
-  runs (Docker restarted, say) is visible to that agent from then on, as is
-  any socket that first appears after the agent started.
-- Socket files outside `/run` (in a folder of yours that is not hidden)
-  can be reached from any sandboxed process.
-- On kernels before Linux 6.12, or where Landlock is turned off, an agent
-  can connect to sockets bound to abstract names outside the sandbox. The
-  names of those sockets stay readable in `/proc/net/unix` either way.
+- On machines other than x86_64 and aarch64, a socket straight in `/run`
+  that a service makes again while an agent runs (Docker restarted, say) is
+  visible to that agent from then on, as is any socket that first appears
+  after the agent started, and socket files outside `/run` (in a folder of
+  yours that is not hidden) can be reached. On those machines with kernels
+  before Linux 6.12, or where Landlock is turned off, an agent can also
+  connect to sockets bound to abstract names outside the sandbox.
+- The gate's builds and the counting process have no network and no `/run`,
+  but are not given the filter, so a dbt Python model in the gate's build
+  could still reach a socket file outside `/run` and your home folder.
+- The names of abstract sockets stay readable in `/proc/net/unix`.
 - An agent can read and change its own sign-in file, as Claude Code itself
   must, and with network access could send the token out.
 

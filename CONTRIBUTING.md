@@ -26,9 +26,10 @@ must not expect files from your Claude Code config folder. The gate's builds
 and the counting process have no network and an empty `/run`, and dbt
 loads no `.env` file in the gate's builds. Agents keep the network, but each
 socket in `/run` and `/var/run` is covered for them, so a stand-in must not
-expect to reach a service's socket there. On Linux 6.12 and later an agent
-starts through a launcher run with the runner's Python, and cannot connect to
-abstract sockets made outside it.
+expect to reach a service's socket there. An agent starts through a launcher
+run with the runner's Python; on x86_64 and aarch64 it and everything it
+starts cannot open a Unix socket (stream socket pairs still work), and on
+Linux 6.12 and later it cannot connect to abstract sockets made outside it.
 
 The tests do not run the agents themselves: they replace the `claude`
 command with a stand-in that writes a known project, or gives a known answer

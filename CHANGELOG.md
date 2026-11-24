@@ -6,6 +6,18 @@ Notable changes to this project.
 
 ### Security
 
+- Sandboxed agents can no longer open Unix sockets at all, on x86_64 and
+  aarch64 Linux. Covering socket files one by one left out a socket a
+  service makes again while an agent runs, socket files outside `/run`, and,
+  before Linux 6.12, sockets bound to abstract names. The agents' launcher
+  now installs a seccomp filter that refuses every new Unix socket (stream
+  socket pairs, which programs use to talk to their own children, still
+  work), io_uring, which can open sockets without the usual call, and calls
+  made through another architecture's entry. Everything an agent starts
+  inherits the filter. If it cannot be installed, the agent is not started,
+  and the start-up check tries it before any agent runs. On other machines
+  agents run without it, and `python -m tenx.engineer` says so in its
+  sandbox line.
 - Sandboxed agents can no longer connect to Unix sockets bound to abstract
   names outside their sandbox. Such a socket has no file to cover and
   belongs to the network, which agents share with the computer, so an X

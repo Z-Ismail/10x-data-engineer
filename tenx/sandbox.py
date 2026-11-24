@@ -28,8 +28,12 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from platform import machine
 from shutil import which
+from textwrap import indent
 from typing import Protocol
+
+from tenx import seccomp
 
 BWRAP_INSTALL = (
     "sudo apt install bubblewrap (Debian, Ubuntu) or sudo dnf install bubblewrap (Fedora)"
@@ -56,14 +60,23 @@ CHECK_SECONDS = 30
 LANDLOCK_SCOPE_ABI = 6
 # Exit code of the launcher when it cannot keep the command from those sockets.
 SCOPE_FAILED = 126
-# Run inside the sandbox before the agent: scope this process, then become
-# the agent, which inherits the scope with everything it starts. Any failed
-# step stops here, so the agent never runs unscoped by mistake.
-SCOPE_LAUNCHER = (
+# Run inside the sandbox before the agent: keep this process from sockets,
+# then become the agent, which inherits each limit with everything it
+# starts. Any failed step stops here, so the agent never runs without a
+# limit it was meant to have.
+LAUNCHER_START = (
     f"SCOPE_FAILED = {SCOPE_FAILED}\n"
     + """\
 import ctypes, os, sys
 
+
+def fail(what, error):
+    sys.stderr.write(f"cannot keep the agent from {what}: {error}\\n")
+    sys.exit(SCOPE_FAILED)
+"""
+)
+# Landlock's scope: no connecting to abstract sockets made outside.
+LANDLOCK_STEP = """
 CREATE_RULESET, RESTRICT_SELF = 444, 446
 SET_NO_NEW_PRIVS = 38
 SCOPE_ABSTRACT_UNIX_SOCKET = 1
@@ -82,13 +95,30 @@ if (
     or libc.prctl(SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
     or libc.syscall(RESTRICT_SELF, fd, ctypes.c_uint32(0)) != 0
 ):
-    error = os.strerror(ctypes.get_errno())
-    sys.stderr.write(f"cannot keep the agent from abstract sockets: {error}\\n")
-    sys.exit(SCOPE_FAILED)
+    fail("abstract sockets", os.strerror(ctypes.get_errno()))
 os.close(fd)
-os.execvp(sys.argv[1], sys.argv[1:])
+"""
+# The seccomp filter: no new Unix socket at all (tenx.seccomp).
+FILTER_STEP = (
+    "\ntry:\n"
+    + indent(seccomp.install_source, "    ")
+    + """\
+except OSError as error:
+    fail("Unix sockets", error.strerror)
 """
 )
+LAUNCHER_END = "\nos.execvp(sys.argv[1], sys.argv[1:])\n"
+
+
+def launcher(scope: bool, program: bytes | None) -> str:
+    """The launcher's Python: Landlock's scope if ``scope``, the filter ``program`` if given."""
+    source = LAUNCHER_START
+    if scope:
+        source += LANDLOCK_STEP
+    if program:
+        source += f"\nPROGRAM = bytes.fromhex({program.hex()!r})\n" + FILTER_STEP
+    return source + LAUNCHER_END
+
 
 # What a sandboxed process is given of the caller's environment. Anything
 # else stays outside: a token, a cloud key or a database address in the
@@ -271,16 +301,27 @@ class Bubblewrap:
     sockets: tuple[Path, ...] = SOCKET_FOLDERS
     kept_sockets: tuple[Path, ...] = KEPT_SOCKETS
     # Keep commands that keep the network from abstract sockets made outside
-    # them, through SCOPE_LAUNCHER. Needs Landlock ABI 6; default_sandbox
+    # them, through the launcher. Needs Landlock ABI 6; default_sandbox
     # turns it on where the kernel has it.
     scope_abstract_sockets: bool = False
+    # Keep commands that keep the network from opening any Unix socket, with
+    # this seccomp filter (tenx.seccomp), through the same launcher. Covers
+    # socket files the sandbox does not hide and abstract sockets on every
+    # kernel; default_sandbox sets it where the machine has a filter.
+    unix_socket_filter: bytes | None = None
     name: str = "bubblewrap"
     isolated: bool = True
 
+    @property
+    def launched(self) -> bool:
+        """Whether commands that keep the network start through the launcher."""
+        return self.scope_abstract_sockets or bool(self.unix_socket_filter)
+
     def command(self, command: list[str], mounts: Mounts) -> list[str]:
-        if mounts.network and self.scope_abstract_sockets:
+        if mounts.network and self.launched:
             # The launcher runs with the runner's own Python, shown read-only.
-            command = [sys.executable, "-I", "-c", SCOPE_LAUNCHER, *command]
+            source = launcher(self.scope_abstract_sockets, self.unix_socket_filter)
+            command = [sys.executable, "-I", "-c", source, *command]
             shown = tuple(p for p in python_folders() if p not in mounts.read_only)
             mounts = replace(mounts, read_only=(*mounts.read_only, *shown))
         workspace = Path(mounts.workspace).resolve()
@@ -389,14 +430,19 @@ class Bubblewrap:
         return checked
 
     def describe(self) -> str:
-        sockets = (
-            "kept from abstract sockets outside"
+        unix = (
+            "kept from opening Unix sockets"
+            if self.unix_socket_filter
+            else "not kept from opening Unix sockets (no filter for this machine)"
+        )
+        abstract = (
+            "from abstract sockets outside"
             if self.scope_abstract_sockets
-            else "not kept from abstract sockets outside (needs Linux 6.12 or later)"
+            else "not from abstract sockets outside by Landlock (needs Linux 6.12 or later)"
         )
         return (
             "bubblewrap: the agents and the gate's builds see only their own folder "
-            f"and the files their work needs; the agents are {sockets}"
+            f"and the files their work needs; the agents are {unix}, and {abstract}"
         )
 
 
@@ -407,6 +453,7 @@ def check(sandbox: Bubblewrap) -> None:
     sandbox that cannot do that fails here too. Where agents are kept from
     abstract sockets, a second command keeps the network, as agents do, and
     starts through the launcher, so a launcher that cannot run fails here.
+    Where agents are kept from Unix sockets, so is that second command.
     """
     _probe(
         sandbox,
@@ -414,12 +461,12 @@ def check(sandbox: Bubblewrap) -> None:
         hint="On Ubuntu 24.04 and later, AppArmor blocks it unless bubblewrap has a "
         "profile that allows user namespaces",
     )
-    if sandbox.scope_abstract_sockets:
+    if sandbox.launched:
         _probe(
             sandbox,
             network=True,
-            hint="The kernel offers Landlock's scoping, but the agents could not be "
-            "kept from abstract sockets with it",
+            hint="The agents could not be kept from sockets with Landlock's scope or "
+            "the seccomp filter, which this computer should allow",
         )
 
 
@@ -462,6 +509,10 @@ def default_sandbox(unisolated: bool = False, platform: str | None = None) -> Sa
     executable = which("bwrap")
     if executable is None:
         raise SandboxError(f"bubblewrap (bwrap) is needed to keep agents apart; {BWRAP_INSTALL}")
-    sandbox = Bubblewrap(executable, scope_abstract_sockets=landlock_abi() >= LANDLOCK_SCOPE_ABI)
+    sandbox = Bubblewrap(
+        executable,
+        scope_abstract_sockets=landlock_abi() >= LANDLOCK_SCOPE_ABI,
+        unix_socket_filter=seccomp.unix_socket_filter(machine()),
+    )
     check(sandbox)
     return sandbox

@@ -154,8 +154,8 @@ database. It is given only a short list of your environment variables
 your environment through `env_var`. It has no network and sees none of the
 system's sockets, and dbt does not load a `.env` file for it (sandboxed or
 not). The agents keep the network but not the system's sockets, except
-those that answer name lookups, nor, on Linux 6.12 and later, sockets
-bound to abstract names outside their sandbox. Where no sandbox can be
+those that answer name lookups, and on x86_64 and aarch64 they cannot
+open a Unix socket at all. Where no sandbox can be
 set up the command
 refuses to build, with exit status 2; `--unisolated` builds without one, for a project you trust,
 and prints a warning. See [Security](security.md).
