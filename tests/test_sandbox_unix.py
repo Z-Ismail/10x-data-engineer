@@ -82,10 +82,31 @@ class CommandTest(unittest.TestCase):
             launcher(True, PROGRAM),
         )
 
-    def test_a_command_without_the_network_is_not_wrapped(self):
-        self.assertEqual(
-            after_options(self.command(PROGRAM, network=False)), ["claude", "-p", "go"]
-        )
+    def test_a_command_without_the_network_starts_with_the_filter_alone(self):
+        # As the gate's builds and the counting process do: no network, so
+        # no abstract socket to scope, but socket files in shown folders.
+        for scoped in (False, True):
+            self.assertEqual(
+                after_options(self.command(PROGRAM, scoped=scoped, network=False)),
+                [sys.executable, "-I", "-c", launcher(False, PROGRAM), "claude", "-p", "go"],
+            )
+
+    def test_without_a_filter_a_command_without_the_network_is_not_wrapped(self):
+        for scoped in (False, True):
+            self.assertEqual(
+                after_options(self.command(None, scoped=scoped, network=False)),
+                ["claude", "-p", "go"],
+            )
+
+    def test_the_launcher_is_started_by_its_tidied_path(self):
+        # As when the runner is started as ../venv/bin/python from a folder
+        # the sandbox hides: the path is tidied, not resolved, since a
+        # virtual environment's python is a link.
+        given = "/opt/hidden/../venv/./bin/python"
+        for network in (True, False):
+            with mock.patch("tenx.sandbox.sys.executable", given):
+                started = after_options(self.command(PROGRAM, network=network))[0]
+            self.assertEqual(started, "/opt/venv/bin/python")
 
     def test_neither_limit_leaves_the_command_as_it_was(self):
         self.assertEqual(after_options(self.command(None)), ["claude", "-p", "go"])
@@ -101,6 +122,16 @@ for a in "$@"; do
       exit 126 ;;
   esac
 done
+exit 0
+"""
+# The same, but only for a command without the network, as the start-up
+# check's first probe is.
+FAILING_OFFLINE_FILTER = """#!/bin/sh
+case "$*" in
+  *--unshare-net*PROGRAM*)
+    echo "cannot keep the agent from Unix sockets: Invalid argument" >&2
+    exit 126 ;;
+esac
 exit 0
 """
 
@@ -128,21 +159,36 @@ class DefaultSandboxTest(unittest.TestCase):
         for machine in ("x86_64", "aarch64"):
             sandbox = self.sandbox(machine)
             self.assertEqual(sandbox.unix_socket_filter, unix_socket_filter(machine))
-            self.assertIn("the agents are kept from opening Unix sockets", sandbox.describe())
+            self.assertIn(
+                "the agents and the gate's builds are kept from opening Unix sockets",
+                sandbox.describe(),
+            )
 
     def test_other_machines_run_without_it_and_say_so(self):
         sandbox = self.sandbox("riscv64")
         self.assertIsNone(sandbox.unix_socket_filter)
-        self.assertIn("not kept from opening Unix sockets", sandbox.describe())
+        self.assertIn("the agents are not kept from opening Unix sockets", sandbox.describe())
 
     def test_a_filter_that_cannot_be_installed_refuses_the_sandbox(self):
         # Even on a kernel without Landlock's scope.
         self.write(FAILING_FILTER)
         with self.assertRaisesRegex(
-            SandboxError, r"cannot keep the agent from Unix sockets: Invalid argument"
+            SandboxError,
+            r"cannot keep the agent from Unix sockets: Invalid argument\)\. "
+            r"The agents could not be kept from sockets",
         ):
             self.sandbox("x86_64", abi=0)
         self.assertIsNone(self.sandbox("riscv64", abi=0).unix_socket_filter)
+
+    def test_the_check_tries_the_filter_without_the_network_too(self):
+        # As the gate's builds start, so a filter they cannot have fails
+        # before any build, and is named as the cause.
+        self.write(FAILING_OFFLINE_FILTER)
+        with self.assertRaisesRegex(
+            SandboxError, r"Unix sockets: Invalid argument\)\. The agents could not be kept"
+        ):
+            self.sandbox("x86_64")
+        self.assertIsNone(self.sandbox("riscv64").unix_socket_filter)
 
 
 if __name__ == "__main__":
