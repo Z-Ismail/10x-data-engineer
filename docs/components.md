@@ -152,8 +152,9 @@ declaration, the expected rows or (for the second build) the first build's
 database. It is given only a short list of your environment variables
 (`PATH`, `HOME`, locale and a few more), so a model cannot read a secret in
 your environment through `env_var`. It has no network and sees none of the
-system's sockets, and dbt does not load a `.env` file for it (sandboxed or
-not). The agents keep the network but not the system's sockets, except
+system's sockets, on x86_64 and aarch64 cannot open a Unix socket (so a dbt
+Python model cannot reach a socket file in a folder it is shown), and dbt
+does not load a `.env` file for it (sandboxed or not). The agents keep the network but not the system's sockets, except
 those that answer name lookups, and on x86_64 and aarch64 they cannot
 open a Unix socket at all. Where no sandbox can be
 set up the command

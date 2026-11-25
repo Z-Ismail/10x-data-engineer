@@ -256,6 +256,20 @@ socket outside, even with Landlock's scope off, and can without the filter.
 On other machines agents run without the filter, and `python -m
 tenx.engineer` says so in its sandbox line.
 
+The gate's builds and the counting process have no network and no `/run`,
+but a socket file in a folder they are shown (the project, the raw data,
+the Python install, or a system folder outside `/run`) would still answer a
+dbt Python model or anything else they run. So on x86_64 and aarch64 they
+start through the same launcher with the filter alone (Landlock's scope
+adds nothing without the network), and the start-up check starts its
+offline probe the same way, so a machine that cannot install the filter
+fails before any build. dbt's build and the counting script were traced to
+make no Unix socket, socket pair or io_uring call of their own. In the
+tests, a dbt Python model in the gate's build and a stand-in for the
+counting script, in the real sandbox, cannot reach a socket in the raw data
+folder, and can without the filter; the build's process shows the filter
+in force.
+
 What the sandbox does not cover yet:
 
 - The agents keep network access, which Claude Code needs, so an agent
@@ -267,9 +281,10 @@ What the sandbox does not cover yet:
   yours that is not hidden) can be reached. On those machines with kernels
   before Linux 6.12, or where Landlock is turned off, an agent can also
   connect to sockets bound to abstract names outside the sandbox.
-- The gate's builds and the counting process have no network and no `/run`,
-  but are not given the filter, so a dbt Python model in the gate's build
-  could still reach a socket file outside `/run` and your home folder.
+- On machines other than x86_64 and aarch64, the gate's builds and the
+  counting process, which have no network and no `/run`, run without the
+  filter, so a dbt Python model in the gate's build could still reach a
+  socket file outside `/run` and your home folder.
 - The names of abstract sockets stay readable in `/proc/net/unix`.
 - An agent can read and change its own sign-in file, as Claude Code itself
   must, and with network access could send the token out.

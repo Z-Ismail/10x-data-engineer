@@ -23,8 +23,9 @@ list of environment variables, so a test whose stand-in reads its settings
 from the environment lists their names in `TENX_SANDBOX_ENV`. A sandboxed agent's
 `CLAUDE_CONFIG_DIR` points at an empty folder of its own, so a stand-in
 must not expect files from your Claude Code config folder. The gate's builds
-and the counting process have no network and an empty `/run`, and dbt
-loads no `.env` file in the gate's builds. Agents keep the network, but each
+and the counting process have no network and an empty `/run`, start
+through the same launcher with the Unix socket filter on x86_64 and
+aarch64, and dbt loads no `.env` file in the gate's builds. Agents keep the network, but each
 socket in `/run` and `/var/run` is covered for them, so a stand-in must not
 expect to reach a service's socket there. An agent starts through a launcher
 run with the runner's Python; on x86_64 and aarch64 it and everything it

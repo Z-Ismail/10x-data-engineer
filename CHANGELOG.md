@@ -6,6 +6,12 @@ Notable changes to this project.
 
 ### Security
 
+- The gate's builds of an agent's project and the counting of a spec's
+  rules can no longer open Unix sockets either, on x86_64 and aarch64
+  Linux. They had no network and no `/run`, but a socket file in a folder
+  they are shown could still answer a dbt Python model. They now start
+  through the same launcher with the seccomp filter, and the start-up check
+  tries it for them before any build.
 - Sandboxed agents can no longer open Unix sockets at all, on x86_64 and
   aarch64 Linux. Covering socket files one by one left out a socket a
   service makes again while an agent runs, socket files outside `/run`, and,
