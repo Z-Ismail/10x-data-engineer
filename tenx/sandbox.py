@@ -318,10 +318,18 @@ class Bubblewrap:
         return self.scope_abstract_sockets or bool(self.unix_socket_filter)
 
     def command(self, command: list[str], mounts: Mounts) -> list[str]:
-        if mounts.network and self.launched:
-            # The launcher runs with the runner's own Python, shown read-only.
-            source = launcher(self.scope_abstract_sockets, self.unix_socket_filter)
-            command = [sys.executable, "-I", "-c", source, *command]
+        # Commands without the network, such as the gate's builds, cannot
+        # reach an abstract socket outside, but can reach a socket file in a
+        # folder shown to them, so they are given the filter alone.
+        scope = self.scope_abstract_sockets and mounts.network
+        if scope or self.unix_socket_filter:
+            # The launcher runs with the runner's own Python, shown read-only,
+            # by its path tidied but not resolved: a virtual environment's
+            # python is a link, and the path given may pass through a folder
+            # the sandbox hides.
+            source = launcher(scope, self.unix_socket_filter)
+            python = os.path.normpath(os.path.abspath(sys.executable))
+            command = [python, "-I", "-c", source, *command]
             shown = tuple(p for p in python_folders() if p not in mounts.read_only)
             mounts = replace(mounts, read_only=(*mounts.read_only, *shown))
         workspace = Path(mounts.workspace).resolve()
@@ -431,18 +439,19 @@ class Bubblewrap:
 
     def describe(self) -> str:
         unix = (
-            "kept from opening Unix sockets"
+            "the agents and the gate's builds are kept from opening Unix sockets"
             if self.unix_socket_filter
-            else "not kept from opening Unix sockets (no filter for this machine)"
+            else "the agents are not kept from opening Unix sockets (no filter for this machine)"
         )
         abstract = (
-            "from abstract sockets outside"
+            "the agents from abstract sockets outside"
             if self.scope_abstract_sockets
-            else "not from abstract sockets outside by Landlock (needs Linux 6.12 or later)"
+            else "the agents not from abstract sockets outside by Landlock (needs Linux 6.12 "
+            "or later)"
         )
         return (
             "bubblewrap: the agents and the gate's builds see only their own folder "
-            f"and the files their work needs; the agents are {unix}, and {abstract}"
+            f"and the files their work needs; {unix}, and {abstract}"
         )
 
 
@@ -450,10 +459,11 @@ def check(sandbox: Bubblewrap) -> None:
     """Start an empty command in the sandbox, so a broken one fails before any agent runs.
 
     The command is cut off from the network, as the gate's builds are, so a
-    sandbox that cannot do that fails here too. Where agents are kept from
-    abstract sockets, a second command keeps the network, as agents do, and
-    starts through the launcher, so a launcher that cannot run fails here.
-    Where agents are kept from Unix sockets, so is that second command.
+    sandbox that cannot do that fails here too; where there is a filter for
+    Unix sockets, it starts through the launcher with it, as those builds
+    do. Where agents are kept from abstract sockets or Unix sockets, a
+    second command keeps the network, as agents do, and starts through the
+    launcher, so a launcher that cannot run fails here.
     """
     _probe(
         sandbox,
@@ -462,15 +472,16 @@ def check(sandbox: Bubblewrap) -> None:
         "profile that allows user namespaces",
     )
     if sandbox.launched:
-        _probe(
-            sandbox,
-            network=True,
-            hint="The agents could not be kept from sockets with Landlock's scope or "
-            "the seccomp filter, which this computer should allow",
-        )
+        _probe(sandbox, network=True)
 
 
-def _probe(sandbox: Bubblewrap, network: bool, hint: str) -> None:
+LAUNCHER_HINT = (
+    "The agents could not be kept from sockets with Landlock's scope or "
+    "the seccomp filter, which this computer should allow"
+)
+
+
+def _probe(sandbox: Bubblewrap, network: bool, hint: str = LAUNCHER_HINT) -> None:
     with tempfile.TemporaryDirectory() as folder:
         probe = sandbox.command(["true"], Mounts(workspace=Path(folder), network=network))
         try:
@@ -488,6 +499,8 @@ def _probe(sandbox: Bubblewrap, network: bool, hint: str) -> None:
     if finished.returncode != 0:
         detail = finished.stdout.strip().splitlines()
         reason = detail[-1] if detail else f"exit {finished.returncode}"
+        if finished.returncode == SCOPE_FAILED and reason.startswith("cannot keep the agent"):
+            hint = LAUNCHER_HINT
         raise SandboxError(
             f"bubblewrap is installed but cannot set up a sandbox here ({reason}). {hint}"
         )

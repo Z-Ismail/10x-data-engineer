@@ -284,7 +284,7 @@ class DefaultSandboxTest(unittest.TestCase):
         for abi in (6, 7, 8):
             sandbox = self.sandbox(abi)
             self.assertTrue(sandbox.scope_abstract_sockets, abi)
-            self.assertIn("and from abstract sockets outside", sandbox.describe())
+            self.assertIn("and the agents from abstract sockets outside", sandbox.describe())
 
 
 if __name__ == "__main__":
