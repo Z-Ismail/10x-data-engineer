@@ -1,0 +1,146 @@
+"""Tests for the time limit on the gate's dbt builds.
+
+A project's model can loop forever, or start a process that outlives the
+build. The gate stops a build at its time limit with every process it
+started, does not wait for a process the build left behind, and reads back
+only the end of what a build printed. The processes started here carry a
+token on their command line, so the tests can look for them afterwards.
+
+The sandboxed tests are skipped where bubblewrap cannot run, unless
+TENX_REQUIRE_SANDBOX is set, as it is in CI; then they fail instead.
+"""
+
+import os
+import sys
+import tempfile
+import time
+import unittest
+import uuid
+from pathlib import Path
+
+from tenx.gate import (
+    FAIL,
+    OUTPUT_LIMIT,
+    _build,
+    check_build,
+)
+from tenx.sandbox import SandboxError, default_sandbox
+
+FIXTURES = Path(__file__).parent / "fixtures"
+PROJECT = FIXTURES / "demo_project"
+DECLARATION = FIXTURES / "demo_gate.json"
+# A stopped build must end well before this: the limits used are seconds.
+PROMPTLY = 60.0
+
+
+def _sandbox_problem() -> str:
+    try:
+        default_sandbox()
+    except SandboxError as error:
+        return str(error)
+    return ""
+
+
+SANDBOX_PROBLEM = _sandbox_problem()
+needs_sandbox = unittest.skipIf(
+    bool(SANDBOX_PROBLEM) and not os.environ.get("TENX_REQUIRE_SANDBOX"),
+    f"no working sandbox: {SANDBOX_PROBLEM}",
+)
+
+
+def running(token: str) -> list[int]:
+    """Process ids whose command line holds token, other than this one's."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if token.encode() in command:
+            found.append(int(entry.name))
+    return found
+
+
+def gone(token: str, within: float = 5.0) -> bool:
+    """Whether every process with token has ended, allowing a moment to reap."""
+    deadline = time.monotonic() + within
+    while running(token):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def sleeper(token: str, seconds: int = 600) -> str:
+    """Python code that sleeps, with token on its command line."""
+    return f"import time; time.sleep({seconds}); {token!r}"
+
+
+class BuildProcessTest(unittest.TestCase):
+    """The build's process: stopped at the limit, not waited for afterwards, output capped."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.token = f"tenx-test-{uuid.uuid4().hex}"
+        self.addCleanup(self.kill_leftovers)
+
+    def kill_leftovers(self):
+        for pid in running(self.token):
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+
+    def test_a_build_past_its_limit_is_stopped_with_its_children(self):
+        child = f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {sleeper(self.token)!r}]); time.sleep(600)"
+        started = time.monotonic()
+        code, output = _build([sys.executable, "-c", child], self.root, dict(os.environ), 2)
+        self.assertLess(time.monotonic() - started, PROMPTLY)
+        self.assertIsNone(code)
+        self.assertTrue(output.endswith("the gate stopped the build after 2 seconds\n"), output)
+        self.assertTrue(gone(self.token))
+
+    def test_a_process_left_holding_the_output_is_not_waited_for(self):
+        # The build ends at once; a process it started keeps its output open.
+        left = f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {sleeper(self.token)!r}]); print('done')"
+        started = time.monotonic()
+        code, output = _build([sys.executable, "-c", left], self.root, dict(os.environ), 300)
+        self.assertLess(time.monotonic() - started, PROMPTLY)
+        self.assertEqual((code, output), (0, "done\n"))
+        self.assertTrue(gone(self.token))
+
+    def test_a_build_that_ends_keeps_its_exit_status_and_output(self):
+        script = "import sys; print('first'); print('second', file=sys.stderr); sys.exit(3)"
+        code, output = _build([sys.executable, "-c", script], self.root, dict(os.environ), 300)
+        self.assertEqual(code, 3)
+        self.assertEqual(sorted(output.split()), ["first", "second"])
+
+    def test_only_the_end_of_a_long_output_is_read(self):
+        script = "import sys; sys.stdout.write('a' * 3_000_000 + 'END')"
+        code, output = _build([sys.executable, "-c", script], self.root, dict(os.environ), 300)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(output), OUTPUT_LIMIT)
+        self.assertTrue(output.endswith("aEND"))
+
+    def test_a_stopped_build_fails_the_build_check_and_every_model(self):
+        results, relations = check_build(
+            None, None, [], "the gate stopped the build after 9 seconds"
+        )
+        self.assertEqual(relations, {})
+        (result,) = results
+        self.assertEqual(result.status, FAIL)
+        self.assertTrue(
+            result.detail.startswith(
+                "dbt build did not finish within the gate's time limit and was stopped\n"
+            ),
+            result.detail,
+        )
+        self.assertIn("after 9 seconds", result.detail)
+
+
+if __name__ == "__main__":
+    unittest.main()

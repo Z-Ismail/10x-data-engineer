@@ -88,6 +88,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -134,6 +136,13 @@ LOG_DIR = "logs"
 EXPECTED_FILE = "expected.duckdb"
 EXPECTED_CATALOG = "tenx_expected"
 OUTPUT_TAIL = 15
+# How long one dbt build may run before the gate stops it. A model can loop
+# forever, and nothing else would end the build: it spends no tokens, so no
+# budget stops it either.
+BUILD_TIMEOUT_SECONDS = 20 * 60.0
+# Only the end of what a build printed is read back, so a model that prints
+# without end cannot fill the gate's memory.
+OUTPUT_LIMIT = 256 * 1024
 EXAMPLES = 3
 MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals", "expected"}
 EXCLUSION_FIELDS = {"name", "where", "duplicate_rows"}
@@ -1020,7 +1029,7 @@ def _is_model(unique_id: str, name: str) -> bool:
 
 
 def check_build(
-    exit_code: int, run_results: dict | None, models: list[ModelSpec], output: str = ""
+    exit_code: int | None, run_results: dict | None, models: list[ModelSpec], output: str = ""
 ) -> tuple[list[Result], dict[str, str]]:
     """Judge a finished ``dbt build`` from its exit status and run results.
 
@@ -1031,7 +1040,11 @@ def check_build(
     """
     if run_results is None:
         tail = "\n".join(output.strip().splitlines()[-OUTPUT_TAIL:])
-        detail = f"dbt build exited {exit_code} and recorded no results"
+        detail = (
+            "dbt build did not finish within the gate's time limit and was stopped"
+            if exit_code is None
+            else f"dbt build exited {exit_code} and recorded no results"
+        )
         results = [Result("build", "project", FAIL, f"{detail}\n{tail}" if tail else detail)]
         results += [
             Result("build", model.name, FAIL, "the model was not built") for model in models
@@ -1119,7 +1132,7 @@ def built_models(run_results: dict | None) -> dict[str, tuple[str, str]]:
 def check_repeat_build(
     workdir: Path,
     first: dict[str, tuple[str, str]],
-    exit_code: int,
+    exit_code: int | None,
     run_results: dict | None,
     output: str,
 ) -> list[Result]:
@@ -1162,15 +1175,19 @@ def build_project(
     database_file: str = DATABASE_FILE,
     sandbox: Sandbox | None = None,
     hidden: tuple[Path, ...] = (),
-) -> tuple[int, dict | None, str]:
+    timeout: float = BUILD_TIMEOUT_SECONDS,
+) -> tuple[int | None, dict | None, str]:
     """Run ``dbt build`` on the project into a new database under workdir.
 
     dbt runs as its own process, as its documentation asks of callers, and
     with a connection profile written here, so the project cannot choose
     which database it is built into. In ``sandbox`` the build sees the
     project and the raw files read-only, can write only workdir, never
-    sees the ``hidden`` paths and has no network. Returns the exit status,
-    the parsed ``run_results.json`` if dbt wrote one, and what dbt printed.
+    sees the ``hidden`` paths and has no network. A build still running
+    after ``timeout`` seconds is stopped, with every process it started.
+    Returns the exit status (None for a stopped build), the parsed
+    ``run_results.json`` if dbt wrote one in time, and the end of what dbt
+    printed.
     """
     if not dbt_installed():
         raise GateError(
@@ -1222,25 +1239,61 @@ def build_project(
         command = sandbox.command(command, seen)
     except SandboxError as error:
         raise GateError(f"the build cannot be kept apart from the gate's files: {error}") from error
-    finished = subprocess.run(
+    code, output = _build(
         command,
-        cwd=project,
+        project,
         # In a sandbox, none of the caller's secrets: a model reads any
         # variable it is given through env_var.
-        env=environment(sandbox) | BUILD_ENVIRONMENT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=False,
+        environment(sandbox) | BUILD_ENVIRONMENT,
+        timeout,
     )
     run_results = None
     results_file = target / "run_results.json"
-    if results_file.is_file():
+    if code is not None and results_file.is_file():
         try:
             run_results = json.loads(results_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             run_results = None
-    return finished.returncode, run_results, finished.stdout
+    return code, run_results, output
+
+
+def _build(
+    command: list[str], cwd: Path, env: dict[str, str], timeout: float
+) -> tuple[int | None, str]:
+    """Run a build in its own process group; stop the group at the end.
+
+    dbt's output goes to an unnamed file rather than a pipe: a process the
+    build started and left running would keep a pipe open, and the gate
+    would wait for it however long it ran. When the build ends, or is
+    stopped at ``timeout``, whatever it left in its group is killed.
+    """
+    with tempfile.TemporaryFile() as out:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        code: int | None
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            code = None
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        size = out.seek(0, os.SEEK_END)
+        out.seek(max(0, size - OUTPUT_LIMIT))
+        output = out.read().decode("utf-8", "replace")
+    if code is None:
+        output += f"\nthe gate stopped the build after {timeout:g} seconds\n"
+    return code, output
 
 
 def build_record(workdir: Path) -> dict[str, Path]:

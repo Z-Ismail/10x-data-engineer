@@ -170,9 +170,12 @@ class KeptRows:
 
 @dataclass(frozen=True)
 class BuildResult:
-    """What one build of a project gave: its exit status, results and output."""
+    """What one build of a project gave: its exit status, results and output.
 
-    exit_code: int
+    The exit status is None for a build stopped at its time limit.
+    """
+
+    exit_code: int | None
     results: dict | None
     output: str
 
