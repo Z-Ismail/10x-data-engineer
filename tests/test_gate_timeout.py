@@ -10,6 +10,7 @@ The sandboxed tests are skipped where bubblewrap cannot run, unless
 TENX_REQUIRE_SANDBOX is set, as it is in CI; then they fail instead.
 """
 
+import io
 import os
 import shutil
 import sys
@@ -17,16 +18,20 @@ import tempfile
 import time
 import unittest
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from demo.generate import generate
 from tenx.gate import (
+    BUILD_TIMEOUT_SECONDS,
     FAIL,
     OUTPUT_LIMIT,
     SKIP,
     _build,
     build_project,
     check_build,
+    main,
     run_gate,
 )
 from tenx.sandbox import SandboxError, Unisolated, default_sandbox
@@ -218,6 +223,51 @@ class HangingProjectTest(unittest.TestCase):
         self.assertIn("time limit", build[0].detail)
         others = [result for result in results if result.check != "build"]
         self.assertTrue(others and all(result.status == SKIP for result in others))
+
+
+class CommandLineTest(unittest.TestCase):
+    """--build-timeout sets the limit; the default is the gate's own."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.token = f"tenx-test-{uuid.uuid4().hex}"
+        self.raw = self.root / "data"
+        generate(11, 20, self.raw, self.root / "answers")
+
+    def main(self, project: Path, *flags: str) -> tuple[int, str, str]:
+        arguments = [str(project), "--raw", str(self.raw), "--checks", str(DECLARATION)]
+        with (
+            redirect_stdout(io.StringIO()) as printed,
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            code = main([*arguments, "--unisolated", *flags])
+        return code, printed.getvalue(), errors.getvalue()
+
+    def test_a_hanging_project_fails_at_the_limit_given(self):
+        project = hanging_project(self.root, self.token)
+        code, printed, _ = self.main(project, "--build-timeout", "15")
+        self.assertEqual(code, 1, printed)
+        self.assertTrue(printed.startswith("gate: FAIL"), printed)
+        self.assertIn("did not finish within the gate's time limit", printed)
+        self.assertTrue(gone(self.token))
+
+    def test_the_limit_reaches_the_gate(self):
+        with mock.patch("tenx.gate.run_gate", return_value=[]) as gate:
+            self.main(PROJECT)
+            self.main(PROJECT, "--build-timeout", "2.5")
+        timeouts = [call.kwargs["timeout"] for call in gate.call_args_list]
+        self.assertEqual(timeouts, [BUILD_TIMEOUT_SECONDS, 2.5])
+        self.assertEqual(BUILD_TIMEOUT_SECONDS, 1200.0)
+
+    def test_a_limit_that_is_not_a_positive_number_is_refused(self):
+        for value in ("0", "-5", "nan", "inf", "soon", ""):
+            with self.subTest(value=value), mock.patch("tenx.gate.run_gate") as gate:
+                with self.assertRaises(SystemExit) as stopped:
+                    self.main(PROJECT, "--build-timeout", value)
+                self.assertEqual(stopped.exception.code, 2)
+                gate.assert_not_called()
 
 
 if __name__ == "__main__":

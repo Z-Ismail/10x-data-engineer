@@ -76,6 +76,9 @@ sandbox.
 Usage:
     python -m tenx.gate path/to/project --raw demo/data --checks gate.json
 
+Each build is stopped after 20 minutes, or after --build-timeout SECONDS,
+and a stopped build fails the project.
+
 The command builds in a sandbox (bubblewrap, Linux) and refuses to run where
 none can be set up, unless given --unisolated.
 
@@ -88,6 +91,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import os
 import signal
 import subprocess
@@ -1517,6 +1521,17 @@ def render(results: list[Result]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _seconds(value: str) -> float:
+    """A time limit given on the command line: a positive, finite number of seconds."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError(f"not a positive number of seconds: {value!r}")
+    return seconds
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("project", type=Path, help="the dbt project to check")
@@ -1535,6 +1550,14 @@ def main(argv: list[str] | None = None) -> int:
         help="build without a sandbox, so that the project's code can read and change any "
         "file you can; only for a project you trust",
     )
+    parser.add_argument(
+        "--build-timeout",
+        type=_seconds,
+        default=BUILD_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help="stop a dbt build still running after this many seconds and fail the project "
+        f"(default: {BUILD_TIMEOUT_SECONDS:g})",
+    )
     args = parser.parse_args(argv)
     try:
         sandbox = default_sandbox(unisolated=args.unisolated)
@@ -1544,7 +1567,14 @@ def main(argv: list[str] | None = None) -> int:
     if not sandbox.isolated:
         print("warning: built without a sandbox (--unisolated)", file=sys.stderr)
     try:
-        results = run_gate(args.project, args.raw, args.checks, args.workdir, sandbox)
+        results = run_gate(
+            args.project,
+            args.raw,
+            args.checks,
+            args.workdir,
+            sandbox,
+            timeout=args.build_timeout,
+        )
     except GateError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
