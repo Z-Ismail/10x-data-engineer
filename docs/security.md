@@ -60,6 +60,11 @@ the home folder, and to change the declaration, the gate's databases, the
 project, the raw files and the home folder; every attempt fails in the
 sandbox and succeeds without it. `python -m tenx.gate` also builds in the
 sandbox, and refuses where none can be set up unless given `--unisolated`.
+Each build runs in its own process group and is stopped after 20 minutes
+(`--build-timeout`), so a model that never finishes cannot hold the gate or
+the run; whatever a build leaves running is killed when it ends, and in the
+sandbox nothing survives bubblewrap. The tests stop real builds whose Python
+model sleeps and starts another process, both with and without the sandbox.
 
 When a graph run repairs a failed project (`--repairs`), the engineer is
 told what the gate found, but never the rows the gate worked out from its
@@ -286,6 +291,8 @@ What the sandbox does not cover yet:
   filter, so a dbt Python model in the gate's build could still reach a
   socket file outside `/run` and your home folder.
 - The names of abstract sockets stay readable in `/proc/net/unix`.
+- A gate build is limited in time but not in memory or disk space, so a
+  hostile model can still fill either until the build is stopped.
 - An agent can read and change its own sign-in file, as Claude Code itself
   must, and with network access could send the token out.
 

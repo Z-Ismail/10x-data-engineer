@@ -161,6 +161,14 @@ set up the command
 refuses to build, with exit status 2; `--unisolated` builds without one, for a project you trust,
 and prints a warning. See [Security](security.md).
 
+Each build is stopped if it is still running after 20 minutes
+(`--build-timeout SECONDS` changes this), together with every process it
+started, and a stopped build fails the `build` check (`dbt build did not
+finish within the gate's time limit and was stopped`); the other checks are
+then skipped. A process a build starts and leaves running is stopped when
+the build ends, and only the last 256 KiB of what a build prints is read
+back. Graph runs use the 20-minute limit.
+
 What to expect is declared in a JSON file that is kept outside the dbt
 project, so the checks cannot be edited by whoever writes the models:
 
