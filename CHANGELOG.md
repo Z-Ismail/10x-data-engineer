@@ -6,6 +6,14 @@ Notable changes to this project.
 
 ### Security
 
+- The gate stops each dbt build that is still running after 20 minutes
+  (`python -m tenx.gate --build-timeout SECONDS` changes this) and fails the
+  project. A model that never finished held the gate, and a graph run with
+  it, indefinitely, since a build spends nothing a budget could stop; a
+  process a build started and left running also kept the gate waiting after
+  dbt had finished. Each build now runs in its own process group, with its
+  output in a file rather than a pipe, and whatever it leaves running is
+  killed when it ends. Only the last 256 KiB of a build's output is read.
 - The gate's builds of an agent's project and the counting of a spec's
   rules can no longer open Unix sockets either, on x86_64 and aarch64
   Linux. They had no network and no `/run`, but a socket file in a folder
