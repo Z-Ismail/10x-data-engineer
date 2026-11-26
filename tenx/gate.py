@@ -93,6 +93,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -143,6 +144,8 @@ BUILD_TIMEOUT_SECONDS = 20 * 60.0
 # Only the end of what a build printed is read back, so a model that prints
 # without end cannot fill the gate's memory.
 OUTPUT_LIMIT = 256 * 1024
+# How long the gate waits for a stopped build's processes to exit.
+GROUP_EXIT_SECONDS = 10.0
 EXAMPLES = 3
 MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals", "expected"}
 EXCLUSION_FIELDS = {"name", "where", "duplicate_rows"}
@@ -1288,12 +1291,47 @@ def _build(
             except ProcessLookupError:
                 pass
             process.wait()
+            _wait_for_group(process.pid)
         size = out.seek(0, os.SEEK_END)
         out.seek(max(0, size - OUTPUT_LIMIT))
         output = out.read().decode("utf-8", "replace")
     if code is None:
         output += f"\nthe gate stopped the build after {timeout:g} seconds\n"
     return code, output
+
+
+def _wait_for_group(group: int, limit: float = GROUP_EXIT_SECONDS) -> None:
+    """Wait until every process killed in the group has exited.
+
+    Killed processes end a moment after the signal, and until then a stopped
+    build can still hold its database open. A process that has exited but
+    not been reaped holds nothing, so it is not waited for.
+    """
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            return
+        if not _running_in(group):
+            return
+        time.sleep(0.05)
+
+
+def _running_in(group: int) -> bool:
+    """Whether a process in the group has not yet exited, as far as /proc shows."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return True
+    for entry in proc.iterdir():
+        try:
+            # After the command name, which may hold spaces or brackets.
+            fields = (entry / "stat").read_text().rpartition(")")[2].split()
+        except (OSError, ValueError):
+            continue
+        if len(fields) > 2 and fields[2] == str(group) and fields[0] not in ("Z", "X"):
+            return True
+    return False
 
 
 def build_record(workdir: Path) -> dict[str, Path]:
@@ -1314,6 +1352,7 @@ def _run(
     workdir: Path,
     sandbox: Sandbox | None,
     hidden: tuple[Path, ...],
+    timeout: float = BUILD_TIMEOUT_SECONDS,
 ) -> list[Result]:
     files = source_files(raw)
     for model in models:
@@ -1338,7 +1377,7 @@ def _run(
     # Neither build may see the rows it is compared with.
     hidden = (*hidden, workdir / EXPECTED_FILE)
     exit_code, run_results, output = build_project(
-        project, raw, workdir, sandbox=sandbox, hidden=hidden
+        project, raw, workdir, sandbox=sandbox, hidden=hidden, timeout=timeout
     )
     results, relations = check_build(exit_code, run_results, models, output)
 
@@ -1385,6 +1424,7 @@ def _run(
             REPEAT_FILE,
             sandbox=sandbox,
             hidden=(*hidden, workdir / DATABASE_FILE),
+            timeout=timeout,
         )
         results += check_repeat_build(workdir, first, *second)
     else:
@@ -1407,6 +1447,7 @@ def run_gate(
     workdir: Path | None = None,
     sandbox: Sandbox | None = None,
     hidden: tuple[Path, ...] = (),
+    timeout: float = BUILD_TIMEOUT_SECONDS,
 ) -> list[Result]:
     """Build the project from an empty database and run every check.
 
@@ -1414,7 +1455,8 @@ def run_gate(
     kept. Without a workdir they go to a temporary folder that is removed.
     With a sandbox, each build runs in it and cannot see the declaration,
     the expected rows or the ``hidden`` paths; without one, the builds can
-    read and change any file the user can.
+    read and change any file the user can. Each build is stopped if it is
+    still running after ``timeout`` seconds.
     """
     project = Path(project).resolve()
     raw = Path(raw).resolve()
@@ -1424,12 +1466,12 @@ def run_gate(
         raise GateError(f"{project} is not a dbt project: it has no dbt_project.yml")
     if workdir is None:
         with tempfile.TemporaryDirectory(prefix="tenx-gate-") as temporary:
-            return _run(project, raw, models, Path(temporary).resolve(), sandbox, hidden)
+            return _run(project, raw, models, Path(temporary).resolve(), sandbox, hidden, timeout)
     workdir = Path(workdir).resolve()
     if workdir.exists() and (not workdir.is_dir() or any(workdir.iterdir())):
         raise GateError(f"{workdir} must be empty, so that the build starts from nothing")
     workdir.mkdir(parents=True, exist_ok=True)
-    return _run(project, raw, models, workdir, sandbox, hidden)
+    return _run(project, raw, models, workdir, sandbox, hidden, timeout)
 
 
 def passed(results: list[Result]) -> bool:

@@ -11,6 +11,7 @@ TENX_REQUIRE_SANDBOX is set, as it is in CI; then they fail instead.
 """
 
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -18,13 +19,17 @@ import unittest
 import uuid
 from pathlib import Path
 
+from demo.generate import generate
 from tenx.gate import (
     FAIL,
     OUTPUT_LIMIT,
+    SKIP,
     _build,
+    build_project,
     check_build,
+    run_gate,
 )
-from tenx.sandbox import SandboxError, default_sandbox
+from tenx.sandbox import SandboxError, Unisolated, default_sandbox
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PROJECT = FIXTURES / "demo_project"
@@ -140,6 +145,79 @@ class BuildProcessTest(unittest.TestCase):
             result.detail,
         )
         self.assertIn("after 9 seconds", result.detail)
+
+
+HANGING_MODEL = """
+import subprocess
+import sys
+import time
+
+
+def model(dbt, session):
+    subprocess.Popen([sys.executable, "-c", {child!r}])
+    time.sleep(600)
+    return session.sql("select 1 as x")
+"""
+
+
+def hanging_project(root: Path, token: str) -> Path:
+    """The reference project with a Python model that never finishes."""
+    project = root / "project"
+    shutil.copytree(PROJECT, project)
+    model = HANGING_MODEL.format(child=sleeper(token))
+    (project / "models" / "hang.py").write_text(model, encoding="utf-8")
+    return project
+
+
+class HangingProjectTest(unittest.TestCase):
+    """A real dbt build whose model hangs, unisolated and in the sandbox."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.token = f"tenx-test-{uuid.uuid4().hex}"
+        self.project = hanging_project(self.root, self.token)
+        self.raw = self.root / "data"
+        generate(11, 20, self.raw, self.root / "answers")
+
+    def build(self, sandbox) -> tuple:
+        started = time.monotonic()
+        code, results, output = build_project(
+            self.project, self.raw, self.root / "work", sandbox=sandbox, timeout=20
+        )
+        self.assertLess(time.monotonic() - started, 20 + PROMPTLY)
+        return code, results, output
+
+    def test_unisolated_the_build_is_stopped(self):
+        code, results, output = self.build(Unisolated())
+        self.assertEqual((code, results), (None, None))
+        self.assertIn("the gate stopped the build after 20 seconds", output)
+        self.assertTrue(gone(self.token))
+
+    @needs_sandbox
+    def test_in_the_sandbox_the_build_is_stopped(self):
+        code, results, output = self.build(default_sandbox())
+        self.assertEqual((code, results), (None, None))
+        self.assertIn("the gate stopped the build after 20 seconds", output)
+        self.assertTrue(gone(self.token))
+
+    @needs_sandbox
+    def test_the_gate_fails_the_project_and_skips_the_rest(self):
+        results = run_gate(
+            self.project,
+            self.raw,
+            DECLARATION,
+            self.root / "gate",
+            default_sandbox(),
+            timeout=20,
+        )
+        self.assertTrue(gone(self.token))
+        build = [result for result in results if result.check == "build"]
+        self.assertTrue(build and all(result.status == FAIL for result in build))
+        self.assertIn("time limit", build[0].detail)
+        others = [result for result in results if result.check != "build"]
+        self.assertTrue(others and all(result.status == SKIP for result in others))
 
 
 if __name__ == "__main__":
