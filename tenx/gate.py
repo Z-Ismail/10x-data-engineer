@@ -156,6 +156,10 @@ GROUP_EXIT_SECONDS = 10.0
 # computer (Python, dbt and DuckDB reserve far more than they use).
 GIB = 2**30
 BUILD_MEMORY_FLOOR = 4 * GIB
+# DuckDB's own memory limit, as a share of the build's: past it DuckDB
+# writes its work to disk rather than failing at the build's limit, and it
+# still needs room outside it (its limit covers only its buffer manager).
+DUCKDB_SHARE = 4
 # Started in front of a build: lower the address-space limit, then become
 # the build. Every process it starts inherits the limit, inside a sandbox
 # too. A lower hard limit the user already has is kept.
@@ -1202,6 +1206,7 @@ def build_project(
     sandbox: Sandbox | None = None,
     hidden: tuple[Path, ...] = (),
     timeout: float = BUILD_TIMEOUT_SECONDS,
+    memory: int | None = None,
 ) -> tuple[int | None, dict | None, str]:
     """Run ``dbt build`` on the project into a new database under workdir.
 
@@ -1211,14 +1216,17 @@ def build_project(
     project and the raw files read-only, can write only workdir, never
     sees the ``hidden`` paths and has no network. A build still running
     after ``timeout`` seconds is stopped, with every process it started.
-    Returns the exit status (None for a stopped build), the parsed
-    ``run_results.json`` if dbt wrote one in time, and the end of what dbt
-    printed.
+    The build and each process it starts can address at most ``memory``
+    bytes (by default half the computer's memory, at least 4 GiB), and
+    DuckDB is told to keep within a quarter of that. Returns the exit
+    status (None for a stopped build), the parsed ``run_results.json`` if
+    dbt wrote one in time, and the end of what dbt printed.
     """
     if not dbt_installed():
         raise GateError(
             'dbt is not installed; install it with: pip install "dbt-core~=1.12" "dbt-duckdb~=1.11"'
         )
+    memory = build_memory() if memory is None else memory
     profiles = workdir / "profiles"
     profiles.mkdir(parents=True)
     database = workdir / database_file
@@ -1229,7 +1237,9 @@ def build_project(
         "    gate:\n"
         "      type: duckdb\n"
         f"      path: {json.dumps(str(database))}\n"
-        "      threads: 1\n",
+        "      threads: 1\n"
+        "      settings:\n"
+        f"        memory_limit: '{memory // DUCKDB_SHARE // 2**20}MiB'\n",
         encoding="utf-8",
     )
     target = workdir / TARGET_DIR
@@ -1272,6 +1282,7 @@ def build_project(
         # variable it is given through env_var.
         environment(sandbox) | BUILD_ENVIRONMENT,
         timeout,
+        memory,
     )
     run_results = None
     results_file = target / "run_results.json"
@@ -1399,6 +1410,7 @@ def _run(
     sandbox: Sandbox | None,
     hidden: tuple[Path, ...],
     timeout: float = BUILD_TIMEOUT_SECONDS,
+    memory: int | None = None,
 ) -> list[Result]:
     files = source_files(raw)
     for model in models:
@@ -1423,7 +1435,7 @@ def _run(
     # Neither build may see the rows it is compared with.
     hidden = (*hidden, workdir / EXPECTED_FILE)
     exit_code, run_results, output = build_project(
-        project, raw, workdir, sandbox=sandbox, hidden=hidden, timeout=timeout
+        project, raw, workdir, sandbox=sandbox, hidden=hidden, timeout=timeout, memory=memory
     )
     results, relations = check_build(exit_code, run_results, models, output)
 
@@ -1471,6 +1483,7 @@ def _run(
             sandbox=sandbox,
             hidden=(*hidden, workdir / DATABASE_FILE),
             timeout=timeout,
+            memory=memory,
         )
         results += check_repeat_build(workdir, first, *second)
     else:
@@ -1494,6 +1507,7 @@ def run_gate(
     sandbox: Sandbox | None = None,
     hidden: tuple[Path, ...] = (),
     timeout: float = BUILD_TIMEOUT_SECONDS,
+    memory: int | None = None,
 ) -> list[Result]:
     """Build the project from an empty database and run every check.
 
@@ -1502,7 +1516,8 @@ def run_gate(
     With a sandbox, each build runs in it and cannot see the declaration,
     the expected rows or the ``hidden`` paths; without one, the builds can
     read and change any file the user can. Each build is stopped if it is
-    still running after ``timeout`` seconds.
+    still running after ``timeout`` seconds, and limited to ``memory`` bytes
+    (see build_project).
     """
     project = Path(project).resolve()
     raw = Path(raw).resolve()
@@ -1512,12 +1527,14 @@ def run_gate(
         raise GateError(f"{project} is not a dbt project: it has no dbt_project.yml")
     if workdir is None:
         with tempfile.TemporaryDirectory(prefix="tenx-gate-") as temporary:
-            return _run(project, raw, models, Path(temporary).resolve(), sandbox, hidden, timeout)
+            return _run(
+                project, raw, models, Path(temporary).resolve(), sandbox, hidden, timeout, memory
+            )
     workdir = Path(workdir).resolve()
     if workdir.exists() and (not workdir.is_dir() or any(workdir.iterdir())):
         raise GateError(f"{workdir} must be empty, so that the build starts from nothing")
     workdir.mkdir(parents=True, exist_ok=True)
-    return _run(project, raw, models, workdir, sandbox, hidden, timeout)
+    return _run(project, raw, models, workdir, sandbox, hidden, timeout, memory)
 
 
 def passed(results: list[Result]) -> bool:

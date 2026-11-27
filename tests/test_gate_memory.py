@@ -11,15 +11,32 @@ TENX_REQUIRE_SANDBOX is set, as it is in CI; then they fail instead.
 
 import os
 import resource
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tenx.gate import BUILD_MEMORY_FLOOR, GIB, _build, build_memory, limited
+from demo.generate import generate
+from tenx.gate import (
+    BUILD_MEMORY_FLOOR,
+    FAIL,
+    GIB,
+    PASS,
+    _build,
+    build_memory,
+    build_project,
+    check_build,
+    limited,
+    load_declaration,
+    run_gate,
+)
 from tenx.sandbox import Mounts, SandboxError, default_sandbox
 
+FIXTURES = Path(__file__).parent / "fixtures"
+PROJECT = FIXTURES / "demo_project"
+DECLARATION = FIXTURES / "demo_gate.json"
 MIB = 2**20
 # Small enough to reach quickly, large enough for Python to start in.
 CAP = 1 * GIB
@@ -109,6 +126,68 @@ class LimitedBuildTest(unittest.TestCase):
                 else:
                     self.assertEqual(code, expected, output)
                     self.assertIn("MemoryError", output)
+
+
+GREEDY_MODEL = """
+def model(dbt, session):
+    hoard = bytearray({size})
+    return session.sql("select 1 as x")
+"""
+# Sorting this many random numbers needs more memory than DuckDB has under a
+# 3 GiB build limit unless it writes part of the work to disk.
+LARGE_SORT = "select range as x, random() as r from range(40000000) order by r"
+
+
+@needs_sandbox
+class RealBuildTest(unittest.TestCase):
+    """Real dbt builds of the reference project in the sandbox, under the limit."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.project = self.root / "project"
+        shutil.copytree(PROJECT, self.project)
+        self.raw = self.root / "data"
+        generate(11, 20, self.raw, self.root / "answers")
+
+    def add_model(self, name: str, text: str) -> None:
+        (self.project / "models" / name).write_text(text, encoding="utf-8")
+
+    def test_duckdb_is_told_a_quarter_of_the_limit(self):
+        work = self.root / "work"
+        code, _, output = build_project(
+            self.project, self.raw, work, sandbox=default_sandbox(), memory=4 * GIB
+        )
+        self.assertEqual(code, 0, output)
+        profile = (work / "profiles" / "profiles.yml").read_text(encoding="utf-8")
+        self.assertIn("      settings:\n        memory_limit: '1024MiB'\n", profile)
+
+    def test_the_default_limit_builds_the_reference_project(self):
+        results = run_gate(self.project, self.raw, DECLARATION, None, default_sandbox())
+        self.assertTrue(results and all(result.status == PASS for result in results))
+
+    def test_a_model_that_takes_too_much_memory_fails_its_build(self):
+        self.add_model("greedy.py", GREEDY_MODEL.format(size=4 * GIB))
+        code, run_results, output = build_project(
+            self.project, self.raw, self.root / "work", sandbox=default_sandbox(), memory=2 * GIB
+        )
+        self.assertEqual(code, 1, output[-2000:])
+        nodes = {node["unique_id"]: node for node in run_results["results"]}
+        self.assertEqual(nodes["model.demo.greedy"]["status"], "error")
+        self.assertIn("MemoryError", nodes["model.demo.greedy"]["message"])
+        results, _ = check_build(code, run_results, load_declaration(DECLARATION), output)
+        self.assertEqual((results[0].subject, results[0].status), ("project", FAIL))
+        self.assertIn("model.demo.greedy: error", results[0].detail)
+
+    def test_a_large_sort_is_written_to_disk_within_the_limit(self):
+        self.add_model("large_sort.sql", LARGE_SORT)
+        code, results, output = build_project(
+            self.project, self.raw, self.root / "work", sandbox=default_sandbox(), memory=3 * GIB
+        )
+        self.assertEqual(code, 0, output[-2000:])
+        statuses = {result["unique_id"]: result["status"] for result in results["results"]}
+        self.assertEqual(statuses["model.demo.large_sort"], "success")
 
 
 class DefaultLimitTest(unittest.TestCase):
