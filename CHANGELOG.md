@@ -6,6 +6,14 @@ Notable changes to this project.
 
 ### Security
 
+- Each dbt build the gate runs, and every process it starts, can address at
+  most half the computer's memory, at least 4 GiB
+  (`python -m tenx.gate --build-memory GIB` changes this). A model that took
+  memory without end could exhaust the computer's memory within the time
+  limit, and the kernel would then stop one of the user's programs; now its
+  allocation fails and the project fails `build`. DuckDB is told to keep
+  within a quarter of the limit, so a large query writes part of its work
+  to disk instead.
 - The gate stops each dbt build that is still running after 20 minutes
   (`python -m tenx.gate --build-timeout SECONDS` changes this) and fails the
   project. A model that never finished held the gate, and a graph run with

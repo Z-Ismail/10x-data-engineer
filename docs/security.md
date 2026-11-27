@@ -65,6 +65,17 @@ Each build runs in its own process group and is stopped after 20 minutes
 the run; whatever a build leaves running is killed when it ends, and in the
 sandbox nothing survives bubblewrap. The tests stop real builds whose Python
 model sleeps and starts another process, both with and without the sandbox.
+Each build also starts with a limit on the memory it can address
+(`RLIMIT_AS`): half the computer's memory, at least 4 GiB
+(`--build-memory GIB`). Every process the build starts inherits it, inside
+the sandbox too, and shared memory counts, so an allocation past it fails
+inside the build (a Python model gets `MemoryError`, DuckDB an out-of-memory
+error) and the project fails `build`, rather than the computer running out
+of memory and its out-of-memory killer stopping one of your programs.
+DuckDB is told to keep within a quarter of the limit, so a large query
+writes part of its work to disk instead of reaching it. The tests build a
+real project whose Python model asks for more than the limit, in the
+sandbox.
 
 When a graph run repairs a failed project (`--repairs`), the engineer is
 told what the gate found, but never the rows the gate worked out from its
@@ -291,8 +302,12 @@ What the sandbox does not cover yet:
   filter, so a dbt Python model in the gate's build could still reach a
   socket file outside `/run` and your home folder.
 - The names of abstract sockets stay readable in `/proc/net/unix`.
-- A gate build is limited in time but not in memory or disk space, so a
-  hostile model can still fill either until the build is stopped.
+- A gate build's memory limit applies to each of its processes, not to all
+  of them together: a hostile model that starts many processes can still
+  take more in all. Its disk space is not limited, nor is the sandbox's
+  `/tmp`, which is held in memory, so a hostile model can still fill either
+  until the build is stopped. The contract's counting process is limited in
+  time but not in memory.
 - An agent can read and change its own sign-in file, as Claude Code itself
   must, and with network access could send the token out.
 
