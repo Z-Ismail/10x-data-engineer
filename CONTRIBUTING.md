@@ -26,7 +26,7 @@ must not expect files from your Claude Code config folder. The gate's builds
 and the counting process have no network and an empty `/run`, start
 through the same launcher with the Unix socket filter on x86_64 and
 aarch64, and dbt loads no `.env` file in the gate's builds. Each gate build
-can address at most half the computer's memory (at least 4 GiB), so a test
+can use at most half the computer's memory (at least 4 GiB), so a test
 project should not need more. Agents keep the network, but each
 socket in `/run` and `/var/run` is covered for them, so a stand-in must not
 expect to reach a service's socket there. An agent starts through a launcher

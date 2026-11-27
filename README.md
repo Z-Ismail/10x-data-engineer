@@ -181,7 +181,7 @@ key in your environment stays outside; name a variable in
 and see none of the system's sockets, on x86_64 and aarch64 cannot open a
 Unix socket, and dbt does not load a `.env` file for them; each is stopped
 after 20 minutes, so a model that never finishes cannot hold the run, and
-can address at most half the computer's memory (at least 4 GiB), so a model
+can use at most half the computer's memory (at least 4 GiB), so a model
 that takes memory without end fails its build rather than the computer.
 The agents keep network access, which Claude Code needs, but not
 the system's sockets (such as Docker's), except those that answer name

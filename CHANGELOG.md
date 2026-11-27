@@ -6,8 +6,8 @@ Notable changes to this project.
 
 ### Security
 
-- Each dbt build the gate runs, and every process it starts, can address at
-  most half the computer's memory, at least 4 GiB
+- Each dbt build the gate runs, and every process it starts, can use at most
+  half the computer's memory, at least 4 GiB
   (`python -m tenx.gate --build-memory GIB` changes this). A model that took
   memory without end could exhaust the computer's memory within the time
   limit, and the kernel would then stop one of the user's programs; now its

@@ -65,11 +65,11 @@ Each build runs in its own process group and is stopped after 20 minutes
 the run; whatever a build leaves running is killed when it ends, and in the
 sandbox nothing survives bubblewrap. The tests stop real builds whose Python
 model sleeps and starts another process, both with and without the sandbox.
-Each build also starts with a limit on the memory it can address
-(`RLIMIT_AS`): half the computer's memory, at least 4 GiB
-(`--build-memory GIB`). Every process the build starts inherits it, inside
-the sandbox too, and shared memory counts, so an allocation past it fails
-inside the build (a Python model gets `MemoryError`, DuckDB an out-of-memory
+Each build also starts with a limit on the private memory it can use
+(`RLIMIT_DATA`: its heap, anonymous mappings and thread stacks): half the
+computer's memory, at least 4 GiB (`--build-memory GIB`). Every process the
+build starts inherits it, inside the sandbox too, so an allocation past it
+fails inside the build (a Python model gets `MemoryError`, DuckDB an out-of-memory
 error) and the project fails `build`, rather than the computer running out
 of memory and its out-of-memory killer stopping one of your programs.
 DuckDB is told to keep within a quarter of the limit, so a large query
@@ -304,7 +304,9 @@ What the sandbox does not cover yet:
 - The names of abstract sockets stay readable in `/proc/net/unix`.
 - A gate build's memory limit applies to each of its processes, not to all
   of them together: a hostile model that starts many processes can still
-  take more in all. Its disk space is not limited, nor is the sandbox's
+  take more in all. Nor does it count shared memory (an address-space limit
+  would, but fails ordinary builds on computers with many processors). Its
+  disk space is not limited, nor is the sandbox's
   `/tmp`, which is held in memory, so a hostile model can still fill either
   until the build is stopped. The contract's counting process is limited in
   time but not in memory.
