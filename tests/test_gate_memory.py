@@ -1,7 +1,7 @@
 """Tests for the memory limit on the gate's dbt builds.
 
 A project's model can take memory without end. Each build starts with a
-limit on the memory it can address, which everything it starts inherits,
+limit on the private memory it can use, which everything it starts inherits,
 in the sandbox as well, so an allocation past it fails inside the build
 rather than taking the computer's memory.
 
@@ -43,11 +43,11 @@ DECLARATION = FIXTURES / "demo_gate.json"
 MIB = 2**20
 # Small enough to reach quickly, large enough for Python to start in.
 CAP = 1 * GIB
-# Prints the address-space limits of a process the build started.
+# Prints the data-memory limits of a process the build started.
 CHILD_LIMITS = (
     "import subprocess, sys; "
     "subprocess.run([sys.executable, '-c', "
-    "'import resource; print(*resource.getrlimit(resource.RLIMIT_AS))'], check=True)"
+    "'import resource; print(*resource.getrlimit(resource.RLIMIT_DATA))'], check=True)"
 )
 
 
@@ -86,12 +86,21 @@ class LimitedBuildTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("MemoryError", output)
 
-    def test_shared_memory_counts_towards_the_limit(self):
-        # Not counted by RLIMIT_DATA, which covers private mappings only.
-        script = f"import mmap; mmap.mmap(-1, {2 * CAP}, flags=mmap.MAP_SHARED)"
+    def test_a_private_mapping_past_the_limit_fails(self):
+        script = f"import mmap; mmap.mmap(-1, {2 * CAP}, flags=mmap.MAP_PRIVATE)"
         code, output = self.run_python(script)
         self.assertEqual(code, 1)
         self.assertIn("Cannot allocate memory", output)
+
+    def test_address_space_reserved_but_not_writable_does_not_count(self):
+        # As Python, dbt and DuckDB reserve it, more with each processor.
+        script = (
+            "import mmap; "
+            f"m = mmap.mmap(-1, {4 * CAP}, flags=mmap.MAP_PRIVATE, prot=0); "
+            "print(len(m))"
+        )
+        code, output = self.run_python(script)
+        self.assertEqual((code, output), (0, f"{4 * CAP}\n"))
 
     def test_an_allocation_under_the_limit_succeeds(self):
         code, output = self.run_python(f"print(len(bytearray({64 * MIB})))")
@@ -99,7 +108,7 @@ class LimitedBuildTest(unittest.TestCase):
 
     def test_without_a_limit_the_build_keeps_the_callers(self):
         code, output = self.run_python(CHILD_LIMITS, memory=None)
-        expected = [str(value) for value in resource.getrlimit(resource.RLIMIT_AS)]
+        expected = [str(value) for value in resource.getrlimit(resource.RLIMIT_DATA)]
         self.assertEqual((code, output.split()), (0, expected))
 
     def test_a_lower_hard_limit_already_set_is_kept(self):
@@ -107,7 +116,7 @@ class LimitedBuildTest(unittest.TestCase):
         command = limited([sys.executable, "-c", CHILD_LIMITS], 2 * CAP)
         script = (
             "import os, resource, sys; "
-            f"resource.setrlimit(resource.RLIMIT_AS, ({lower}, {lower})); "
+            f"resource.setrlimit(resource.RLIMIT_DATA, ({lower}, {lower})); "
             f"os.execv(sys.executable, {command!r})"
         )
         code, output = self.run_python(script, memory=None)
@@ -137,7 +146,7 @@ def model(dbt, session):
     return session.sql("select 1 as x")
 """
 # Sorting this many random numbers needs more memory than DuckDB has under a
-# 3 GiB build limit unless it writes part of the work to disk.
+# 2 GiB build limit unless it writes part of the work to disk.
 LARGE_SORT = "select range as x, random() as r from range(40000000) order by r"
 
 
@@ -186,7 +195,7 @@ class RealBuildTest(unittest.TestCase):
     def test_a_large_sort_is_written_to_disk_within_the_limit(self):
         self.add_model("large_sort.sql", LARGE_SORT)
         code, results, output = build_project(
-            self.project, self.raw, self.root / "work", sandbox=default_sandbox(), memory=3 * GIB
+            self.project, self.raw, self.root / "work", sandbox=default_sandbox(), memory=2 * GIB
         )
         self.assertEqual(code, 0, output[-2000:])
         statuses = {result["unique_id"]: result["status"] for result in results["results"]}

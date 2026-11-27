@@ -78,7 +78,7 @@ Usage:
 
 Each build is stopped after 20 minutes, or after --build-timeout SECONDS,
 and a stopped build fails the project. Each build, and every process it
-starts, can address at most half the computer's memory (at least 4 GiB), or
+starts, can use at most half the computer's memory (at least 4 GiB), or
 --build-memory GIB; past that a model fails rather than the computer.
 
 The command builds in a sandbox (bubblewrap, Linux) and refuses to run where
@@ -152,27 +152,30 @@ BUILD_TIMEOUT_SECONDS = 20 * 60.0
 OUTPUT_LIMIT = 256 * 1024
 # How long the gate waits for a stopped build's processes to exit.
 GROUP_EXIT_SECONDS = 10.0
-# How much memory one dbt build may address: half the computer's memory, so
-# a model that takes memory without end fails the build rather than the
-# computer, and never less than this, which builds need however small the
-# computer (Python, dbt and DuckDB reserve far more than they use).
+# How much memory one dbt build may use: half the computer's memory, so a
+# model that takes memory without end fails the build rather than the
+# computer, and never less than this, so builds work on a small computer.
 GIB = 2**30
 BUILD_MEMORY_FLOOR = 4 * GIB
 # DuckDB's own memory limit, as a share of the build's: past it DuckDB
 # writes its work to disk rather than failing at the build's limit, and it
 # still needs room outside it (its limit covers only its buffer manager).
 DUCKDB_SHARE = 4
-# Started in front of a build: lower the address-space limit, then become
-# the build. Every process it starts inherits the limit, inside a sandbox
-# too. A lower hard limit the user already has is kept.
+# Started in front of a build: lower the limit on its private writable
+# memory (RLIMIT_DATA: heap, anonymous mappings and thread stacks), then
+# become the build. Every process it starts inherits the limit, inside a
+# sandbox too. Not the address space (RLIMIT_AS): Python, dbt and DuckDB
+# reserve far more of it than they use, more with each processor, so a limit
+# on it fails ordinary builds on a computer with many processors. A lower
+# hard limit the user already has is kept.
 MEMORY_LIMITER = """\
 import os, resource, sys
 
 limit = int(sys.argv[1])
-hard = resource.getrlimit(resource.RLIMIT_AS)[1]
+hard = resource.getrlimit(resource.RLIMIT_DATA)[1]
 if hard != resource.RLIM_INFINITY:
     limit = min(limit, hard)
-resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+resource.setrlimit(resource.RLIMIT_DATA, (limit, limit))
 os.execvp(sys.argv[2], sys.argv[2:])
 """
 EXAMPLES = 3
@@ -1218,11 +1221,12 @@ def build_project(
     project and the raw files read-only, can write only workdir, never
     sees the ``hidden`` paths and has no network. A build still running
     after ``timeout`` seconds is stopped, with every process it started.
-    The build and each process it starts can address at most ``memory``
-    bytes (by default half the computer's memory, at least 4 GiB), and
-    DuckDB is told to keep within a quarter of that. Returns the exit
-    status (None for a stopped build), the parsed ``run_results.json`` if
-    dbt wrote one in time, and the end of what dbt printed.
+    The build and each process it starts can use at most ``memory`` bytes
+    of private memory (by default half the computer's memory, at least
+    4 GiB), and DuckDB is told to keep within a quarter of that. Returns
+    the exit status (None for a stopped build), the parsed
+    ``run_results.json`` if dbt wrote one in time, and the end of what dbt
+    printed.
     """
     if not dbt_installed():
         raise GateError(
@@ -1306,7 +1310,7 @@ def build_memory() -> int:
 
 
 def limited(command: list[str], memory: int) -> list[str]:
-    """``command`` started with at most ``memory`` bytes of address space."""
+    """``command`` started with at most ``memory`` bytes of private writable memory."""
     python = os.path.normpath(os.path.abspath(sys.executable))
     return [python, "-I", "-c", MEMORY_LIMITER, str(int(memory)), *command]
 
@@ -1324,8 +1328,9 @@ def _build(
     build started and left running would keep a pipe open, and the gate
     would wait for it however long it ran. When the build ends, or is
     stopped at ``timeout``, whatever it left in its group is killed. With
-    ``memory``, the build and everything it starts can each address at most
-    that many bytes; an allocation past it fails inside the build.
+    ``memory``, the build and everything it starts can each use at most
+    that many bytes of private memory; an allocation past it fails inside
+    the build.
     """
     if memory is not None:
         command = limited(command, memory)
@@ -1634,7 +1639,7 @@ def main(argv: list[str] | None = None) -> int:
         "--build-memory",
         type=_gibibytes,
         metavar="GIB",
-        help="memory a dbt build and each process it starts may address, in GiB; a model "
+        help="memory a dbt build and each process it starts may use, in GiB; a model "
         "that needs more fails (default: half this computer's memory, at least "
         f"{BUILD_MEMORY_FLOOR // GIB})",
     )
