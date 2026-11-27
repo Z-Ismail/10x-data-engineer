@@ -150,6 +150,25 @@ BUILD_TIMEOUT_SECONDS = 20 * 60.0
 OUTPUT_LIMIT = 256 * 1024
 # How long the gate waits for a stopped build's processes to exit.
 GROUP_EXIT_SECONDS = 10.0
+# How much memory one dbt build may address: half the computer's memory, so
+# a model that takes memory without end fails the build rather than the
+# computer, and never less than this, which builds need however small the
+# computer (Python, dbt and DuckDB reserve far more than they use).
+GIB = 2**30
+BUILD_MEMORY_FLOOR = 4 * GIB
+# Started in front of a build: lower the address-space limit, then become
+# the build. Every process it starts inherits the limit, inside a sandbox
+# too. A lower hard limit the user already has is kept.
+MEMORY_LIMITER = """\
+import os, resource, sys
+
+limit = int(sys.argv[1])
+hard = resource.getrlimit(resource.RLIMIT_AS)[1]
+if hard != resource.RLIM_INFINITY:
+    limit = min(limit, hard)
+resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
 EXAMPLES = 3
 MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals", "expected"}
 EXCLUSION_FIELDS = {"name", "where", "duplicate_rows"}
@@ -1264,16 +1283,39 @@ def build_project(
     return code, run_results, output
 
 
+def build_memory() -> int:
+    """The default limit on a build's memory, in bytes: half the computer's, at least 4 GiB."""
+    try:
+        physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        physical = 0
+    return max(BUILD_MEMORY_FLOOR, physical // 2)
+
+
+def limited(command: list[str], memory: int) -> list[str]:
+    """``command`` started with at most ``memory`` bytes of address space."""
+    python = os.path.normpath(os.path.abspath(sys.executable))
+    return [python, "-I", "-c", MEMORY_LIMITER, str(int(memory)), *command]
+
+
 def _build(
-    command: list[str], cwd: Path, env: dict[str, str], timeout: float
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+    memory: int | None = None,
 ) -> tuple[int | None, str]:
     """Run a build in its own process group; stop the group at the end.
 
     dbt's output goes to an unnamed file rather than a pipe: a process the
     build started and left running would keep a pipe open, and the gate
     would wait for it however long it ran. When the build ends, or is
-    stopped at ``timeout``, whatever it left in its group is killed.
+    stopped at ``timeout``, whatever it left in its group is killed. With
+    ``memory``, the build and everything it starts can each address at most
+    that many bytes; an allocation past it fails inside the build.
     """
+    if memory is not None:
+        command = limited(command, memory)
     with tempfile.TemporaryFile() as out:
         process = subprocess.Popen(
             command,
