@@ -169,6 +169,13 @@ then skipped. A process a build starts and leaves running is stopped when
 the build ends, and only the last 256 KiB of what a build prints is read
 back. Graph runs use the 20-minute limit.
 
+Each build, and every process it starts, can use at most half the
+computer's memory as private memory, and never less than 4 GiB
+(`--build-memory GIB` changes this); an allocation past that fails inside the build, so the model fails
+and with it the `build` check. DuckDB's own memory limit is set to a quarter
+of that in the profile the gate writes, so a large query writes part of its
+work to disk rather than failing. Graph runs use the default.
+
 What to expect is declared in a JSON file that is kept outside the dbt
 project, so the checks cannot be edited by whoever writes the models:
 

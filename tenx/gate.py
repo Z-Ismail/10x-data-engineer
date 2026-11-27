@@ -77,7 +77,9 @@ Usage:
     python -m tenx.gate path/to/project --raw demo/data --checks gate.json
 
 Each build is stopped after 20 minutes, or after --build-timeout SECONDS,
-and a stopped build fails the project.
+and a stopped build fails the project. Each build, and every process it
+starts, can use at most half the computer's memory (at least 4 GiB), or
+--build-memory GIB; past that a model fails rather than the computer.
 
 The command builds in a sandbox (bubblewrap, Linux) and refuses to run where
 none can be set up, unless given --unisolated.
@@ -150,6 +152,32 @@ BUILD_TIMEOUT_SECONDS = 20 * 60.0
 OUTPUT_LIMIT = 256 * 1024
 # How long the gate waits for a stopped build's processes to exit.
 GROUP_EXIT_SECONDS = 10.0
+# How much memory one dbt build may use: half the computer's memory, so a
+# model that takes memory without end fails the build rather than the
+# computer, and never less than this, so builds work on a small computer.
+GIB = 2**30
+BUILD_MEMORY_FLOOR = 4 * GIB
+# DuckDB's own memory limit, as a share of the build's: past it DuckDB
+# writes its work to disk rather than failing at the build's limit, and it
+# still needs room outside it (its limit covers only its buffer manager).
+DUCKDB_SHARE = 4
+# Started in front of a build: lower the limit on its private writable
+# memory (RLIMIT_DATA: heap, anonymous mappings and thread stacks), then
+# become the build. Every process it starts inherits the limit, inside a
+# sandbox too. Not the address space (RLIMIT_AS): Python, dbt and DuckDB
+# reserve far more of it than they use, more with each processor, so a limit
+# on it fails ordinary builds on a computer with many processors. A lower
+# hard limit the user already has is kept.
+MEMORY_LIMITER = """\
+import os, resource, sys
+
+limit = int(sys.argv[1])
+hard = resource.getrlimit(resource.RLIMIT_DATA)[1]
+if hard != resource.RLIM_INFINITY:
+    limit = min(limit, hard)
+resource.setrlimit(resource.RLIMIT_DATA, (limit, limit))
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
 EXAMPLES = 3
 MODEL_FIELDS = {"name", "key", "source", "exclusions", "totals", "expected"}
 EXCLUSION_FIELDS = {"name", "where", "duplicate_rows"}
@@ -1183,6 +1211,7 @@ def build_project(
     sandbox: Sandbox | None = None,
     hidden: tuple[Path, ...] = (),
     timeout: float = BUILD_TIMEOUT_SECONDS,
+    memory: int | None = None,
 ) -> tuple[int | None, dict | None, str]:
     """Run ``dbt build`` on the project into a new database under workdir.
 
@@ -1192,7 +1221,10 @@ def build_project(
     project and the raw files read-only, can write only workdir, never
     sees the ``hidden`` paths and has no network. A build still running
     after ``timeout`` seconds is stopped, with every process it started.
-    Returns the exit status (None for a stopped build), the parsed
+    The build and each process it starts can use at most ``memory`` bytes
+    of private memory (by default half the computer's memory, at least
+    4 GiB), and DuckDB is told to keep within a quarter of that. Returns
+    the exit status (None for a stopped build), the parsed
     ``run_results.json`` if dbt wrote one in time, and the end of what dbt
     printed.
     """
@@ -1200,6 +1232,7 @@ def build_project(
         raise GateError(
             'dbt is not installed; install it with: pip install "dbt-core~=1.12" "dbt-duckdb~=1.11"'
         )
+    memory = build_memory() if memory is None else memory
     profiles = workdir / "profiles"
     profiles.mkdir(parents=True)
     database = workdir / database_file
@@ -1210,7 +1243,9 @@ def build_project(
         "    gate:\n"
         "      type: duckdb\n"
         f"      path: {json.dumps(str(database))}\n"
-        "      threads: 1\n",
+        "      threads: 1\n"
+        "      settings:\n"
+        f"        memory_limit: '{memory // DUCKDB_SHARE // 2**20}MiB'\n",
         encoding="utf-8",
     )
     target = workdir / TARGET_DIR
@@ -1253,6 +1288,7 @@ def build_project(
         # variable it is given through env_var.
         environment(sandbox) | BUILD_ENVIRONMENT,
         timeout,
+        memory,
     )
     run_results = None
     results_file = target / "run_results.json"
@@ -1264,16 +1300,40 @@ def build_project(
     return code, run_results, output
 
 
+def build_memory() -> int:
+    """The default limit on a build's memory, in bytes: half the computer's, at least 4 GiB."""
+    try:
+        physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        physical = 0
+    return max(BUILD_MEMORY_FLOOR, physical // 2)
+
+
+def limited(command: list[str], memory: int) -> list[str]:
+    """``command`` started with at most ``memory`` bytes of private writable memory."""
+    python = os.path.normpath(os.path.abspath(sys.executable))
+    return [python, "-I", "-c", MEMORY_LIMITER, str(int(memory)), *command]
+
+
 def _build(
-    command: list[str], cwd: Path, env: dict[str, str], timeout: float
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+    memory: int | None = None,
 ) -> tuple[int | None, str]:
     """Run a build in its own process group; stop the group at the end.
 
     dbt's output goes to an unnamed file rather than a pipe: a process the
     build started and left running would keep a pipe open, and the gate
     would wait for it however long it ran. When the build ends, or is
-    stopped at ``timeout``, whatever it left in its group is killed.
+    stopped at ``timeout``, whatever it left in its group is killed. With
+    ``memory``, the build and everything it starts can each use at most
+    that many bytes of private memory; an allocation past it fails inside
+    the build.
     """
+    if memory is not None:
+        command = limited(command, memory)
     with tempfile.TemporaryFile() as out:
         process = subprocess.Popen(
             command,
@@ -1357,6 +1417,7 @@ def _run(
     sandbox: Sandbox | None,
     hidden: tuple[Path, ...],
     timeout: float = BUILD_TIMEOUT_SECONDS,
+    memory: int | None = None,
 ) -> list[Result]:
     files = source_files(raw)
     for model in models:
@@ -1381,7 +1442,7 @@ def _run(
     # Neither build may see the rows it is compared with.
     hidden = (*hidden, workdir / EXPECTED_FILE)
     exit_code, run_results, output = build_project(
-        project, raw, workdir, sandbox=sandbox, hidden=hidden, timeout=timeout
+        project, raw, workdir, sandbox=sandbox, hidden=hidden, timeout=timeout, memory=memory
     )
     results, relations = check_build(exit_code, run_results, models, output)
 
@@ -1429,6 +1490,7 @@ def _run(
             sandbox=sandbox,
             hidden=(*hidden, workdir / DATABASE_FILE),
             timeout=timeout,
+            memory=memory,
         )
         results += check_repeat_build(workdir, first, *second)
     else:
@@ -1452,6 +1514,7 @@ def run_gate(
     sandbox: Sandbox | None = None,
     hidden: tuple[Path, ...] = (),
     timeout: float = BUILD_TIMEOUT_SECONDS,
+    memory: int | None = None,
 ) -> list[Result]:
     """Build the project from an empty database and run every check.
 
@@ -1460,7 +1523,8 @@ def run_gate(
     With a sandbox, each build runs in it and cannot see the declaration,
     the expected rows or the ``hidden`` paths; without one, the builds can
     read and change any file the user can. Each build is stopped if it is
-    still running after ``timeout`` seconds.
+    still running after ``timeout`` seconds, and limited to ``memory`` bytes
+    (see build_project).
     """
     project = Path(project).resolve()
     raw = Path(raw).resolve()
@@ -1470,12 +1534,14 @@ def run_gate(
         raise GateError(f"{project} is not a dbt project: it has no dbt_project.yml")
     if workdir is None:
         with tempfile.TemporaryDirectory(prefix="tenx-gate-") as temporary:
-            return _run(project, raw, models, Path(temporary).resolve(), sandbox, hidden, timeout)
+            return _run(
+                project, raw, models, Path(temporary).resolve(), sandbox, hidden, timeout, memory
+            )
     workdir = Path(workdir).resolve()
     if workdir.exists() and (not workdir.is_dir() or any(workdir.iterdir())):
         raise GateError(f"{workdir} must be empty, so that the build starts from nothing")
     workdir.mkdir(parents=True, exist_ok=True)
-    return _run(project, raw, models, workdir, sandbox, hidden, timeout)
+    return _run(project, raw, models, workdir, sandbox, hidden, timeout, memory)
 
 
 def passed(results: list[Result]) -> bool:
@@ -1532,6 +1598,17 @@ def _seconds(value: str) -> float:
     return seconds
 
 
+def _gibibytes(value: str) -> int:
+    """A memory limit given on the command line in GiB: a positive, finite number, as bytes."""
+    try:
+        gibibytes = float(value)
+    except ValueError:
+        gibibytes = math.nan
+    if not math.isfinite(gibibytes) or gibibytes <= 0:
+        raise argparse.ArgumentTypeError(f"not a positive number of GiB: {value!r}")
+    return int(gibibytes * GIB)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("project", type=Path, help="the dbt project to check")
@@ -1558,6 +1635,14 @@ def main(argv: list[str] | None = None) -> int:
         help="stop a dbt build still running after this many seconds and fail the project "
         f"(default: {BUILD_TIMEOUT_SECONDS:g})",
     )
+    parser.add_argument(
+        "--build-memory",
+        type=_gibibytes,
+        metavar="GIB",
+        help="memory a dbt build and each process it starts may use, in GiB; a model "
+        "that needs more fails (default: half this computer's memory, at least "
+        f"{BUILD_MEMORY_FLOOR // GIB})",
+    )
     args = parser.parse_args(argv)
     try:
         sandbox = default_sandbox(unisolated=args.unisolated)
@@ -1574,6 +1659,7 @@ def main(argv: list[str] | None = None) -> int:
             args.workdir,
             sandbox,
             timeout=args.build_timeout,
+            memory=args.build_memory,
         )
     except GateError as error:
         print(f"error: {error}", file=sys.stderr)
