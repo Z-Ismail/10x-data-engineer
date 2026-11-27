@@ -9,12 +9,14 @@ The sandboxed tests are skipped where bubblewrap cannot run, unless
 TENX_REQUIRE_SANDBOX is set, as it is in CI; then they fail instead.
 """
 
+import io
 import os
 import resource
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -30,6 +32,7 @@ from tenx.gate import (
     check_build,
     limited,
     load_declaration,
+    main,
     run_gate,
 )
 from tenx.sandbox import Mounts, SandboxError, default_sandbox
@@ -210,6 +213,50 @@ class DefaultLimitTest(unittest.TestCase):
     def test_the_floor_when_the_memory_cannot_be_read(self):
         with mock.patch("tenx.gate.os.sysconf", side_effect=ValueError("unknown")):
             self.assertEqual(build_memory(), BUILD_MEMORY_FLOOR)
+
+
+class CommandLineTest(unittest.TestCase):
+    """--build-memory sets the limit in GiB; without it the gate's default applies."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.raw = self.root / "data"
+        generate(11, 20, self.raw, self.root / "answers")
+
+    def main(self, project: Path, *flags: str) -> tuple[int, str]:
+        arguments = [str(project), "--raw", str(self.raw), "--checks", str(DECLARATION)]
+        with redirect_stdout(io.StringIO()) as printed, redirect_stderr(io.StringIO()):
+            code = main([*arguments, "--unisolated", *flags])
+        return code, printed.getvalue()
+
+    def test_the_limit_reaches_the_gate(self):
+        with mock.patch("tenx.gate.run_gate", return_value=[]) as gate:
+            self.main(PROJECT)
+            self.main(PROJECT, "--build-memory", "6")
+            self.main(PROJECT, "--build-memory", "2.5")
+        limits = [call.kwargs["memory"] for call in gate.call_args_list]
+        self.assertEqual(limits, [None, 6 * 1024**3, 2684354560])
+
+    def test_a_limit_that_is_not_a_positive_number_is_refused(self):
+        for value in ("0", "-1", "nan", "inf", "lots", ""):
+            with self.subTest(value=value), mock.patch("tenx.gate.run_gate") as gate:
+                with self.assertRaises(SystemExit) as stopped:
+                    self.main(PROJECT, "--build-memory", value)
+                self.assertEqual(stopped.exception.code, 2)
+                gate.assert_not_called()
+
+    def test_a_project_past_the_limit_given_fails(self):
+        project = self.root / "project"
+        shutil.copytree(PROJECT, project)
+        (project / "models" / "greedy.py").write_text(
+            GREEDY_MODEL.format(size=4 * GIB), encoding="utf-8"
+        )
+        code, printed = self.main(project, "--build-memory", "2")
+        self.assertEqual(code, 1, printed)
+        self.assertTrue(printed.startswith("gate: FAIL"), printed)
+        self.assertIn("model.demo.greedy: error", printed)
 
 
 if __name__ == "__main__":

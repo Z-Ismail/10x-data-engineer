@@ -77,7 +77,9 @@ Usage:
     python -m tenx.gate path/to/project --raw demo/data --checks gate.json
 
 Each build is stopped after 20 minutes, or after --build-timeout SECONDS,
-and a stopped build fails the project.
+and a stopped build fails the project. Each build, and every process it
+starts, can address at most half the computer's memory (at least 4 GiB), or
+--build-memory GIB; past that a model fails rather than the computer.
 
 The command builds in a sandbox (bubblewrap, Linux) and refuses to run where
 none can be set up, unless given --unisolated.
@@ -1591,6 +1593,17 @@ def _seconds(value: str) -> float:
     return seconds
 
 
+def _gibibytes(value: str) -> int:
+    """A memory limit given on the command line in GiB: a positive, finite number, as bytes."""
+    try:
+        gibibytes = float(value)
+    except ValueError:
+        gibibytes = math.nan
+    if not math.isfinite(gibibytes) or gibibytes <= 0:
+        raise argparse.ArgumentTypeError(f"not a positive number of GiB: {value!r}")
+    return int(gibibytes * GIB)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("project", type=Path, help="the dbt project to check")
@@ -1617,6 +1630,14 @@ def main(argv: list[str] | None = None) -> int:
         help="stop a dbt build still running after this many seconds and fail the project "
         f"(default: {BUILD_TIMEOUT_SECONDS:g})",
     )
+    parser.add_argument(
+        "--build-memory",
+        type=_gibibytes,
+        metavar="GIB",
+        help="memory a dbt build and each process it starts may address, in GiB; a model "
+        "that needs more fails (default: half this computer's memory, at least "
+        f"{BUILD_MEMORY_FLOOR // GIB})",
+    )
     args = parser.parse_args(argv)
     try:
         sandbox = default_sandbox(unisolated=args.unisolated)
@@ -1633,6 +1654,7 @@ def main(argv: list[str] | None = None) -> int:
             args.workdir,
             sandbox,
             timeout=args.build_timeout,
+            memory=args.build_memory,
         )
     except GateError as error:
         print(f"error: {error}", file=sys.stderr)
