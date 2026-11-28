@@ -26,6 +26,16 @@ from tenx.ports import KeptRows
 from tenx.sandbox import Unisolated, default_sandbox
 
 CAP = 1 * GIB
+# One text value of 1.5 billion characters: DuckDB builds it outside its own
+# memory limit, so only the process's limit stops it (about 2.9 GiB without
+# one, measured), yet small enough not to exhaust a test computer if the
+# limit were missing.
+GREEDY_RULE = "length(repeat('x', 1500000000)) > 0"
+# Finding 40 million distinct random numbers needs more memory than DuckDB
+# has under the cap unless it writes part of the work to disk.
+LARGE_DISTINCT_RULE = (
+    "(SELECT count(*) FROM (SELECT DISTINCT (random() * 1e12)::BIGINT FROM range(40000000))) > 0"
+)
 # Stands in for the counting script: reports, as a failed count, the limit
 # on its own data memory, the limit a process it starts has, and the memory
 # DuckDB was to be told.
@@ -81,6 +91,22 @@ class SandboxLimitTest(CountCase):
     def test_the_contract_is_counted_under_the_default_limit(self):
         counts = count_kept(CONTRACT, self.raw, self.work, default_sandbox())
         self.assertEqual(counts["stg_shop__orders"], KeptRows(4, (("test_mode", 1),), 3))
+
+    def test_a_rule_that_takes_too_much_memory_is_refused(self):
+        with self.assertRaisesRegex(
+            ContractError,
+            r"^model stg_shop__orders: could not count the rows of shop\.orders: "
+            r"Out of Memory Error",
+        ):
+            count_kept(
+                self.with_rule(GREEDY_RULE), self.raw, self.work, default_sandbox(), memory=CAP
+            )
+
+    def test_a_large_count_is_written_to_disk_within_the_limit(self):
+        counts = count_kept(
+            self.with_rule(LARGE_DISTINCT_RULE), self.raw, self.work, default_sandbox(), memory=CAP
+        )
+        self.assertEqual(counts["stg_shop__orders"], KeptRows(4, (("test_mode", 4),), 0))
 
 
 if __name__ == "__main__":
