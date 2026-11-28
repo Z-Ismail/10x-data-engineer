@@ -31,10 +31,13 @@ CAP = 1 * GIB
 # one, measured), yet small enough not to exhaust a test computer if the
 # limit were missing.
 GREEDY_RULE = "length(repeat('x', 1500000000)) > 0"
-# Finding 40 million distinct random numbers needs more memory than DuckDB
-# has under the cap unless it writes part of the work to disk.
+# Finding 80 million distinct random numbers needs more memory than a 2 GiB
+# limit allows unless DuckDB writes part of the work to disk. At 1 GiB the
+# room DuckDB needs outside its own limit ran out on a computer with four
+# processors.
+SPILL_CAP = 2 * GIB
 LARGE_DISTINCT_RULE = (
-    "(SELECT count(*) FROM (SELECT DISTINCT (random() * 1e12)::BIGINT FROM range(40000000))) > 0"
+    "(SELECT count(*) FROM (SELECT DISTINCT (random() * 1e12)::BIGINT FROM range(80000000))) > 0"
 )
 # Stands in for the counting script: reports, as a failed count, the limit
 # on its own data memory, the limit a process it starts has, and the memory
@@ -104,7 +107,11 @@ class SandboxLimitTest(CountCase):
 
     def test_a_large_count_is_written_to_disk_within_the_limit(self):
         counts = count_kept(
-            self.with_rule(LARGE_DISTINCT_RULE), self.raw, self.work, default_sandbox(), memory=CAP
+            self.with_rule(LARGE_DISTINCT_RULE),
+            self.raw,
+            self.work,
+            default_sandbox(),
+            memory=SPILL_CAP,
         )
         self.assertEqual(counts["stg_shop__orders"], KeptRows(4, (("test_mode", 4),), 0))
 
