@@ -945,7 +945,8 @@ names must exist, a staging model takes columns only from its own table,
 and a rule may name no table; a money column written with its own table in
 front is kept by its name),
 then counts each rule on the raw files, in a separate process in the
-sandbox with no network (see [security](security.md)). A checked and counted contract is
+sandbox with no network and with as much memory as a gate build (see
+[security](security.md)); a rule that takes more fails the count. A checked and counted contract is
 kept as `architect/attempt-<n>/contract.json`, with what each model keeps
 of its source in `counts.json`, and written out as `SPEC.md`,
 which every engineer attempt finds in its folder; the engineer is asked to
