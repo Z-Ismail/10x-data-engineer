@@ -6,6 +6,13 @@ Notable changes to this project.
 
 ### Security
 
+- The process that counts a contract's rules on the raw files, and every
+  process it starts, can use at most as much memory as a gate build (half
+  the computer's memory, at least 4 GiB). A rule an agent wrote could take
+  the computer's memory within the five minutes the count may run; now its
+  allocation fails and the contract is refused. DuckDB is told a quarter of
+  the limit and cannot be told more, so a large count writes part of its
+  work to disk instead.
 - Each dbt build the gate runs, and every process it starts, can use at most
   half the computer's memory, at least 4 GiB
   (`python -m tenx.gate --build-memory GIB` changes this). A model that took

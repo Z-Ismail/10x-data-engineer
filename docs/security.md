@@ -92,7 +92,12 @@ are made by a separate Python process in the same sandbox: it sees the raw
 files read-only and nothing of the run, the repository or the gate's
 expectations. Inside it, DuckDB may read only the raw folder and cannot
 change its settings, each count must be a single `SELECT`, and the process
-is stopped after five minutes. The tests check that a rule which adds a
+is stopped after five minutes. The process starts with the same memory limit
+as a gate build (half the computer's memory as private memory, at least
+4 GiB), which everything it starts inherits, and DuckDB is told a quarter of
+that before its settings are locked, so a large count writes part of its work
+to disk in the process's work folder and a rule that takes memory without end
+fails its count rather than the computer. The tests check that a rule which adds a
 statement of its own, reads a file outside the raw folder or writes into it
 is refused inside the counting process; that with those guards taken out,
 the sandbox alone shows the rule an empty file and keeps the raw folder
@@ -308,8 +313,8 @@ What the sandbox does not cover yet:
   would, but fails ordinary builds on computers with many processors). Its
   disk space is not limited, nor is the sandbox's
   `/tmp`, which is held in memory, so a hostile model can still fill either
-  until the build is stopped. The contract's counting process is limited in
-  time but not in memory.
+  until the build is stopped. The same holds for the contract's counting
+  process, which has the same limit.
 - An agent can read and change its own sign-in file, as Claude Code itself
   must, and with network access could send the token out.
 
