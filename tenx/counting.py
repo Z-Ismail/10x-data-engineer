@@ -8,7 +8,10 @@ raw files read-only and nothing of the run, the repository or the
 declaration. Inside it DuckDB may read only the raw folder, cannot change
 its settings, and runs each count only if it is exactly one SELECT. A count
 that takes longer than the time limit stops the process and everything it
-started.
+started. The process and everything it starts can use only so much private
+memory, as a gate build can (``tenx.gate.limited``), and DuckDB is told a
+quarter of that and cannot be told more, so a rule that takes memory without
+end is refused rather than taking the computer's memory.
 
 The counts are made the way the gate makes them (``tenx.gate.expected_rows``):
 a row matched by two rules is charged to the first, and exact copies are
@@ -25,7 +28,15 @@ import sys
 from pathlib import Path
 
 from tenx.contract import ContractError, to_declaration
-from tenx.gate import GateError, claimed_by_filters, parse_declaration, source_files
+from tenx.gate import (
+    DUCKDB_SHARE,
+    GateError,
+    build_memory,
+    claimed_by_filters,
+    limited,
+    parse_declaration,
+    source_files,
+)
 from tenx.ports import KeptRows
 from tenx.profile import relation
 from tenx.sandbox import Mounts, Sandbox, SandboxError, Unisolated, environment, python_folders
@@ -41,6 +52,7 @@ import duckdb
 job = json.load(sys.stdin)
 con = duckdb.connect()
 con.execute("SET allowed_directories = ?", [[job["raw"]]])
+con.execute("SET memory_limit = ?", [job["duckdb_memory"]])
 con.execute("SET enable_external_access = false")
 con.execute("SET lock_configuration = true")
 counts = {}
@@ -117,8 +129,14 @@ def count_kept(
     sandbox: Sandbox | None = None,
     hidden: tuple[Path, ...] = (),
     timeout: float = TIMEOUT_SECONDS,
+    memory: int | None = None,
 ) -> dict[str, KeptRows]:
-    """For each model, its source rows, what each rule removes and what is kept."""
+    """For each model, its source rows, what each rule removes and what is kept.
+
+    The counting process can use at most ``memory`` bytes of private memory
+    (by default as much as a gate build), and DuckDB a quarter of that.
+    """
+    memory = build_memory() if memory is None else memory
     raw = Path(raw).resolve()
     queries, plan = _queries(contract, raw)
     workdir = Path(workdir).resolve()
@@ -137,10 +155,16 @@ def count_kept(
         # and the folders on a path such as ../venv/bin/python may be hidden.
         python = os.path.normpath(os.path.abspath(sys.executable))
         sandbox = sandbox or Unisolated()
-        command = sandbox.command([python, "-I", "-c", SCRIPT], seen)
+        command = limited(sandbox.command([python, "-I", "-c", SCRIPT], seen), memory)
     except SandboxError as error:
         raise ContractError(f"the rules cannot be counted apart from the run: {error}") from error
-    job = json.dumps({"raw": f"{raw}/", "queries": queries})
+    job = json.dumps(
+        {
+            "raw": f"{raw}/",
+            "queries": queries,
+            "duckdb_memory": f"{memory // DUCKDB_SHARE // 2**20}MiB",
+        }
+    )
     code, output = _run(command, job, workdir, timeout, environment(sandbox))
     try:
         answer = json.loads(output.strip().splitlines()[-1])
